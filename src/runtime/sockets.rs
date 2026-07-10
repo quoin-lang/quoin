@@ -72,6 +72,23 @@ impl Drop for NativeSocket {
 pub fn build_tcp_socket_class() -> NativeClassBuilder {
     let builder = NativeClassBuilder::new("TcpSocket", Some("Object"))
         .construct_with("use TcpSocket.connect:")
+        .class_doc(
+            "A plaintext TCP connection.\n\n\
+             `connect:'host:port'` dials out (DNS included); every read and write parks the \
+             task rather than blocking the scheduler, so thousands of sockets multiplex over \
+             one program. The socket itself is byte-level (`read:` / `readAll` / \
+             `writeAll:`); for buffering, delimiter framing, or text, hand it to \
+             `byteStream` / `stringStream` — which *consume* it. Close explicitly (or use \
+             `connect:do:`, which closes on every exit path); a collected socket's fd is \
+             reclaimed as a backstop. For an encrypted connection use `TlsSocket`; for the \
+             server side, `TcpListener`.\n\n\
+             ```\n\
+             TcpSocket.connect:'example.com:80' do:{ |sock|\n\
+                 sock.writeAll:'GET / HTTP/1.0\\r\\nHost: example.com\\r\\n\\r\\n'.asBytes\n\
+                 sock.readAll\n\
+             }\n\
+             ```",
+        )
         // TcpSocket.connect:'host:port' -> a connected socket. The caller owns it
         // (close it, or rely on the GC reap backstop). DNS is resolved internally.
         .class_method("connect:", |vm, mc, _receiver, args| {
@@ -83,6 +100,11 @@ pub fn build_tcp_socket_class() -> NativeClassBuilder {
                 other => Err(unexpected("connect:", other)),
             }
         })
+        .doc(
+            "Connect to `'host:port'` (DNS resolved internally) and answer the socket. The \
+             caller owns it: close it when done, or prefer `connect:do:`. Connection failure \
+             throws a catchable IoError.",
+        )
         // TcpSocket.connect:'host:port' do:{|s| ...} -> run the block with the socket,
         // closing it on exit (normal, throw, or cancel); returns the block's value.
         .class_method("connect:do:", |vm, mc, _receiver, args| {
@@ -97,13 +119,37 @@ pub fn build_tcp_socket_class() -> NativeClassBuilder {
             // `Gc` pulled out before a suspend would be live across it.
             let block = arg!(args, Block, 1);
             scope_socket(vm, mc, handle, block)
-        });
+        })
+        .doc(
+            "Connect, run the block with the socket, and close it on every exit path \
+             (normal, throw, or cancel); answers the block's value. The \
+             leak-proof form of `connect:`.\n\n\
+             ```\n\
+             TcpSocket.connect:'example.com:80' do:{ |sock| sock.readAll }\n\
+             ```",
+        );
     add_socket_methods(builder)
 }
 
 pub fn build_tls_socket_class() -> NativeClassBuilder {
     let builder = NativeClassBuilder::new("TlsSocket", Some("Object"))
         .construct_with("use TlsSocket.connect: / TlsSocket.wrap:host:")
+        .class_doc(
+            "A TLS-encrypted TCP connection, with the same read/write surface as \
+             `TcpSocket`.\n\n\
+             `connect:` speaks TLS from the first byte (certificate checked against the \
+             host name); `wrap:host:` upgrades an existing plaintext `TcpSocket` in place — \
+             the STARTTLS pattern — consuming it. The `insecure:` variants take a Boolean \
+             that, when true, skips certificate validation: local debugging only, the word \
+             at the call site is the warning. The `do:` forms scope the socket to a block, \
+             closing it on every exit path.\n\n\
+             ```\n\
+             TlsSocket.connect:'example.com:443' do:{ |sock|\n\
+                 sock.writeAll:'GET / HTTP/1.0\\r\\nHost: example.com\\r\\n\\r\\n'.asBytes\n\
+                 sock.readAll\n\
+             }\n\
+             ```",
+        )
         // TLS from byte zero: open a plaintext connection and immediately hand it to the
         // handshake. The bare selectors forward `insecure = false` to the canonical
         // `insecure:`-bearing form; `insecure: true` skips certificate validation (local
@@ -113,12 +159,21 @@ pub fn build_tls_socket_class() -> NativeClassBuilder {
             let (host, port) = parse_host_port(hostport.as_str())?;
             tls_connect(vm, mc, host, port, false)
         })
+        .doc(
+            "Connect to `'host:port'` speaking TLS from the first byte; the host part is \
+             also the certificate / SNI name. A failed handshake (or a certificate that \
+             doesn't validate) throws a catchable IoError.",
+        )
         .class_method("connect:insecure:", |vm, mc, _r, args| {
             let hostport = arg!(args, String, 0);
             let insecure = arg!(args, Bool, 1);
             let (host, port) = parse_host_port(hostport.as_str())?;
             tls_connect(vm, mc, host, port, insecure)
         })
+        .doc(
+            "`connect:`, with certificate validation skipped when the Boolean is true — for \
+             local debugging against self-signed certificates, never production.",
+        )
         .class_method("connect:do:", |vm, mc, _r, args| {
             let hostport = arg!(args, String, 0);
             let (host, port) = parse_host_port(hostport.as_str())?;
@@ -126,6 +181,10 @@ pub fn build_tls_socket_class() -> NativeClassBuilder {
             let block = arg!(args, Block, 1);
             scope_socket(vm, mc, handle, block)
         })
+        .doc(
+            "Connect with TLS, run the block with the socket, and close it on every exit \
+             path (normal, throw, or cancel); answers the block's value.",
+        )
         .class_method("connect:insecure:do:", |vm, mc, _r, args| {
             let hostport = arg!(args, String, 0);
             let insecure = arg!(args, Bool, 1);
@@ -134,6 +193,7 @@ pub fn build_tls_socket_class() -> NativeClassBuilder {
             let block = arg!(args, Block, 2);
             scope_socket(vm, mc, handle, block)
         })
+        .doc("The scoped (`do:`) form of `connect:insecure:`.")
         // Upgrade an already-connected TcpSocket to TLS in place (STARTTLS et al.). The
         // `host` is the certificate / SNI name (supplied explicitly — you may have
         // connected by IP or via a proxy). The TcpSocket is *consumed*; see `tls_wrap`.
@@ -142,12 +202,22 @@ pub fn build_tls_socket_class() -> NativeClassBuilder {
             let host = arg!(args, String, 1).as_str().to_string();
             tls_wrap(vm, mc, tcp, host, false)
         })
+        .doc(
+            "Upgrade an already-connected TcpSocket to TLS in place (the STARTTLS pattern). \
+             `host:` names the certificate / SNI identity — supplied explicitly because the \
+             connection may have been made by IP or via a proxy. The TcpSocket is \
+             *consumed*: it is left closed whether the handshake succeeds or not.",
+        )
         .class_method("wrap:host:insecure:", |vm, mc, _r, args| {
             let tcp = args[0];
             let host = arg!(args, String, 1).as_str().to_string();
             let insecure = arg!(args, Bool, 2);
             tls_wrap(vm, mc, tcp, host, insecure)
         })
+        .doc(
+            "`wrap:host:`, with certificate validation skipped when the Boolean is true \
+             (local debugging only).",
+        )
         .class_method("wrap:host:do:", |vm, mc, _r, args| {
             let tcp = args[0];
             let host = arg!(args, String, 1).as_str().to_string();
@@ -155,6 +225,10 @@ pub fn build_tls_socket_class() -> NativeClassBuilder {
             let block = arg!(args, Block, 2);
             scope_socket(vm, mc, handle, block)
         })
+        .doc(
+            "Upgrade a TcpSocket to TLS, run the block with the TlsSocket, and close it on \
+             every exit path; answers the block's value.",
+        )
         .class_method("wrap:host:insecure:do:", |vm, mc, _r, args| {
             let tcp = args[0];
             let host = arg!(args, String, 1).as_str().to_string();
@@ -162,7 +236,8 @@ pub fn build_tls_socket_class() -> NativeClassBuilder {
             let handle = tls_wrap(vm, mc, tcp, host, insecure)?;
             let block = arg!(args, Block, 3);
             scope_socket(vm, mc, handle, block)
-        });
+        })
+        .doc("The scoped (`do:`) form of `wrap:host:insecure:`.");
     add_socket_methods(builder)
 }
 
@@ -182,6 +257,12 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 other => Err(unexpected("read:", other)),
             }
         })
+        .doc(
+            "Up to n bytes as Bytes — one read, so possibly fewer than asked; empty Bytes \
+             means the peer closed (EOF). Parks the task until data arrives. Throws on a \
+             closed socket or an I/O error. For buffered or delimiter-framed reading, wrap \
+             the socket in `byteStream`.",
+        )
         // readAll -> read until EOF, returning all bytes as one Bytes.
         .instance_method("readAll", |vm, mc, receiver, _args| {
             let id = open_id(receiver)?;
@@ -196,6 +277,12 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             }
             Ok(vm.new_bytes(mc, all))
         })
+        .doc(
+            "Read until the peer closes, answering everything as one Bytes. Only returns \
+             once the other side signals EOF — for request/response protocols where the \
+             peer keeps the connection open, frame reads with `read:` or a `byteStream` \
+             instead.",
+        )
         // writeAll:bytes -> write all of `bytes` (complete-or-throw); returns nil.
         .typed_instance_method("writeAll:", &["Bytes"], |vm, mc, receiver, args| {
             let id = open_id(receiver)?;
@@ -206,12 +293,20 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 other => Err(unexpected("writeAll:", other)),
             }
         })
+        .doc(
+            "Write all of the Bytes to the socket — complete or throw, no short writes. \
+             Returns nil.",
+        )
         // close -> close the socket (idempotent). The fd is reaped on the next
         // scheduler turn; further ops on this socket throw.
         .instance_method("close", |vm, mc, receiver, _args| {
             reap_handle(vm, mc, receiver);
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Close the socket (idempotent — a second close is a no-op). Further operations \
+             throw. Returns nil.",
+        )
         // closed? -> whether the socket has been closed.
         .instance_method("closed?", |vm, mc, receiver, _args| {
             let closed = receiver
@@ -219,6 +314,10 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_bool(mc, closed))
         })
+        .doc(
+            "Whether the socket has been closed — including by being consumed into a stream \
+             or a TLS upgrade.",
+        )
         // byteStream -> a buffered `ByteStream` that *consumes* this socket: the fd
         // transfers to the stream and the socket is left closed (further ops throw). The
         // `ByteStream.over:` class form is equivalent.
@@ -233,6 +332,11 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             };
             Ok(crate::runtime::streams::make_byte_stream(vm, mc, id))
         })
+        .doc(
+            "A buffered ByteStream that *consumes* this socket: the connection transfers to \
+             the stream and the socket is left closed (further ops on it throw). Adds \
+             read-ahead, `peek:`, and delimiter framing (`readUntil:`) over the raw socket.",
+        )
         // stringStream -> a text `StringStream` consuming this socket directly (= a
         // `byteStream` immediately wrapped). Starts with an empty buffer.
         .instance_method("stringStream", |vm, mc, receiver, _args| {
@@ -251,6 +355,11 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 Vec::new(),
             ))
         })
+        .doc(
+            "A text StringStream that *consumes* this socket (a `byteStream` immediately \
+             wrapped): `readLine` / `eachLine:` / `writeln:` over the connection, decoding \
+             UTF-8.",
+        )
 }
 
 /// Consume a socket handle, handing its fd up to a higher layer (a `ByteStream`): read the
@@ -498,6 +607,19 @@ impl Drop for NativeListener {
 pub fn build_tcp_listener_class() -> NativeClassBuilder {
     NativeClassBuilder::new("TcpListener", Some("Object"))
         .construct_with("use TcpListener.listen:")
+        .class_doc(
+            "The server side of TCP: a socket bound to a local address, accepting incoming \
+             connections.\n\n\
+             `listen:'host:port'` binds (port 0 picks an ephemeral port — read it back with \
+             `port`); then `accept` / `acceptOnce:` / `acceptLoop:` yield each incoming \
+             connection as a `TcpSocket`. Accepting parks the task, so one program can \
+             serve many listeners and connections concurrently.\n\n\
+             ```\n\
+             var srv = TcpListener.listen:'127.0.0.1:0'\n\
+             srv.port     \"* -> the ephemeral port the OS chose\n\
+             srv.acceptLoop:{ |sock| sock.writeAll:'hi\\n'.asBytes }\n\
+             ```",
+        )
         // TcpListener.listen:'host:port' -> a bound listening socket. Port 0 binds an
         // ephemeral port; read the chosen port back with `port`.
         .class_method("listen:", |vm, mc, _r, args| {
@@ -509,11 +631,22 @@ pub fn build_tcp_listener_class() -> NativeClassBuilder {
                 other => Err(unexpected("listen:", other)),
             }
         })
+        .doc(
+            "Bind a listening socket to `'host:port'` — `'127.0.0.1:8080'` for local-only, \
+             `'0.0.0.0:8080'` for every interface, port 0 for an ephemeral port (read the \
+             chosen one back with `port`). A bind failure (port in use, privileged port) \
+             throws a catchable IoError.",
+        )
         // accept -> block until a peer connects, returning the connected TcpSocket. The
         // caller owns it (close it, scope it, or rely on the reap backstop).
         .instance_method("accept", |vm, mc, receiver, _args| {
             accept_one(vm, mc, receiver)
         })
+        .doc(
+            "Wait (parking the task) until a peer connects, answering the connected \
+             TcpSocket. The caller owns it: close it when done, or prefer `acceptOnce:` / \
+             `acceptLoop:`, which close it for you.",
+        )
         // acceptOnce:{|sock| ...} -> accept one connection, run the block with it, and
         // close it on exit (normal/throw/cancel); returns the block's value.
         .instance_method("acceptOnce:", |vm, mc, receiver, args| {
@@ -523,6 +656,10 @@ pub fn build_tcp_listener_class() -> NativeClassBuilder {
             let block = arg!(args, Block, 0);
             scope_socket(vm, mc, conn, block)
         })
+        .doc(
+            "Accept one connection, run the block with it, and close it on every exit path \
+             (normal, throw, or cancel); answers the block's value.",
+        )
         // acceptLoop:{|sock| ...} -> accept connections forever, running the block on each
         // (each closed after the block). The caller breaks out with a non-local return
         // (^^) — which, like a throw or cancel, propagates straight through this loop.
@@ -530,6 +667,12 @@ pub fn build_tcp_listener_class() -> NativeClassBuilder {
             let block = arg!(args, Block, 0);
             accept_loop(vm, mc, receiver, block)
         })
+        .doc(
+            "Accept connections forever, running the block on each; every socket is closed \
+             after its block, on every exit path. The loop ends only by a non-local return \
+             (`^^`), a throw, or task cancellation propagating out of the block — the \
+             classic serve-forever shape.",
+        )
         // port -> the bound local port (useful after a `:0` ephemeral bind).
         .instance_method("port", |vm, mc, receiver, _args| {
             let port = receiver
@@ -537,16 +680,25 @@ pub fn build_tcp_listener_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_int(mc, port as i64))
         })
+        .doc(
+            "The actually-bound local port (Integer) — how you learn the port after an \
+             ephemeral `:0` bind.",
+        )
         .instance_method("close", |vm, mc, receiver, _args| {
             reap_listener_handle(vm, mc, receiver);
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Stop listening and close the socket (idempotent); further accepts throw. \
+             Already-accepted connections live on independently. Returns nil.",
+        )
         .instance_method("closed?", |vm, mc, receiver, _args| {
             let closed = receiver
                 .with_native_state::<NativeListener, _, _>(|l| l.is_closed())
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_bool(mc, closed))
         })
+        .doc("Whether the listener has been closed.")
 }
 
 /// Accept one connection from the listener `receiver`, returning the connected `TcpSocket`.

@@ -164,6 +164,8 @@ pub(crate) type ReplArena = Arena<Rootable![VmState<'_>]>;
 // the public API (`VmRunner` / `VmRunnerOptions` / `register_builtins`) stays at `crate::runner::…`.
 #[path = "runner_dap.rs"]
 mod runner_dap;
+#[path = "runner_doc.rs"]
+mod runner_doc;
 #[path = "runner_driver.rs"]
 mod runner_driver;
 #[path = "runner_repl.rs"]
@@ -202,6 +204,12 @@ pub struct VmRunnerOptions {
     pub fmt_dry_run: bool,
     /// `qn fmt --diff`: show a unified diff of what would change, without writing.
     pub fmt_diff: bool,
+    /// `qn doc --json`: also emit the raw model as `model.json`.
+    pub doc_json: bool,
+    /// `qn doc --coverage`: report undocumented classes/selectors instead of generating.
+    pub doc_coverage: bool,
+    /// `qn highlight --html`: emit a standalone HTML page instead of ANSI.
+    pub highlight_html: bool,
 }
 
 /// Recursively collect `.qn` files under `dir`, in sorted order, skipping `target`/`.git`.
@@ -247,6 +255,9 @@ pub enum VmRunnerMode {
     /// `qn check <file>…`: type-check each file (report diagnostics) without running it. The paths
     /// are carried in `VmRunnerOptions::vm_options.arguments`; exits non-zero if any diagnostic.
     Check,
+    /// `qn doc [PATH…]`: generate the API reference (docs/DOCS_ARCH.md). The output directory
+    /// is carried in `target_path`, extra units in `vm_options.arguments`.
+    Doc,
     /// `qn` with no arguments: print usage. (`--help` / `--version` are answered by
     /// the argument parser itself, which prints and exits before a mode is chosen.)
     Help,
@@ -344,6 +355,21 @@ enum Cmd {
         #[arg(value_name = "PATH", required = true)]
         paths: Vec<String>,
     },
+    /// Generate the API reference (HTML, and JSON with --json) for the stdlib plus any PATHs
+    Doc {
+        /// Extra `.qn` units to document, relative to the current directory
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
+        /// Output directory
+        #[arg(long, value_name = "DIR", default_value = "qn-docs")]
+        out: String,
+        /// Also write the raw doc model as model.json
+        #[arg(long)]
+        json: bool,
+        /// Report undocumented classes/selectors instead of generating
+        #[arg(long)]
+        coverage: bool,
+    },
     /// Format Quoin source in place
     Fmt {
         /// Exit non-zero if any file is not already formatted
@@ -377,6 +403,9 @@ enum Cmd {
     },
     /// Print syntax-highlighted source
     Highlight {
+        /// Emit a standalone HTML page instead of ANSI (shares the doc generator's code styles)
+        #[arg(long)]
+        html: bool,
         #[arg(value_name = "FILE")]
         file: String,
         #[arg(value_name = "ARGS", trailing_var_arg = true)]
@@ -483,6 +512,9 @@ impl VmRunnerOptions {
         let mut fmt_check = false;
         let mut fmt_dry_run = false;
         let mut fmt_diff = false;
+        let mut doc_json = false;
+        let mut doc_coverage = false;
+        let mut highlight_html = false;
         let mut target_path = None;
         let mut vm_args = Vec::new();
         let mut coverage = None;
@@ -497,6 +529,18 @@ impl VmRunnerOptions {
             Some(Cmd::Check { paths }) => {
                 vm_args = paths;
                 VmRunnerMode::Check
+            }
+            Some(Cmd::Doc {
+                paths,
+                out,
+                json,
+                coverage: cov,
+            }) => {
+                target_path = Some(out);
+                vm_args = paths;
+                doc_json = json;
+                doc_coverage = cov;
+                VmRunnerMode::Doc
             }
             Some(Cmd::Fmt {
                 check,
@@ -524,7 +568,8 @@ impl VmRunnerOptions {
                 vm_args = args;
                 VmRunnerMode::Debug
             }
-            Some(Cmd::Highlight { file, args }) => {
+            Some(Cmd::Highlight { html, file, args }) => {
+                highlight_html = html;
                 target_path = Some(file);
                 vm_args = args;
                 VmRunnerMode::Highlight
@@ -603,6 +648,9 @@ impl VmRunnerOptions {
             fmt_check,
             fmt_dry_run,
             fmt_diff,
+            doc_json,
+            doc_coverage,
+            highlight_html,
         }
     }
 }
@@ -697,7 +745,25 @@ impl VmRunner {
                         exit(1);
                     }
                 };
-                print!("{}", highlight_to_ansi(&source));
+                if self.options.highlight_html {
+                    // A standalone page over the shared code stylesheet — the same classes and
+                    // colors the doc generator's fenced examples use (docs/DOCS_ARCH.md §8).
+                    println!(
+                        "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<title>{}</title>\n{}\n\
+                         <style>\nbody {{ margin: 2rem auto; max-width: 60rem; padding: 0 1rem; \
+                         background: #ffffff; color: #1a1a1a; }}\n\
+                         @media (prefers-color-scheme: dark) {{ body {{ background: #1e1e1e; \
+                         color: #d4d4d4; }} }}\n\
+                         pre.qn-code {{ font: 14px/1.5 ui-monospace, monospace; }}\n{}</style>\n\
+                         </head>\n<body>\n{}\n</body></html>",
+                        path,
+                        crate::highlighter::code_font_links(),
+                        crate::highlighter::code_stylesheet(),
+                        crate::highlighter::highlight_to_html(&source)
+                    );
+                } else {
+                    print!("{}", highlight_to_ansi(&source));
+                }
                 Ok(())
             }
             VmRunnerMode::WorkerServe => {
@@ -807,6 +873,7 @@ impl VmRunner {
                 self.run_check();
                 Ok(())
             }
+            VmRunnerMode::Doc => self.run_doc(),
         }
     }
 

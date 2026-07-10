@@ -1063,6 +1063,20 @@ impl<'gc> VmState<'gc> {
             .flatten()
     }
 
+    /// A native candidate's `.doc(..)` text, or `None`. User blocks answer `None` here — their
+    /// doc lives in source, in the `"*` block above the definition (docs/DOCS_ARCH.md §4), and
+    /// is extracted lazily from `MethodVariant.source` rather than carried at runtime.
+    pub(crate) fn candidate_doc(&self, method_val: Value<'gc>) -> Option<String> {
+        if self.get_block_from_method(method_val).is_some() {
+            None
+        } else {
+            method_val
+                .with_native_state::<NativeMethodState, _, _>(|m| m.native_doc())
+                .ok()
+                .flatten()
+        }
+    }
+
     /// Class-hierarchy distance from `val`'s class to the class named `hint` (0 if
     /// `val` is directly of that type), or `None` if `val` isn't an instance of it.
     /// A mixin counts as one hop from the class that mixes it in.

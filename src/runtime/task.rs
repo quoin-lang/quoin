@@ -119,6 +119,13 @@ fn handle_state(receiver: Value<'_>) -> Result<(TaskStatus, TaskId), QuoinError>
 pub fn build_task_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Task", Some("Object"))
         .construct_with("use Task.spawn:")
+        .class_doc(
+            "A detached concurrent task -- the fire-and-forget primitive beneath the \
+             structured `Async.gather:`. `Task.spawn:` starts one and answers a handle for \
+             observing and controlling it: `join` for the result, `cancel` for cooperative \
+             cancellation, `status` / `done?` to poll. Tasks interleave on one scheduler and \
+             their I/O overlaps. See docs/ASYNC_ARCH.md.",
+        )
         // Task.spawn:aBlock -> spawn a detached task running the block; returns a
         // handle. The spawner keeps running (fire-and-forget). See docs/ASYNC_ARCH.md.
         .class_method("spawn:", |vm, _mc, _receiver, args| {
@@ -131,6 +138,14 @@ pub fn build_task_class() -> NativeClassBuilder {
             };
             Ok(vm.spawn_detached(_mc, block_gc))
         })
+        .doc(
+            "Spawn a detached task running the zero-parameter block and answer its handle \
+             immediately -- the spawner keeps running.\n\n\
+             ```\n\
+             var t = Task.spawn:{ 21 * 2 };\n\
+             t.join    \"* -> 42\n\
+             ```",
+        )
         // Task.running -> a snapshot list of the handles of all still-running detached
         // tasks. The basis for a user-written structured join-all.
         .class_method("running", |vm, mc, _receiver, _args| {
@@ -142,6 +157,10 @@ pub fn build_task_class() -> NativeClassBuilder {
                 .collect();
             Ok(vm.new_list(mc, handles))
         })
+        .doc(
+            "A snapshot List of the handles of all still-running detached tasks -- the \
+             basis for a user-written join-all.",
+        )
         // handle.join -> the task's result, re-raising its exception if it failed (a
         // catchable throw). Parks the caller if the task is still running.
         .instance_method("join", |vm, mc, receiver, _args| {
@@ -171,6 +190,11 @@ pub fn build_task_class() -> NativeClassBuilder {
                 }
             }
         })
+        .doc(
+            "The task's result, parking the caller until the task finishes if it is still \
+             running. Re-raises the task's exception (catchably) if it failed; raises if \
+             the task was cancelled, or if a task joins itself.",
+        )
         // handle.cancel -> request cooperative cancellation (no-op if already done).
         // The task raises an uncatchable Cancelled at its next checkpoint, running its
         // `finally` blocks; joiners observe a catchable cancellation. See ASYNC_ARCH.md.
@@ -181,6 +205,16 @@ pub fn build_task_class() -> NativeClassBuilder {
             }
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Request cooperative cancellation (a no-op once the task is finished); answers \
+             nil. The task raises an uncatchable cancellation at its next checkpoint -- its \
+             `finally` blocks still run -- and joiners observe a catchable error.\n\n\
+             ```\n\
+             var t = Task.spawn:{ Async.sleep:50 };\n\
+             t.cancel; Async.sleep:5;\n\
+             t.status    \"* -> cancelled\n\
+             ```",
+        )
         // handle.status -> running | done | failed | cancelled
         .instance_method("status", |vm, mc, receiver, _args| {
             let name = match handle_state(receiver)?.0 {
@@ -191,9 +225,11 @@ pub fn build_task_class() -> NativeClassBuilder {
             };
             Ok(vm.new_string(mc, name.to_string()))
         })
+        .doc("One of 'running', 'done', 'failed', 'cancelled'.")
         .instance_method("done?", |vm, mc, receiver, _args| {
             Ok(vm.new_bool(mc, handle_state(receiver)?.0 == TaskStatus::Done))
         })
+        .doc("True once the task completed normally.")
 }
 
 fn spawn_type_error(got: Option<&Value>) -> QuoinError {

@@ -233,6 +233,16 @@ fn status_of(fiber: Value<'_>) -> Result<FiberStatus, QuoinError> {
 pub fn build_fiber_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Fiber", Some("Object"))
         .construct_with("use Fiber.new:{ … }")
+        .class_doc(
+            "A coroutine: a block that can suspend itself with `Fiber.yield:` -- or the \
+             `^> value` sugar -- and be resumed by its caller, exchanging values both ways. \
+             Cooperative and in-task; for concurrent tasks whose I/O overlaps, use Task / \
+             Async instead.\n\n\
+             ```\n\
+             var f = Fiber.new:{ ^> 1; 2 };\n\
+             #( f.resume f.resume f.status )    \"* -> #(1 2 done)\n\
+             ```",
+        )
         // Fiber.new:aBlock -> a fresh, unstarted fiber wrapping the block.
         .class_method("new:", |vm, mc, _receiver, args| {
             let block_val = args[0];
@@ -253,35 +263,66 @@ pub fn build_fiber_class() -> NativeClassBuilder {
             let class = vm.get_builtin_class("Fiber");
             Ok(vm.new_native_state(mc, class, state))
         })
+        .doc(
+            "A fresh, unstarted fiber wrapping the zero-parameter block (status 'created'). \
+             Nothing runs until the first `resume`.",
+        )
         // Fiber.yield:value / Fiber.yield -> suspend the running fiber.
         .class_method("yield:", |vm, mc, _receiver, args| {
             vm.fiber_yield(mc, args[0])
         })
+        .doc(
+            "Suspend the running fiber, delivering the value as the pending `resume`'s \
+             result; the value a later `resume:` passes becomes this expression's value. \
+             `^> value` is the yield sugar.\n\n\
+             ```\n\
+             var f = Fiber.new:{ var got = ^> 1; got * 10 };\n\
+             f.resume;     \"* -> 1\n\
+             f.resume:5    \"* -> 50\n\
+             ```",
+        )
         .class_method("yield", |vm, mc, _receiver, _args| {
             let nil = vm.new_nil(mc);
             vm.fiber_yield(mc, nil)
         })
+        .doc("As `yield:` with nil.")
         // Fiber.current -> the running fiber, or nil from the main program.
         .class_method("current", |vm, mc, _receiver, _args| {
             Ok(vm.sched.current_fiber.unwrap_or_else(|| vm.new_nil(mc)))
         })
+        .doc("The currently running fiber, or nil outside any fiber.")
         // f.resume / f.resume:value -> run until the next yield or completion.
         .instance_method("resume", |vm, mc, receiver, _args| {
             let nil = vm.new_nil(mc);
             vm.fiber_resume(mc, receiver, nil)
         })
+        .doc(
+            "Run the fiber until its next yield or completion; answers the yielded (or \
+             final) value. If the fiber's block raised, the error re-raises here. Resuming \
+             a finished fiber -- or one live in another task -- raises a FiberError.",
+        )
         .instance_method("resume:", |vm, mc, receiver, args| {
             vm.fiber_resume(mc, receiver, args[0])
         })
+        .doc(
+            "As `resume`, delivering the value as the result of the `yield` expression the \
+             fiber is suspended at.",
+        )
         .instance_method("done?", |vm, mc, receiver, _args| {
             Ok(vm.new_bool(mc, status_of(receiver)? == FiberStatus::Done))
         })
+        .doc("True once the fiber's block returned normally.")
         .instance_method("failed?", |vm, mc, receiver, _args| {
             Ok(vm.new_bool(mc, status_of(receiver)? == FiberStatus::Failed))
         })
+        .doc(
+            "True once the fiber's block raised an uncaught error (the error re-raised at \
+             the `resume` that observed it; `error` keeps the value).",
+        )
         .instance_method("alive?", |vm, mc, receiver, _args| {
             Ok(vm.new_bool(mc, !status_of(receiver)?.is_terminated()))
         })
+        .doc("True while the fiber can still be resumed (not yet done or failed).")
         .instance_method("status", |vm, mc, receiver, _args| {
             let name = match status_of(receiver)? {
                 FiberStatus::Created => "created",
@@ -292,6 +333,12 @@ pub fn build_fiber_class() -> NativeClassBuilder {
             };
             Ok(vm.new_string(mc, name.to_string()))
         })
+        .doc(
+            "One of 'created', 'suspended', 'running', 'done', 'failed'.\n\n\
+             ```\n\
+             (Fiber.new:{ }).status    \"* -> created\n\
+             ```",
+        )
         // The fiber's final return value (nil unless it completed normally).
         .instance_method("result", |vm, mc, receiver, _args| {
             let r = receiver
@@ -299,6 +346,7 @@ pub fn build_fiber_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(r.unwrap_or_else(|| vm.new_nil(mc)))
         })
+        .doc("The fiber's final return value; nil unless it completed normally.")
         // The error value if the fiber failed (nil otherwise).
         .instance_method("error", |vm, mc, receiver, _args| {
             let e = receiver
@@ -306,4 +354,5 @@ pub fn build_fiber_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(e.unwrap_or_else(|| vm.new_nil(mc)))
         })
+        .doc("The error value if the fiber failed; nil otherwise.")
 }

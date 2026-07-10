@@ -65,6 +65,17 @@ pub fn make_decimal<'gc>(host: &dyn Host<'gc>, d: Decimal) -> Value<'gc> {
 pub fn build_big_decimal_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("BigDecimal", Some("Object"))
         .construct_with("use BigDecimal.of:")
+        .class_doc(
+            "An exact base-10 decimal number with up to 28 significant digits -- for \
+             money and other quantities where binary floating point drifts. Construct \
+             with `BigDecimal.of:` (a String or an Integer; deliberately not a Double, \
+             which would already carry rounding error). Arithmetic never mixes silently: \
+             a non-BigDecimal operand is 'message not understood'.\n\n\
+             ```\n\
+             0.1 + 0.2                                       \"* -> 0.30000000000000004\n\
+             (BigDecimal.of:'0.1') + (BigDecimal.of:'0.2')   \"* -> 0.3\n\
+             ```",
+        )
         // BigDecimal.of:'1.50' — parse exactly from a string. (A Double is intentionally not
         // accepted: convert via a string so the value isn't already corrupted by binary float
         // rounding.)
@@ -78,6 +89,16 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "A BigDecimal parsed exactly from a decimal String (trailing zeros keep their \
+             scale: '1.50' has scale 2) or converted exactly from an Integer. A Double is \
+             intentionally not accepted -- go through a String so the value is not \
+             already corrupted by binary rounding. A non-numeric String raises a \
+             ValueError.\n\n\
+             ```\n\
+             BigDecimal.of:'1.50'     \"* -> 1.50\n\
+             ```",
+        )
         // BigDecimal.of:42 — exact from an Integer.
         .sdk_typed_class_method("of:", &["Integer"], |host, _r, args| {
             Ok(make_decimal(host, Decimal::from(arg!(args, Int, 0))))
@@ -92,7 +113,14 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
                 ));
             }
             Ok(make_decimal(host, Decimal::new(mantissa, scale as u32)))
-        });
+        })
+        .doc(
+            "A BigDecimal from an integer mantissa and a scale -- the number of \
+             fractional digits, 0 through 28.\n\n\
+             ```\n\
+             BigDecimal.of:150 scale:2     \"* -> 1.50\n\
+             ```",
+        );
     // Arithmetic is BigDecimal-only (explicit conversion); a foreign operand matches no typed
     // variant and surfaces as a "message not understood" naming the `:BigDecimal` signature.
     let b = b
@@ -103,6 +131,13 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
                 "+:",
             )
         })
+        .doc(
+            "The exact sum of two BigDecimals; raises an ArithmeticError if the result \
+             overflows the 28-digit capacity.\n\n\
+             ```\n\
+             (BigDecimal.of:'0.1') + (BigDecimal.of:'0.2')     \"* -> 0.3\n\
+             ```",
+        )
         .sdk_typed_instance_method("-:", &["BigDecimal"], |host, receiver, args| {
             checked(
                 host,
@@ -110,6 +145,7 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
                 "-:",
             )
         })
+        .doc("The exact difference of two BigDecimals (overflow-checked like `+`).")
         .sdk_typed_instance_method("*:", &["BigDecimal"], |host, receiver, args| {
             checked(
                 host,
@@ -117,6 +153,7 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
                 "*:",
             )
         })
+        .doc("The exact product of two BigDecimals (overflow-checked like `+`).")
         .sdk_typed_instance_method("/:", &["BigDecimal"], |host, receiver, args| {
             let divisor = decimal_of(args[0], "/:")?;
             if divisor == Decimal::ZERO {
@@ -126,10 +163,19 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
             }
             checked(host, decimal_of(receiver, "/:")?.checked_div(divisor), "/:")
         })
+        .doc(
+            "The quotient of two BigDecimals; a non-terminating quotient is rounded at \
+             the 28-digit precision limit. Raises an ArithmeticError for a zero divisor \
+             or on overflow.",
+        )
         // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
         .sdk_typed_instance_method("<:", &["BigDecimal"], |host, receiver, args| {
             Ok(host.new_bool(decimal_of(receiver, "<:")? < decimal_of(args[0], "<:")?))
         })
+        .doc(
+            "Whether the receiver is less than the BigDecimal argument. The one native \
+             comparison -- `>`, `<=` and `>=` derive from it.",
+        )
         // `==:` accepts any argument: a non-BigDecimal is simply unequal (never an error),
         // matching Integer/Double `==:` semantics.
         .sdk_instance_method("==:", |host, receiver, args| {
@@ -139,14 +185,33 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
                 Err(_) => false,
             };
             Ok(host.new_bool(eq))
-        });
+        })
+        .doc(
+            "Whether the argument is a numerically equal BigDecimal -- scale is ignored, \
+             so 1.50 equals 1.5. Any other type is simply unequal, never an error.\n\n\
+             ```\n\
+             (BigDecimal.of:'1.50') == (BigDecimal.of:'1.5')     \"* -> true\n\
+             ```",
+        );
     b.sdk_instance_method("abs", |host, receiver, _args| {
         Ok(make_decimal(host, decimal_of(receiver, "abs")?.abs()))
     })
+    .doc(
+        "The absolute value.\n\n\
+         ```\n\
+         (BigDecimal.of:'-1.5').abs     \"* -> 1.5\n\
+         ```",
+    )
     // The number of fractional digits (e.g. 1.50 -> 2).
     .sdk_instance_method("scale", |host, receiver, _args| {
         Ok(host.new_int(decimal_of(receiver, "scale")?.scale() as i64))
     })
+    .doc(
+        "The number of fractional digits.\n\n\
+         ```\n\
+         (BigDecimal.of:'1.50').scale     \"* -> 2\n\
+         ```",
+    )
     // Round to `n` fractional digits, half-away-from-zero (matching `Double.round`, rather than
     // rust_decimal's default banker's rounding — one rounding rule across the number types).
     .sdk_typed_instance_method("round:", &["Integer"], |host, receiver, args| {
@@ -160,6 +225,14 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
             .round_dp_with_strategy(dp as u32, RoundingStrategy::MidpointAwayFromZero);
         Ok(make_decimal(host, rounded))
     })
+    .doc(
+        "Round to the given number of fractional digits (0 through 28), halves away from \
+         zero -- the same rule as `Double.round`, not banker's rounding.\n\n\
+         ```\n\
+         (BigDecimal.of:'2.345').round:2     \"* -> 2.35\n\
+         (BigDecimal.of:'-2.5').round:0      \"* -> -3\n\
+         ```",
+    )
     // Lossy conversion to a Double.
     .sdk_instance_method("asDouble", |host, receiver, _args| {
         match decimal_of(receiver, "asDouble")?.to_f64() {
@@ -169,6 +242,12 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
             )),
         }
     })
+    .doc(
+        "Convert to a Double, accepting binary rounding error.\n\n\
+         ```\n\
+         (BigDecimal.of:'1.5').asDouble     \"* -> 1.5\n\
+         ```",
+    )
     // Truncate toward zero to an Integer (errors if out of i64 range).
     .sdk_instance_method("asInteger", |host, receiver, _args| {
         match decimal_of(receiver, "asInteger")?.trunc().to_i64() {
@@ -178,10 +257,18 @@ pub fn build_big_decimal_class() -> NativeClassBuilder {
             )),
         }
     })
+    .doc(
+        "Truncate toward zero to a 64-bit Integer; raises an ArithmeticError if the \
+         result is out of range.\n\n\
+         ```\n\
+         (BigDecimal.of:'3.99').asInteger     \"* -> 3\n\
+         ```",
+    )
     // Canonical decimal string.
     .sdk_instance_method("s", |host, receiver, _args| {
         Ok(host.new_string(decimal_of(receiver, "s")?.to_string()))
     })
+    .doc("The exact decimal digits, preserving scale (a value of scale 2 prints as e.g. '1.50').")
 }
 
 /// Wrap a `checked_*` result: `Some` -> a `BigDecimal`, `None` -> an overflow `ArithmeticError`.

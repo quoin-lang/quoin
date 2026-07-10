@@ -89,6 +89,7 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
             println!("  $time <expr>      evaluate and report wall-clock time");
             println!("  $globals [pre]    list defined classes and values (optional prefix)");
             println!("  $class <Name>     show a class: parent, mixins, ivars, methods");
+            println!("  $doc <Name>[.sel] show a class's or method's reference doc");
             println!("  $load <file.qn>   run a .qn file into the session");
             println!("  $ps               show tasks, fibers, workers, and waits");
             println!("  $ps tree          the same, recursively across workers");
@@ -149,6 +150,43 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
             }
         }
         "class" => eprintln!("usage: $class <Name>"),
+        // `$doc Name` / `$doc Name.selector` — class-side first (`[IO]Stdin.readLine` is how
+        // users write it), then instance-side, saying which answered.
+        "doc" if !rest.is_empty() => {
+            let (class_name, selector) = match rest.rsplit_once('.') {
+                // `[IO]Stdin.readLine` — but a bare namespaced name (`[IO]Stdin`) has no dot
+                // outside the brackets; a dot inside a selector can't happen (rsplit is safe).
+                Some((c, sel)) if !c.is_empty() && !sel.is_empty() => (c, Some(sel)),
+                _ => (rest, None),
+            };
+            let found = arena.mutate_root(|_mc, vm| {
+                let class = crate::introspect::find_class_gc(vm, class_name)?;
+                Some(match selector {
+                    None => (None, crate::introspect::doc_of_class(vm, class_name)),
+                    Some(sel) => {
+                        let class_side = crate::introspect::doc_of_method(vm, class, sel, true);
+                        match class_side {
+                            Some(d) => (Some("class side"), Some(d)),
+                            None => (
+                                Some("instance side"),
+                                crate::introspect::doc_of_method(vm, class, sel, false),
+                            ),
+                        }
+                    }
+                })
+            });
+            match found {
+                None => eprintln!("$doc: no class named {class_name}"),
+                Some((_, None)) => println!("(no doc)"),
+                Some((side, Some(doc))) => {
+                    if let Some(side) = side {
+                        println!("[{side}]");
+                    }
+                    println!("{doc}");
+                }
+            }
+        }
+        "doc" => eprintln!("usage: $doc <Name>[.selector]"),
         "time" if !rest.is_empty() => {
             let start = Instant::now();
             let out = eval_repl_input(arena, rest);

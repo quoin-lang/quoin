@@ -10,10 +10,23 @@ use gc_arena::{Gc, Mutation};
 pub fn build_block_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Block", Some("Object"))
         .construct_with("use block literals ({ … })")
+        .class_doc(
+            "A closure: code plus its captured environment. Written as a literal \
+             `{ ... }`, with parameters as `{ |x y| ... }`. Run one with `value` / `value:` \
+             / `valueWithArgs:`, loop with `whileDo:`, handle errors with `catch:`. Inside \
+             a block, `^` returns from the block itself and `^^` returns from the enclosing \
+             method.",
+        )
         .instance_method("arity", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
             Ok(vm.new_int(mc, block.template.param_syms.len() as i64))
         })
+        .doc(
+            "How many parameters the block declares.\n\n\
+             ```\n\
+             { |a b| a + b }.arity    \"* -> 2\n\
+             ```",
+        )
         .instance_method("args", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
             Ok(vm.new_list(
@@ -26,6 +39,12 @@ pub fn build_block_class() -> NativeClassBuilder {
                     .collect(),
             ))
         })
+        .doc(
+            "The declared parameter names, as a List of Strings.\n\n\
+             ```\n\
+             { |a b| a + b }.args    \"* -> #(a b)\n\
+             ```",
+        )
         .instance_method("name", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
             if let Some(name) = &block.template.name {
@@ -34,6 +53,10 @@ pub fn build_block_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
+        .doc(
+            "The block's name as a Symbol -- a method body carries its selector -- or nil \
+             for an anonymous literal.",
+        )
         .instance_method("code", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
             if let Some(source_info) = &block.template.source_info
@@ -44,6 +67,12 @@ pub fn build_block_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
+        .doc(
+            "The block's source text, or nil when no source info was recorded.\n\n\
+             ```\n\
+             { 1 }.code    \"* -> { 1 }\n\
+             ```",
+        )
         // source -> #( filenameStr lineInt columnInt ) for where this block was
         // defined, or nil if the block carries no source info. `line` is 1-indexed and
         // `column` is 0-indexed (the raw `SourceInfo` convention). Used by the test
@@ -59,6 +88,11 @@ pub fn build_block_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
+        .doc(
+            "Where the block was defined: `#( filename line column )` -- line 1-indexed, \
+             column 0-indexed -- or nil when the block carries no source info. The test \
+             reporter uses it to point a failed assertion at its source.",
+        )
         // `value`/`value:` have an interpreter fast path (`exec_send`, which
         // short-circuits before lookup), but they must ALSO be real methods:
         // `call_method`-family callers — compiled outcalls above all (S1
@@ -69,22 +103,49 @@ pub fn build_block_class() -> NativeClassBuilder {
             let block = recv!(receiver, Block);
             vm.execute_block(mc, block, Vec::new(), None)
         })
+        .doc(
+            "Run the block with no arguments; answers its last expression (or the value a \
+             `^` returned).\n\n\
+             ```\n\
+             { 42 }.value    \"* -> 42\n\
+             ```",
+        )
         .instance_method("value:", |vm, mc, receiver, args| {
             let block = recv!(receiver, Block);
             let val = args[0];
             vm.execute_block(mc, block, vec![val], None)
         })
+        .doc(
+            "Run the block with one argument.\n\n\
+             ```\n\
+             { |x| x * 2 }.value:21    \"* -> 42\n\
+             ```",
+        )
         .instance_method("valueWithArgs:", |vm, mc, receiver, args| {
             let block = recv!(receiver, Block);
             let block_args =
                 args[0].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())?;
             vm.execute_block(mc, block, block_args, None)
         })
+        .doc(
+            "Run the block with a List of arguments -- the multi-parameter form (`value:` \
+             takes exactly one argument).\n\n\
+             ```\n\
+             { |a b| a + b }.valueWithArgs:#( 2 3 )    \"* -> 5\n\
+             ```",
+        )
         .instance_method("valueWithSelf:", |vm, mc, receiver, args| {
             let block = recv!(receiver, Block);
             let self_val = args[0];
             vm.execute_block(mc, block, Vec::new(), Some(self_val))
         })
+        .doc(
+            "Run a zero-parameter block with `self` bound to the argument, so `self` sends \
+             and the `.foo` shorthand read it.\n\n\
+             ```\n\
+             { .length }.valueWithSelf:'abc'    \"* -> 3\n\
+             ```",
+        )
         .instance_method("value:withSelf:", |vm, mc, receiver, args| {
             let block = recv!(receiver, Block);
             let arg_val = args[0];
@@ -97,6 +158,11 @@ pub fn build_block_class() -> NativeClassBuilder {
             };
             vm.execute_block(mc, block, block_args, Some(self_val))
         })
+        .doc(
+            "Run the block with both an argument and an explicit `self`: a List first \
+             argument spreads as the parameter list, any other value passes as the single \
+             argument.",
+        )
         .instance_method("valueWithSelfOrArg:", |vm, mc, receiver, args| {
             let block = recv!(receiver, Block);
             let arg_val = args[0];
@@ -126,9 +192,28 @@ pub fn build_block_class() -> NativeClassBuilder {
             let implicit_self = block.template.param_syms.is_empty();
             vm.execute_block(mc, block, vec![arg_val], implicit_self.then_some(arg_val))
         })
+        .doc(
+            "Hand one item to a block of either shape -- the combinator seam (`each:`, \
+             `collect:`, ... deliver items through it). A parameterless block gets the item \
+             as `self` (the `{ .name }` shorthand); a parameterized block gets it as the \
+             argument, with `self` staying lexical.\n\n\
+             ```\n\
+             { |x| x + 1 }.valueWithSelfOrArg:2       \"* -> 3\n\
+             { .length }.valueWithSelfOrArg:'abc'     \"* -> 3\n\
+             ```",
+        )
         .instance_method("==:", |vm, mc, receiver, args| {
             Ok(vm.new_bool(mc, receiver == args[0]))
         })
+        .doc(
+            "Identity: true only for the very same block object -- two textually identical \
+             literals are not equal.\n\n\
+             ```\n\
+             var b = { 1 };\n\
+             b == b         \"* -> true\n\
+             { 1 } == { 1 } \"* -> false\n\
+             ```",
+        )
         // Shape-level portability check (docs/CONCURRENCY_ARCH.md §10): raises
         // the scanner's refusal (write-captures, ^^, self/@fields, guarded,
         // class/method definition) or answers the block. The parallel
@@ -143,6 +228,14 @@ pub fn build_block_class() -> NativeClassBuilder {
                 .map_err(|why| QuoinError::Other(format!("block is not portable: {why}")))?;
             Ok(receiver)
         })
+        .doc(
+            "Assert the block's shape can be shipped to a worker \
+             (docs/CONCURRENCY_ARCH.md): raises unless it is free of write-captures, `^^`, \
+             `self`/`@field` access, guards, and class/method definition; answers the block. \
+             The parallel combinators check it on every path -- serial fallbacks included -- \
+             so refusals don't depend on input size. (Whether the captured VALUES are \
+             portable is checked only when actually shipping.)",
+        )
         // `{…}.catch:{|e| …}` — run the protected block; on a throw, the handler runs if its
         // declared exception type matches (an untyped `|e|` catches everything), else the error
         // re-raises to an enclosing `catch:`.
@@ -150,6 +243,17 @@ pub fn build_block_class() -> NativeClassBuilder {
             let protected = recv!(receiver, Block);
             do_catch(vm, mc, protected, &[args[0]])
         })
+        .doc(
+            "Run the block; if it throws, run the handler when the handler parameter's \
+             declared type matches the exception (an untyped `|e|` or zero-parameter handler \
+             catches everything), else re-raise to an enclosing `catch:`. Answers the \
+             protected block's value, or the handler's. Cancellation and `Runtime.exit:` \
+             are never caught.\n\n\
+             ```\n\
+             { 1 / 0 }.catch:{ |e: ArithmeticError| 'caught' }    \"* -> caught\n\
+             { 'boom'.throw }.catch:{ |e| e }                     \"* -> boom\n\
+             ```",
+        )
         // Variadic multi-catch: `{…}.catch:{|e:A| …} catch:{|e:B| …}` folds the run of `catch:`
         // keywords into one List of handler blocks (see the variadic-selector machinery). Each is
         // tried in source order by its declared exception type; first match wins.
@@ -159,11 +263,28 @@ pub fn build_block_class() -> NativeClassBuilder {
                 args[0].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())?;
             do_catch(vm, mc, protected, &handlers)
         })
+        .doc(
+            "The variadic multi-catch: writing `{ ... }.catch:{ |e:A| ... } catch:{ |e:B| \
+             ... }` folds the run of `catch:` keywords into one List of handlers. They are \
+             tried in source order, FIRST match wins -- write them most- to least-specific \
+             and put any catch-all `|e|` last.\n\n\
+             ```\n\
+             { 'x'.throw }.catch:{ |e: IoError| 'io' } catch:{ |e| 'other' }    \"* -> other\n\
+             ```",
+        )
         .instance_method("catch:finally:", |vm, mc, receiver, args| {
             let protected = recv!(receiver, Block);
             let finally = arg!(args, Block, 1);
             do_catch_finally(vm, mc, protected, &[args[0]], finally)
         })
+        .doc(
+            "As `catch:`, but the `finally` block ALWAYS runs -- on success, on a caught or \
+             re-raised throw, and on cancellation. An error thrown by `finally` itself \
+             overrides the result it runs after.\n\n\
+             ```\n\
+             { 42 }.catch:{ |e| 0 } finally:{ 'cleanup'.print }    \"* prints cleanup -> 42\n\
+             ```",
+        )
         .instance_method("catch+:finally:", |vm, mc, receiver, args| {
             let protected = recv!(receiver, Block);
             let handlers =
@@ -171,6 +292,10 @@ pub fn build_block_class() -> NativeClassBuilder {
             let finally = arg!(args, Block, 1);
             do_catch_finally(vm, mc, protected, &handlers, finally)
         })
+        .doc(
+            "The multi-catch form of `catch:finally:`: several typed handlers (tried in \
+             source order, first match wins) plus a `finally` that always runs.",
+        )
 }
 
 /// The catch-family selectors — exactly the `Block` natives above that run

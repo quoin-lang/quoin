@@ -1,4 +1,6 @@
+"* The process's standard output as a writable [IO]Handle constant.
 [IO]Stdout <- ([IO]Handle.stdout);
+"* The process's standard error as a writable [IO]Handle constant.
 [IO]Stderr <- ([IO]Handle.stderr);
 
 "* [IO]Stdin is a class rather than a constant like the two above: opening stdin parks on the
@@ -17,7 +19,11 @@
         "* Everything remaining, as one String.
         readAll -> { ^.stream.readAll };
 
+        "* Whether the shared stdin stream has been closed with `close` (reaching
+        "* end of input does not close it).
         closed? -> { ^.stream.closed? };
+        "* Close the shared stdin stream; a later read raises an IoError of kind
+        "* #closed.
         close -> { ^.stream.close }
     }
 };
@@ -49,11 +55,14 @@
     }
 };
 
+"* Iteration for directory listings: mixing in Iterate gives a Folder the whole
+"* collection protocol (`collect:`, `select:`, `count`, …) over its entries.
 [IO]Folder <-- {
     .mix:Iterate;
 
-    "* Folder is a native directory stream; drive its native cursor to satisfy
-    "* the each:-based Iterate protocol.
+    "* Call `b` with each entry — [IO]File objects; `is_file?` tells files from
+    "* subfolders — then rewind so the folder can be iterated again. Satisfies the
+    "* each:-based Iterate protocol by driving the native `next`/`reset` cursor.
     each: -> { |b|
         { .next }.whileDefinedDo:{ |e| b.valueWithSelfOrArg:e };
         .reset

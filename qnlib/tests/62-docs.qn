@@ -1,0 +1,72 @@
+"* The reference-doc query surface (docs/DOCS_ARCH.md §6): `doc` and `docFor:` on Object,
+"* read-only and lazy. Quoin docs live in source -- the `"*` block immediately above a
+"* definition -- and are extracted on demand; native docs come from the builder's `.doc(..)`.
+"*
+"* `docFor:` follows `can?:`'s receiver convention (17-can.qn): a Class receiver answers for
+"* INSTANCE methods, `.meta` for class-side ones.
+
+"* A haiku about docs.
+TDocPoint <- { |@x|
+    "* The x coordinate.
+    x -> { @x };
+
+    y -> { 0 }
+};
+
+"* Reopens are documented too: this block belongs to the extension site.
+TDocPoint <-- {
+    "* Manhattan distance from the origin.
+    manhattan -> { @x.abs }
+};
+
+TDocBare <- {
+    x -> { 1 }
+};
+
+"* A reopen doc standing in for a missing class doc.
+TDocBare <-- {
+    y -> { 2 }
+};
+
+(TestSuite.new:{ var name = 'Docs' }).add:{
+    .test:aClassAnswersItsDocBlock -> {
+        .is:{ TDocPoint.doc } equalTo:'A haiku about docs.';
+        "* An instance answers for its class, like can?:.
+        .is:{ (TDocPoint.new:{ x = 1 }).doc } equalTo:'A haiku about docs.'
+    };
+
+    .test:docForAnswersInstanceMethods -> {
+        .is:{ TDocPoint.docFor:#x } equalTo:'The x coordinate.';
+        "* A method from a reopen is found the same way.
+        .is:{ TDocPoint.docFor:#manhattan } equalTo:'Manhattan distance from the origin.';
+        "* No adjacent block above `y` -> nil, not an error.
+        .is:{ TDocPoint.docFor:#y } equalTo:nil;
+        "* Unknown selector -> nil.
+        .is:{ TDocPoint.docFor:#nope } equalTo:nil;
+        "* A String names a selector as well as a Symbol does.
+        .is:{ TDocPoint.docFor:'x' } equalTo:'The x coordinate.'
+    };
+
+    "* Native docs flow through the same surface: `.class_doc(..)` / `.doc(..)` set in Rust.
+    .test:nativeDocsAnswer -> {
+        .isTrue:{ ([IO]Stdin.doc).contains?:'standard input' };
+        .isTrue:{ ([IO]Stdin.meta.docFor:#stream).contains?:'created on first use' };
+        "* ...and a Quoin delegator on the same native class extracts from qnlib source.
+        .isTrue:{ ([IO]Stdin.meta.docFor:#readLine).contains?:'without its terminator' }
+    };
+
+    "* The class-doc precedence, last rung: no native .class_doc, no block above the
+    "* definition -> the block above the first documented reopen stands in. Hermetic
+    "* (TDocBare above) rather than pinned to stdlib doc state, which moves as docs are
+    "* added -- this test originally used [IO]File and broke the day it gained a
+    "* .class_doc, which by the higher rung correctly took precedence.
+    .test:aReopenDocStandsInForAMissingClassDoc -> {
+        .is:{ TDocBare.doc } equalTo:'A reopen doc standing in for a missing class doc.';
+        "* ...and the first rung: a native .class_doc wins over any comment block.
+        .isTrue:{ ([IO]Stdin.doc).contains?:'standard input' }
+    };
+
+    .test:docForRejectsNonSelectors -> {
+        .does:{ TDocPoint.docFor:42 } throw:TypeError
+    }
+}

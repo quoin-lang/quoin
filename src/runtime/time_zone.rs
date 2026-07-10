@@ -60,6 +60,16 @@ impl PrettyPrint for NativeTimeZone {
 pub fn build_time_zone_class() -> NativeClassBuilder {
     NativeClassBuilder::new("TimeZone", Some("Object"))
         .construct_with("use TimeZone.of: / TimeZone.utc / TimeZone.system")
+        .class_doc(
+            "An IANA time zone (`America/New_York`, `Asia/Tokyo`, …) or UTC — the zone \
+             component of a `DateTime`.\n\n\
+             Look one up with `TimeZone.of:`, or take `TimeZone.utc` / `TimeZone.system`; \
+             then hand it to `Timestamp#inZone:`, `DateTime#inZone:` or `DateTime.nowIn:`. \
+             A zone carries the full DST rule set, not just an offset.\n\n\
+             ```\n\
+             (TimeZone.of:'America/New_York').name     \"* -> 'America/New_York'\n\
+             ```",
+        )
         // TimeZone.of:'America/New_York' — look up an IANA time zone (errors if unknown).
         .sdk_typed_class_method("of:", &["String"], |host, _r, args| {
             let name = arg!(args, String, 0);
@@ -71,21 +81,35 @@ pub fn build_time_zone_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "Look up a time zone by IANA name — `TimeZone.of:'America/New_York'`. An unknown \
+             name throws a ValueError.",
+        )
         // TimeZone.utc — the UTC zone.
         .sdk_class_method("utc", |host, _r, _a| {
             Ok(make_time_zone(host, TimeZone::UTC))
         })
+        .doc("The UTC zone.")
         // TimeZone.system — the host's configured local zone (falls back to UTC).
         .sdk_class_method("system", |host, _r, _a| {
             Ok(make_time_zone(host, TimeZone::system()))
         })
+        .doc(
+            "The host's configured local zone (falling back to UTC when none can be \
+             determined).",
+        )
         // The IANA name (e.g. 'America/New_York', 'UTC').
         .sdk_instance_method("name", |host, receiver, _args| {
             Ok(host.new_string(zone_name(&tz_of(receiver, "name")?)))
         })
+        .doc(
+            "The IANA name (`'America/New_York'`, `'UTC'`), or `'(fixed offset)'` for an \
+             unnamed fixed-offset zone.",
+        )
         .sdk_instance_method("s", |host, receiver, _args| {
             Ok(host.new_string(zone_name(&tz_of(receiver, "s")?)))
         })
+        .doc("The same string as `name`.")
         // `==:` accepts any argument: a non-TimeZone is simply unequal (never an error).
         .sdk_instance_method("==:", |host, receiver, args| {
             let a = tz_of(receiver, "==:")?;
@@ -95,4 +119,11 @@ pub fn build_time_zone_class() -> NativeClassBuilder {
             };
             Ok(host.new_bool(eq))
         })
+        .doc(
+            "Whether the argument is the same TimeZone. A non-TimeZone argument is simply \
+             unequal — never an error.\n\n\
+             ```\n\
+             (TimeZone.of:'UTC') == TimeZone.utc     \"* -> true\n\
+             ```",
+        )
 }

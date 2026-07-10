@@ -47,10 +47,24 @@ fn signed(d: std::time::Duration) -> SignedDuration {
 pub fn build_instant_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Instant", Some("Object"))
         .construct_with("use Instant.now")
+        .class_doc(
+            "A point on the monotonic clock, for measuring elapsed time.\n\n\
+             Monotonic means forward-only and immune to wall-clock adjustments (NTP steps, \
+             manual changes), which makes an Instant the right tool for timing and the wrong \
+             one for calendars — it has no date, cannot be serialized, and is only meaningful \
+             within the current process. For wall-clock time use `Timestamp`; for zone-aware \
+             dates use `DateTime`.\n\n\
+             ```\n\
+             var t0 = Instant.now\n\
+             \"* ... work ...\n\
+             t0.elapsed     \"* -> the Duration since t0\n\
+             ```",
+        )
         // Instant.now -> the current monotonic instant.
         .sdk_class_method("now", |host, _r, _a| {
             Ok(make_instant(host, StdInstant::now()))
         })
+        .doc("The current monotonic instant.")
         // Time since this instant (now - self), as a Duration.
         .sdk_instance_method("elapsed", |host, receiver, _args| {
             Ok(make_duration(
@@ -58,6 +72,10 @@ pub fn build_instant_class() -> NativeClassBuilder {
                 signed(instant_of(receiver, "elapsed")?.elapsed()),
             ))
         })
+        .doc(
+            "The time since this instant (now minus the receiver), as a Duration — the \
+             everyday stopwatch read.",
+        )
         // Instant - Instant -> a signed Duration (positive when the receiver is the later one).
         .sdk_typed_instance_method("-:", &["Instant"], |host, receiver, args| {
             let a = instant_of(receiver, "-:")?;
@@ -68,10 +86,18 @@ pub fn build_instant_class() -> NativeClassBuilder {
             };
             Ok(make_duration(host, sd))
         })
+        .doc(
+            "The signed Duration between two Instants — positive when the receiver is the \
+             later one.",
+        )
         // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
         .sdk_typed_instance_method("<:", &["Instant"], |host, receiver, args| {
             Ok(host.new_bool(instant_of(receiver, "<:")? < instant_of(args[0], "<:")?))
         })
+        .doc(
+            "Whether the receiver is the earlier instant. Only `<:` is native; `>:` / `<=:` \
+             / `>=:` derive from it on Object.",
+        )
         // `==:` accepts any argument: a non-Instant is simply unequal (never an error).
         .sdk_instance_method("==:", |host, receiver, args| {
             let a = instant_of(receiver, "==:")?;
@@ -81,4 +107,8 @@ pub fn build_instant_class() -> NativeClassBuilder {
             };
             Ok(host.new_bool(eq))
         })
+        .doc(
+            "Whether the argument is the very same instant. A non-Instant argument is simply \
+             unequal — never an error.",
+        )
 }

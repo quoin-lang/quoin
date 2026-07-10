@@ -327,6 +327,11 @@ pub(crate) fn ps_data_with_current<'gc>(
 pub fn build_vm_stats_class() -> NativeClassBuilder {
     NativeClassBuilder::new("VM", Some("Object"))
         .abstract_class()
+        .class_doc(
+            "The VM's self-introspection surface: `stats` (counters by section), \
+             `aotRefusals` (which members stayed interpreted and why), and `ps` / `psTree` \
+             (a live snapshot of tasks and workers as plain data).",
+        )
         // `VM.stats` -> the section Map (see the module doc for the shape and
         // the events-vs-distinct-members counting semantics).
         // `VM.ps` — a live tree of the scheduler and workers as plain data
@@ -409,6 +414,13 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
             root.insert("compute".to_string(), vm.new_map(mc, comp));
             Ok(vm.new_map(mc, root))
         })
+        .doc(
+            "A live snapshot of the scheduler as plain data: a Map with 'worker?', 'tasks' \
+             (id / state / fibers / park info per task, including the channel a parked task \
+             waits on), 'workers' (one row per spawned worker), and 'io' / 'compute' \
+             in-flight counts. Plain Maps and Lists, so `.pp` renders it and programs can \
+             walk it; the REPL's `$ps` shows the same snapshot as a table.",
+        )
         // `VM.psTree` — `VM.ps` plus each worker row's 'ps' filled with the
         // worker's OWN tree, recursively (docs/CONCURRENCY_ARCH.md §13.4):
         // one control request per worker (its driver answers between task
@@ -479,6 +491,12 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
             }
             crate::runtime::extension::wire_to_value(vm, mc, &local, None)
         })
+        .doc(
+            "`VM.ps` plus each worker row's 'ps' slot filled with that worker's OWN tree, \
+             recursively -- the whole process topology in one call \
+             (docs/CONCURRENCY_ARCH.md). Each worker answers between task resumes under a \
+             bounded deadline; a silent one reads 'unresponsive'.",
+        )
         // `VM.unit` — the ENTRY unit this VM runs (canonicalized path), nil
         // for REPL/eval. The same-unit provisioning primitive:
         // `Worker.spawn:(VM.unit)` runs another copy of this program.
@@ -488,6 +506,11 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                 None => Value::Nil,
             })
         })
+        .doc(
+            "The canonicalized path of the entry unit this VM runs, or nil in the REPL / \
+             `qn -e`. The same-program provisioning primitive: `Worker.spawn:(VM.unit)` \
+             runs another copy of this program.",
+        )
         .class_method("stats", |vm, mc, _receiver, _args| {
             let mut sections = IndexMap::new();
             sections.insert("aot".to_string(), aot_section(vm, mc));
@@ -495,6 +518,16 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
             sections.insert("workers".to_string(), workers_section(vm, mc));
             Ok(vm.new_map(mc, sections))
         })
+        .doc(
+            "The VM's counters as a Map of sections: 'aot' (compiled / refused / skipped \
+             plus per-reason counts), 'compute' (offload-pool jobs), 'workers' (isolates \
+             spawned / completed, messages copied). `compiled` counts translation events; \
+             `refused` / `skipped` count distinct members from a bounded log -- counters, \
+             not ledgers.\n\n\
+             ```\n\
+             VM.stats.keys    \"* -> #(aot compute workers)\n\
+             ```",
+        )
         // `VM.aotRefusals` -> one Map per distinct refusal/skip, for finding
         // which of YOUR members stayed interpreted and why.
         .class_method("aotRefusals", |vm, mc, _receiver, _args| {
@@ -512,4 +545,10 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
             }
             Ok(vm.new_list(mc, out))
         })
+        .doc(
+            "The AOT drill-down: a List with one `#{ 'selector': ... 'kind': ... 'reason': \
+             ... }` Map per distinct refusal or skip -- for finding which of YOUR members \
+             stayed interpreted and why. A block literal has no user-facing name, so block \
+             templates appear under the pseudo-selector 'block@<template-id>'.",
+        )
 }

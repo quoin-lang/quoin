@@ -119,6 +119,13 @@ fn sort_swap<'gc>(mc: &Mutation<'gc>, list: Value<'gc>, j: usize) -> Result<(), 
 pub fn build_list_class() -> NativeClassBuilder {
     NativeClassBuilder::new("List", Some("Object"))
         .construct_with("use #( … ) literals")
+        .class_doc(
+            "The ordered, growable sequence — Quoin's workhorse collection, written \
+             `#(10 20 30)`.\n\nIndexes are zero-based. A list holds any mix of values; one \
+             checked to a single element class comes from `List.of:` / `ensure:`. The natives \
+             here are the storage primitives; the wider iteration surface (`each:`, `collect:`, \
+             `select:`, …) is the Iterate mixin in the standard library, built on them.",
+        )
         .instance_method("count", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
@@ -126,6 +133,12 @@ pub fn build_list_class() -> NativeClassBuilder {
             Ok(vm.new_int(mc, len as i64))
         })
         .returns("Integer")
+        .doc(
+            "The number of elements.\n\n\
+             ```\n\
+             #(10 20 30).count     \"* -> 3\n\
+             ```",
+        )
         // `List.new` — a fresh empty native list. Without this, the generic
         // `Callable::NewNoBlock` fallback mints a payload-less Object shell of
         // class List whose first native method call dies with the internal
@@ -135,12 +148,22 @@ pub fn build_list_class() -> NativeClassBuilder {
         .class_method("new", |vm, mc, _receiver, _args| {
             Ok(vm.new_list(mc, Vec::new()))
         })
+        .doc(
+            "A fresh empty list — the same value the `#()` literal builds.\n\n\
+             ```\n\
+             List.new.count     \"* -> 0\n\
+             ```",
+        )
         .class_method("new:", |_vm, _mc, _receiver, _args| {
             Err(QuoinError::Other(
                 "List has no instance fields — construct with `#()`, `List.new`, or `List.of:`"
                     .to_string(),
             ))
         })
+        .doc(
+            "Always refused: a List has no instance fields for a `new:` config block to set. \
+             Construct with `#()`, `List.new`, or `List.of:`.",
+        )
         // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6) ---
         // `List.of:Integer` — a fresh empty list tagged with the element class.
         .class_method("of:", |vm, mc, _receiver, args| {
@@ -151,6 +174,13 @@ pub fn build_list_class() -> NativeClassBuilder {
             })?;
             Ok(new_list_with_tag(vm, mc, Vec::new(), Some(tag)))
         })
+        .doc(
+            "A fresh empty list tagged with an element class: every later insert is checked, \
+             so an `add:` / `at:put:` of a non-matching value raises a catchable TypeError.\n\n\
+             ```\n\
+             (List.of:Integer).add:1     \"* -> #(1)\n\
+             ```",
+        )
         // `ensure:` — verify every element, return a NEW tagged list (a copy:
         // retagging an aliased list in place is spooky action; GENERICS_ARCH §4.2).
         .instance_method("ensure:", |vm, mc, receiver, args| {
@@ -169,6 +199,14 @@ pub fn build_list_class() -> NativeClassBuilder {
             }
             Ok(new_list_with_tag(vm, mc, vec, Some(tag)))
         })
+        .doc(
+            "Check every element against a class and answer a NEW list carrying that element \
+             tag; a non-matching element raises a catchable TypeError. The receiver is copied, \
+             not retagged in place, so other holders of the untagged list are unaffected.\n\n\
+             ```\n\
+             (#(1 2 3).ensure:Integer).elementType     \"* -> Integer\n\
+             ```",
+        )
         // `emptyLike` — the species protocol (GENERICS_ARCH.md §4.5): a fresh
         // empty collection LIKE the receiver, element tag included. Iterate's
         // default is `self.class.default`; the natives override to carry tags.
@@ -179,6 +217,10 @@ pub fn build_list_class() -> NativeClassBuilder {
             Ok(new_list_with_tag(vm, mc, Vec::new(), tag))
         })
         .returns("List(T)") // emptyLike: same shape, same tag, empty
+        .doc(
+            "A fresh empty list like the receiver — element tag included. The species hook the \
+             Iterate mixin uses, so transforms of a checked list stay checked.",
+        )
         // The element tag as a Symbol (`#Integer`), or nil when untagged.
         .instance_method("elementType", |vm, mc, receiver, _args| {
             let tag = receiver
@@ -189,6 +231,12 @@ pub fn build_list_class() -> NativeClassBuilder {
                 None => Value::Nil,
             })
         })
+        .doc(
+            "The checked element type as a Symbol, or nil for an ordinary untagged list.\n\n\
+             ```\n\
+             (List.of:Integer).elementType     \"* -> Integer\n\
+             ```",
+        )
         .instance_method("add:", |vm, mc, receiver, args| {
             let tag = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.elem)
@@ -204,6 +252,13 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(e))?;
             Ok(receiver)
         })
+        .doc(
+            "Append a value at the end; answers the receiver, so adds chain. On a tagged list \
+             (`List.of:`) the value is checked first.\n\n\
+             ```\n\
+             #(1 2).add:3     \"* -> #(1 2 3)\n\
+             ```",
+        )
         .instance_method("push:", |vm, mc, receiver, args| {
             let tag = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.elem)
@@ -219,6 +274,13 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(e))?;
             Ok(receiver)
         })
+        .doc(
+            "Insert a value at the front (index 0); answers the receiver. The end-of-list \
+             counterpart is `add:`.\n\n\
+             ```\n\
+             #(2 3).push:1     \"* -> #(1 2 3)\n\
+             ```",
+        )
         // `join:` — the LINEAR native for the hot List case; the Iterate
         // mixin version (qnlib core/02-iterate.qn) still serves every other
         // receiver, but it is a QUADRATIC interpreted `+` loop — the biggest
@@ -292,6 +354,14 @@ pub fn build_list_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, out))
         })
         .returns("String")
+        .doc(
+            "One string from the elements' `.s` renderings with the separator between them. \
+             The separator only appears while the accumulated result is non-empty, so an empty \
+             leading piece adds nothing.\n\n\
+             ```\n\
+             #(1 2 3).join:', '     \"* -> 1, 2, 3\n\
+             ```",
+        )
         // The index is typed, so a non-Integer index matches no variant -> MNU
         // (dispatch enforces the type instead of a hand-rolled TypeError).
         .typed_instance_method("at:", &["Integer"], |vm, mc, receiver, args| {
@@ -307,6 +377,13 @@ pub fn build_list_class() -> NativeClassBuilder {
         // T and sees `Integer?` (out-of-bounds is nil). `T` is the seeded
         // type parameter of the builtin List (class_table.rs).
         .returns("T?")
+        .doc(
+            "The element at a zero-based index; any out-of-range index (negatives included) \
+             answers nil.\n\n\
+             ```\n\
+             #(10 20 30).at:1     \"* -> 20\n\
+             ```",
+        )
         // Only the index is typed (`&["Integer"]`); the value (arg 2) is any type.
         .typed_instance_method("at:put:", &["Integer"], |vm, mc, receiver, args| {
             let idx = arg!(args, Int, 0);
@@ -324,6 +401,14 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)??;
             Ok(receiver)
         })
+        .doc(
+            "Replace the element at a zero-based index; answers the receiver. An out-of-range \
+             index raises a catchable IndexError — unlike `at:`, writing never extends the \
+             list. On a tagged list (`List.of:`) the value is checked first.\n\n\
+             ```\n\
+             #(1 2 3).at:1 put:99     \"* -> #(1 99 3)\n\
+             ```",
+        )
         .typed_instance_method("sliceFrom:", &["Integer"], |vm, mc, receiver, args| {
             let idx = arg!(args, Int, 0);
             receiver
@@ -341,6 +426,13 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(e))?
         })
         .returns("List(T)") // sliceFrom: carries the receiver's tag
+        .doc(
+            "A new list of the elements from a zero-based index to the end; an index past the \
+             end answers `#()`. A checked receiver's element tag carries over.\n\n\
+             ```\n\
+             #(10 20 30 40).sliceFrom:2     \"* -> #(30 40)\n\
+             ```",
+        )
         .instance_method("s", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
@@ -368,6 +460,12 @@ pub fn build_list_class() -> NativeClassBuilder {
 
             Ok(vm.new_string(mc, format!("#({})", parts.join(" "))))
         })
+        .doc(
+            "The display string: `#(` and `)` around each element's `.s`, space-separated.\n\n\
+             ```\n\
+             #(1 'two' 3).s     \"* -> #(1 two 3)\n\
+             ```",
+        )
         .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
@@ -401,6 +499,13 @@ pub fn build_list_class() -> NativeClassBuilder {
 
             Ok(vm.new_bool(mc, true))
         })
+        .doc(
+            "Element-wise equality: true when the other value is a List of the same length \
+             whose elements are pairwise `==`. Anything that is not a List answers false.\n\n\
+             ```\n\
+             #(1 2 3) == #(1 2 3)     \"* -> true\n\
+             ```",
+        )
         .instance_method("bind:", |vm, mc, receiver, args| {
             let block = arg!(args, Block, 0);
             let block_args = receiver.with_native_state(|l: &NativeListState| {
@@ -413,6 +518,14 @@ pub fn build_list_class() -> NativeClassBuilder {
 
             vm.execute_block(mc, block, block_args, None)
         })
+        .doc(
+            "Destructure into a block: call it with the list's elements as its arguments — a \
+             two-parameter block gets the first two elements, extras are ignored. Answers the \
+             block's value.\n\n\
+             ```\n\
+             #(3 4).bind:{ |w h| w * h }     \"* -> 12\n\
+             ```",
+        )
         .instance_method("sort", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
@@ -448,6 +561,13 @@ pub fn build_list_class() -> NativeClassBuilder {
             let active_args = vm.active_native_args.last().unwrap();
             Ok(active_args.receiver)
         })
+        .doc(
+            "Sort in place, ascending by the elements' `>:`, and answer the receiver; nils \
+             sort last.\n\n\
+             ```\n\
+             #(3 1 2).sort     \"* -> #(1 2 3)\n\
+             ```",
+        )
         .instance_method("sort:", |vm, mc, receiver, args| {
             let block_gc = arg!(args, Block, 0);
             let len = receiver
@@ -528,4 +648,14 @@ pub fn build_list_class() -> NativeClassBuilder {
             let active_args = vm.active_native_args.last().unwrap();
             Ok(active_args.receiver)
         })
+        .doc(
+            "Sort in place, directed by the block, and answer the receiver. A one-parameter \
+             block is a KEY: elements are ordered by their keys' `>:`, ascending. A \
+             two-parameter block is a COMPARATOR: it answers true when its arguments are \
+             already in order.\n\n\
+             ```\n\
+             #('bb' 'a' 'ccc').sort:{ |x| x.length }     \"* -> #(a bb ccc)\n\
+             #(3 1 2).sort:{ |a b| a >= b }     \"* -> #(3 2 1)\n\
+             ```",
+        )
 }

@@ -14,9 +14,24 @@ use std::collections::{HashMap, HashSet};
 pub fn build_string_class() -> NativeClassBuilder {
     NativeClassBuilder::new("String", Some("Object"))
         .construct_with("use string literals ('…')")
+        .class_doc(
+            "Immutable UTF-8 text -- the type of 'single-quoted' literals (a double quote \
+             starts a comment in Quoin, so strings are single-quoted). Position-based \
+             operations (`length`, `index:`, `insert:at:`) count characters, not bytes. \
+             Strings concatenate with `+`, format with `%`, and interpolate with `.mod`; \
+             every operation returns a new String.\n\n\
+             ```\n\
+             'ab' + 'cd'       \"* -> abcd\n\
+             'héllo'.length    \"* -> 5\n\
+             ```",
+        )
         // Human string form is the string itself (no quoting — that's `.pp`'s job). Explicit so
         // `.s` never routes through the Rust Display impl (the default `Object.s` fallback).
         .instance_method("s", |_vm, _mc, receiver, _args| Ok(receiver))
+        .doc(
+            "The string itself -- the human rendering of a String adds no quotes or \
+             escapes (structural, quoted rendering is `.pp`'s job).",
+        )
         // `replace:with:` is a multimethod: the pattern's type selects the variant
         // (a non-String/non-Regex pattern matches neither → MessageNotUnderstood).
         // The replacement is always a String.
@@ -32,6 +47,15 @@ pub fn build_string_class() -> NativeClassBuilder {
                 Ok(vm.new_string(mc, result))
             },
         )
+        .doc(
+            "A copy with every match of the pattern replaced by the String argument. The \
+             pattern's type selects the variant: a String replaces each literal \
+             occurrence, a Regex replaces each match.\n\n\
+             ```\n\
+             'banana'.replace:'an' with:'AN'         \"* -> bANANa\n\
+             'a1b22c'.replace:#/[0-9]+/ with:'#'     \"* -> a#b#c\n\
+             ```",
+        )
         .typed_instance_method(
             "replace:with:",
             &["String", "String"],
@@ -45,6 +69,13 @@ pub fn build_string_class() -> NativeClassBuilder {
         .instance_method("==:", |vm, mc, receiver, args| {
             Ok(vm.new_bool(mc, receiver == args[0]))
         })
+        .doc(
+            "Whether the argument is a character-for-character equal String; any \
+             non-String value is simply unequal, never an error.\n\n\
+             ```\n\
+             'abc' == 'abc'     \"* -> true\n\
+             ```",
+        )
         // Concatenation: `a + b` -> `Send(a, "+:", [b])`. A String RHS concatenates
         // directly (the fast path); any other RHS is coerced via `.s` by the untyped
         // fallback below, so `'n = ' + 5` or `'m = ' + aMap` work.
@@ -59,6 +90,14 @@ pub fn build_string_class() -> NativeClassBuilder {
             out.push_str(&b);
             Ok(vm.new_string(mc, out))
         })
+        .doc(
+            "Concatenation (`a + b`). A String argument is appended directly; any other \
+             value is first rendered with `.s`, so `'n = ' + 5` just works.\n\n\
+             ```\n\
+             'ab' + 'cd'     \"* -> abcd\n\
+             'n = ' + 5      \"* -> n = 5\n\
+             ```",
+        )
         .instance_method("+:", |vm, mc, receiver, args| {
             // Coerce the RHS via `.s` FIRST (it re-enters the VM, so the
             // receiver borrow must not be held across it); clone the receiver
@@ -85,6 +124,13 @@ pub fn build_string_class() -> NativeClassBuilder {
             let s = recv!(receiver, String);
             Ok(vm.new_bytes(mc, s.as_bytes().to_vec()))
         })
+        .doc(
+            "The string's UTF-8 bytes as a Bytes. Never fails; the inverse, \
+             `Bytes.asString`, can (not all byte sequences are valid UTF-8).\n\n\
+             ```\n\
+             'abc'.asBytes     \"* -> Bytes[3] 61 62 63\n\
+             ```",
+        )
         // `a % b` -> `Send(a, "%:", [b])`: printf-like formatting. A List RHS supplies
         // positional args (`%1`, `%2`, … and bare `%`); a Map RHS additionally supplies
         // named substitutions (`%<key>`); any other RHS is a single positional arg.
@@ -228,6 +274,17 @@ pub fn build_string_class() -> NativeClassBuilder {
             }
             Ok(vm.new_string(mc, result))
         })
+        .doc(
+            "printf-style formatting: `template % args`. A List argument fills `%1`, \
+             `%2`, ... (1-based) and bare `%` placeholders in order; a Map argument fills \
+             named `%<key>` placeholders; any other value serves as a single positional \
+             argument. Substituted values are rendered with `.s`.\n\n\
+             ```\n\
+             '%1-%2' % #(42 43)            \"* -> 42-43\n\
+             '%a, %b' % #{ 'a':1 'b':2 }   \"* -> 1, 2\n\
+             'total: %' % 7                \"* -> total: 7\n\
+             ```",
+        )
         // Only `<:` is native (the compiler lowers `a < b` to `Send(a, "<:", [b])`);
         // `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
         .instance_method("<:", |vm, mc, receiver, args| {
@@ -235,6 +292,13 @@ pub fn build_string_class() -> NativeClassBuilder {
             let rhs = arg!(args, String, 0);
             Ok(vm.new_bool(mc, *lhs < *rhs))
         })
+        .doc(
+            "Lexicographic less-than against another String. The one native comparison -- \
+             `>`, `<=` and `>=` derive from it.\n\n\
+             ```\n\
+             'abc' < 'abd'     \"* -> true\n\
+             ```",
+        )
         .instance_method("to_integer", |vm, mc, receiver, _args| {
             let s = recv!(receiver, String);
             Ok(vm.new_int(
@@ -243,6 +307,13 @@ pub fn build_string_class() -> NativeClassBuilder {
                     .map_err(|e| QuoinError::Other(e.to_string()))?,
             ))
         })
+        .doc(
+            "Parse the receiver as a decimal Integer; raises an error if the whole string \
+             is not one.\n\n\
+             ```\n\
+             '42'.to_integer     \"* -> 42\n\
+             ```",
+        )
         .instance_method("mod", |vm, mc, receiver, _args| {
             let s_borrow = recv!(receiver, String);
             let s = s_borrow.to_string();
@@ -361,31 +432,70 @@ pub fn build_string_class() -> NativeClassBuilder {
 
             Ok(vm.new_string(mc, result))
         })
+        .doc(
+            "Interpolation: evaluate each `%{...}` in the receiver as a Quoin expression \
+             in the caller's scope and splice in the result's `.s` rendering. A malformed \
+             expression raises a catchable ParseError.\n\n\
+             ```\n\
+             'x = %{1 + 2}'.mod     \"* -> x = 3\n\
+             ```",
+        )
         .instance_method("length", |vm, mc, receiver, _args| {
             let s = recv!(receiver, String);
             Ok(vm.new_int(mc, s.chars().count() as i64))
         })
+        .doc(
+            "The number of characters (Unicode scalar values) -- not bytes.\n\n\
+             ```\n\
+             'héllo'.length     \"* -> 5\n\
+             ```",
+        )
         .instance_method("ansiEscaped", |vm, mc, receiver, _args| {
             // Escape '$' so this text is safe to embed in an #ANSI'…' color
             // template. Reuses the colorizer's own escape so the two can't drift.
             let s = recv!(receiver, String);
             Ok(vm.new_string(mc, crate::ansi_colorizer::escape(&s)))
         })
+        .doc(
+            "A copy with each `$` doubled, so the text is safe to embed literally in an \
+             `#ANSI'…'` color template (where `$` introduces a color directive).\n\n\
+             ```\n\
+             '$cost'.ansiEscaped     \"* -> $$cost\n\
+             ```",
+        )
         .instance_method("contains?:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let sub = arg!(args, String, 0);
             Ok(vm.new_bool(mc, s.contains(&**sub)))
         })
+        .doc(
+            "Whether the String argument occurs anywhere in the receiver.\n\n\
+             ```\n\
+             'hello'.contains?:'ell'     \"* -> true\n\
+             ```",
+        )
         .instance_method("ends?:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let sub = arg!(args, String, 0);
             Ok(vm.new_bool(mc, s.ends_with(&**sub)))
         })
+        .doc(
+            "Whether the receiver ends with the String argument.\n\n\
+             ```\n\
+             'hello'.ends?:'lo'     \"* -> true\n\
+             ```",
+        )
         .instance_method("starts?:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let sub = arg!(args, String, 0);
             Ok(vm.new_bool(mc, s.starts_with(&**sub)))
         })
+        .doc(
+            "Whether the receiver starts with the String argument.\n\n\
+             ```\n\
+             'hello'.starts?:'he'     \"* -> true\n\
+             ```",
+        )
         .instance_method("index:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let sub = arg!(args, String, 0);
@@ -403,6 +513,13 @@ pub fn build_string_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
+        .doc(
+            "The character index of the first occurrence of the String argument, or nil \
+             if it does not occur.\n\n\
+             ```\n\
+             'hello'.index:'l'     \"* -> 2\n\
+             ```",
+        )
         // Both args are typed: the substring (String) and the index (Integer); a
         // wrong-typed arg matches no variant -> MNU (dispatch enforces the types).
         .typed_instance_method(
@@ -429,14 +546,33 @@ pub fn build_string_class() -> NativeClassBuilder {
                 Ok(vm.new_string(mc, result))
             },
         )
+        .doc(
+            "A copy with the String argument inserted before the given character index; \
+             an index at or past the end appends.\n\n\
+             ```\n\
+             'hello'.insert:'-' at:2     \"* -> he-llo\n\
+             ```",
+        )
         .instance_method("lower", |vm, mc, receiver, _args| {
             let s = recv!(receiver, String);
             Ok(vm.new_string(mc, s.to_lowercase()))
         })
+        .doc(
+            "A lowercase copy (full Unicode lowercasing).\n\n\
+             ```\n\
+             'Hello'.lower     \"* -> hello\n\
+             ```",
+        )
         .instance_method("upper", |vm, mc, receiver, _args| {
             let s = recv!(receiver, String);
             Ok(vm.new_string(mc, s.to_uppercase()))
         })
+        .doc(
+            "An uppercase copy (full Unicode uppercasing).\n\n\
+             ```\n\
+             'hello'.upper     \"* -> HELLO\n\
+             ```",
+        )
         .instance_method("splitString:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let pat = arg!(args, String, 0);
@@ -451,4 +587,11 @@ pub fn build_string_class() -> NativeClassBuilder {
             let res = vm.new_list(mc, parts);
             Ok(res)
         })
+        .doc(
+            "The pieces between occurrences of the literal String separator, as a List of \
+             Strings (for pattern-based splitting see `Regex.split:`).\n\n\
+             ```\n\
+             'a,b,c'.splitString:','     \"* -> #(a b c)\n\
+             ```",
+        )
 }

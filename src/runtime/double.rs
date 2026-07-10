@@ -50,6 +50,18 @@ pub fn build_double_class() -> NativeClassBuilder {
     // Only `<:` is provided natively; `>:`/`<=:`/`>=:` derive from it as shared Quoin.
     let b = NativeClassBuilder::new("Double", Some("Object"))
         .construct_with("use number literals (3.14)")
+        .class_doc(
+            "A 64-bit IEEE-754 floating-point number -- the type of literals like `3.14`. \
+             Arithmetic with either an Integer or a Double operand happens in floating \
+             point and yields a Double. Whole values print without a decimal point \
+             (`4.0.s` is '4').\n\n\
+             Infinity and NaN follow IEEE rules: `1.0 / 0.0` is `Double.inf`, `0.0 / 0.0` \
+             is `Double.nan`, and NaN compares unequal to everything, itself included.\n\n\
+             ```\n\
+             0.1 + 0.2     \"* -> 0.30000000000000004\n\
+             1.0 / 0.0     \"* -> inf\n\
+             ```",
+        )
         .sdk_instance_method("sqrt", |host, receiver, _args| {
             let val = recv!(receiver, Double);
             if val < 0.0 {
@@ -60,24 +72,60 @@ pub fn build_double_class() -> NativeClassBuilder {
             Ok(host.new_double(val.sqrt()))
         })
         .returns("Double")
+        .doc(
+            "The square root. Raises an ArithmeticError for a negative receiver.\n\n\
+             ```\n\
+             2.25.sqrt     \"* -> 1.5\n\
+             ```",
+        )
         // Rounding to a whole number yields an Integer (range-guarded). `round` is
         // half-away-from-zero (`f64::round`); `truncate` drops the fraction toward zero.
         .sdk_instance_method("floor", |host, receiver, _args| {
             Ok(host.new_int(whole_to_i64(recv!(receiver, Double).floor())?))
         })
         .returns("Integer")
+        .doc(
+            "The largest whole number at or below the receiver, as an Integer. Raises an \
+             ArithmeticError if the result falls outside the 64-bit Integer range (there \
+             is no auto-promotion to BigInteger).\n\n\
+             ```\n\
+             2.75.floor     \"* -> 2\n\
+             ```",
+        )
         .sdk_instance_method("ceil", |host, receiver, _args| {
             Ok(host.new_int(whole_to_i64(recv!(receiver, Double).ceil())?))
         })
         .returns("Integer")
+        .doc(
+            "The smallest whole number at or above the receiver, as an Integer \
+             (range-guarded like `floor`).\n\n\
+             ```\n\
+             2.25.ceil     \"* -> 3\n\
+             ```",
+        )
         .sdk_instance_method("round", |host, receiver, _args| {
             Ok(host.new_int(whole_to_i64(recv!(receiver, Double).round())?))
         })
         .returns("Integer")
+        .doc(
+            "The nearest whole number as an Integer, rounding halves away from zero \
+             (range-guarded like `floor`).\n\n\
+             ```\n\
+             2.5.round           \"* -> 3\n\
+             (0 - 2.5).round     \"* -> -3\n\
+             ```",
+        )
         .sdk_instance_method("truncate", |host, receiver, _args| {
             Ok(host.new_int(whole_to_i64(recv!(receiver, Double).trunc())?))
         })
         .returns("Integer")
+        .doc(
+            "The whole part as an Integer, dropping the fraction toward zero \
+             (range-guarded like `floor`).\n\n\
+             ```\n\
+             (0 - 7.5).truncate     \"* -> -7\n\
+             ```",
+        )
         // -1.0 / 0.0 / 1.0 by sign (NaN -> NaN; `f64::signum` would call +0.0 positive).
         .sdk_instance_method("sign", |host, receiver, _args| {
             let val = recv!(receiver, Double);
@@ -93,30 +141,103 @@ pub fn build_double_class() -> NativeClassBuilder {
             Ok(host.new_double(s))
         })
         .returns("Double")
+        .doc(
+            "-1.0, 0.0, or 1.0 by the receiver's sign; NaN stays NaN, and both zeroes \
+             count as 0.0.\n\n\
+             ```\n\
+             (0 - 1.5).sign     \"* -> -1\n\
+             0.0.sign           \"* -> 0\n\
+             ```",
+        )
         // Human string form. Explicit so `.s` never routes through the Rust Display impl.
         .sdk_instance_method("s", |host, receiver, _args| {
             let val = recv!(receiver, Double);
             Ok(host.new_string(format!("{val}")))
         })
+        .doc(
+            "The shortest decimal String that reads back as the same Double; whole values \
+             print without a decimal point.\n\n\
+             ```\n\
+             3.14.s     \"* -> 3.14\n\
+             4.0.s      \"* -> 4\n\
+             ```",
+        )
         // Class-side IEEE-754 constants — handy for tests and boundary math.
         .sdk_class_method("inf", |host, _receiver, _args| {
             Ok(host.new_double(f64::INFINITY))
         })
+        .doc(
+            "Positive infinity, the IEEE-754 value that `1.0 / 0.0` yields; negate it for \
+             negative infinity. Handy for tests and boundary math.\n\n\
+             ```\n\
+             1.0 / 0.0     \"* -> inf\n\
+             ```",
+        )
         .sdk_class_method(
             "nan",
             |host, _receiver, _args| Ok(host.new_double(f64::NAN)),
+        )
+        .doc(
+            "The IEEE-754 not-a-number value, e.g. what `0.0 / 0.0` yields. NaN is unequal \
+             to everything, including itself.\n\n\
+             ```\n\
+             Double.nan == Double.nan     \"* -> false\n\
+             ```",
         );
-    let b = double_binop!(b, "+:", IntBinKind::Add);
-    let b = double_binop!(b, "-:", IntBinKind::Sub);
-    let b = double_binop!(b, "*:", IntBinKind::Mul);
-    let b = double_binop!(b, "/:", IntBinKind::Div);
-    let b = double_binop!(b, "%:", IntBinKind::Mod);
-    let b = double_binop!(b, "<:", IntBinKind::Lt);
+    let b = double_binop!(b, "+:", IntBinKind::Add).doc(
+        "Addition (`a + b`); the result is always a Double, whether the operand is an \
+         Integer or a Double.\n\n\
+         ```\n\
+         0.5 + 0.25     \"* -> 0.75\n\
+         ```",
+    );
+    let b = double_binop!(b, "-:", IntBinKind::Sub).doc(
+        "Subtraction (`a - b`); the result is always a Double.\n\n\
+         ```\n\
+         3.5 - 0.5     \"* -> 3\n\
+         ```",
+    );
+    let b = double_binop!(b, "*:", IntBinKind::Mul).doc(
+        "Multiplication (`a * b`); the result is always a Double.\n\n\
+         ```\n\
+         1.5 * 2.0     \"* -> 3\n\
+         ```",
+    );
+    let b = double_binop!(b, "/:", IntBinKind::Div).doc(
+        "Division (`a / b`); the result is always a Double. Follows IEEE-754: dividing by \
+         zero gives an infinity (or NaN for `0.0 / 0.0`), never an error.\n\n\
+         ```\n\
+         10.0 / 4.0     \"* -> 2.5\n\
+         1.0 / 0.0      \"* -> inf\n\
+         ```",
+    );
+    let b = double_binop!(b, "%:", IntBinKind::Mod).doc(
+        "The floating-point remainder after truncating division (`a % b`); the result \
+         takes the dividend's sign.\n\n\
+         ```\n\
+         7.5 % 2     \"* -> 1.5\n\
+         ```",
+    );
+    let b = double_binop!(b, "<:", IntBinKind::Lt).doc(
+        "Whether the receiver is less than the argument (`a < b`), compared on the \
+         floating-point scale. The one native comparison -- `>`, `<=` and `>=` derive \
+         from it.\n\n\
+         ```\n\
+         1.5 < 2     \"* -> true\n\
+         ```",
+    );
     // pow: — a Double base always yields a Double (both arg types coerce via `as_f64`).
     let b = b
         .sdk_typed_instance_method("pow:", &["Integer"], |host, receiver, args| {
             Ok(host.new_double(receiver.as_f64().unwrap().powf(args[0].as_f64().unwrap())))
         })
+        .doc(
+            "The receiver raised to the argument's power (Integer or Double exponent); a \
+             Double base always yields a Double.\n\n\
+             ```\n\
+             2.0.pow: 2     \"* -> 4\n\
+             ```",
+        )
         .sdk_typed_instance_method("pow:", &["Double"], |host, receiver, args| {
             Ok(host.new_double(receiver.as_f64().unwrap().powf(args[0].as_f64().unwrap())))
         });
@@ -130,6 +251,14 @@ pub fn build_double_class() -> NativeClassBuilder {
                 args[0]
             })
         })
+        .doc(
+            "The smaller of the receiver and the argument, returned as the winning operand \
+             itself -- a mixed Double/Integer comparison keeps the winner's own type. The \
+             compare happens on the floating-point scale.\n\n\
+             ```\n\
+             1.5.min: 2     \"* -> 1.5\n\
+             ```",
+        )
         .sdk_typed_instance_method("min:", &["Double"], |_host, receiver, args| {
             Ok(if receiver.as_f64().unwrap() <= args[0].as_f64().unwrap() {
                 receiver
@@ -144,6 +273,14 @@ pub fn build_double_class() -> NativeClassBuilder {
                 args[0]
             })
         })
+        .doc(
+            "The larger of the receiver and the argument, returned as the winning operand \
+             itself -- a mixed Double/Integer comparison keeps the winner's own type. The \
+             compare happens on the floating-point scale.\n\n\
+             ```\n\
+             1.5.max: 2     \"* -> 2\n\
+             ```",
+        )
         .sdk_typed_instance_method("max:", &["Double"], |_host, receiver, args| {
             Ok(if receiver.as_f64().unwrap() >= args[0].as_f64().unwrap() {
                 receiver
@@ -154,4 +291,12 @@ pub fn build_double_class() -> NativeClassBuilder {
     b.sdk_instance_method("==:", |host, receiver, args| {
         Ok(host.new_bool(receiver == args[0]))
     })
+    .doc(
+        "Numeric equality with any value. Doubles and Integers compare by numeric value; \
+         a non-number is simply unequal, never an error. NaN is unequal to everything, \
+         itself included.\n\n\
+         ```\n\
+         5.0 == 5     \"* -> true\n\
+         ```",
+    )
 }

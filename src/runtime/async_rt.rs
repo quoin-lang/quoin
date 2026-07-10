@@ -15,6 +15,11 @@ use gc_arena::Gc;
 pub fn build_async_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Async", Some("Object"))
         .abstract_class()
+        .class_doc(
+            "Structured concurrency over the task scheduler: run blocks as concurrent tasks \
+             whose I/O overlaps (`gather:`), park without blocking other tasks (`sleep:`), \
+             and put a deadline on anything (`timeout:do:`). See docs/ASYNC_ARCH.md.",
+        )
         // `Async.gather:[ {…}, {…} ] -> list` — spawn one task per block, overlap
         // their I/O, and return the results in order. Propagates the first error.
         .class_method("gather:", |vm, _mc, _receiver, args| {
@@ -40,6 +45,14 @@ pub fn build_async_class() -> NativeClassBuilder {
             }
             vm.await_gather(blocks)
         })
+        .doc(
+            "Run a List of zero-parameter blocks as concurrent tasks -- their I/O overlaps \
+             -- and answer their results as a List in input order once all complete. \
+             Propagates the first error.\n\n\
+             ```\n\
+             Async.gather:#( { Async.sleep:2; 'a' } { 'b' } )    \"* -> #(a b)\n\
+             ```",
+        )
         // `Async.sleep:` — park the running fiber via the async IoBackend, without blocking other
         // fibers (Stage 1 — see docs/ASYNC_ARCH.md). Accepts a bare ms count or a Duration; nil.
         .typed_class_method("sleep:", &["Integer"], |vm, mc, _receiver, args| {
@@ -48,6 +61,10 @@ pub fn build_async_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Park the running task for the given milliseconds (a Duration is also accepted) \
+             without blocking other tasks; answers nil.",
+        )
         .typed_class_method("sleep:", &["Duration"], |vm, mc, _receiver, args| {
             let ms = duration_to_millis(args[0], "sleep:")? as u64;
             vm.await_io(IoRequest::Sleep { ms })?;
@@ -64,6 +81,15 @@ pub fn build_async_class() -> NativeClassBuilder {
                 let block = arg!(args, Block, 1);
                 vm.await_timeout(mc, block, ms, None)
             },
+        )
+        .doc(
+            "Run the block with a deadline of the given milliseconds (or a Duration): its \
+             value if it finishes in time; if the deadline fires first, the block is \
+             cancelled (its `finally` runs, in-flight I/O aborts) and a catchable timeout \
+             error raises.\n\n\
+             ```\n\
+             Async.timeout:50 do:{ 42 }    \"* -> 42\n\
+             ```",
         )
         .typed_class_method(
             "timeout:do:",
@@ -87,6 +113,15 @@ pub fn build_async_class() -> NativeClassBuilder {
                 let on_cancel = arg!(args, Block, 2);
                 vm.await_timeout(mc, block, ms, Some(on_cancel))
             },
+        )
+        .doc(
+            "As `timeout:do:`, but when the deadline fires run the handler and answer ITS \
+             value instead of throwing (`onCancel:{ nil }` is the non-throwing form). The \
+             handler covers only this deadline: an outer cancellation still propagates and \
+             the handler does not run.\n\n\
+             ```\n\
+             Async.timeout:5 do:{ Async.sleep:200; 1 } onCancel:{ 'late' }    \"* -> late\n\
+             ```",
         )
         .typed_class_method(
             "timeout:do:onCancel:",

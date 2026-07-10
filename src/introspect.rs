@@ -40,6 +40,16 @@ pub struct ClassInfo {
     pub class_methods: Vec<MethodInfo>,
     pub is_sealed: bool,
     pub is_abstract: bool,
+    /// Where the class was defined (`VmState::class_meta`, recorded by `DefineClass`).
+    /// `None` for native classes and `-e`/REPL definitions.
+    pub source: Option<SourceLoc>,
+    /// A native class's `.class_doc(..)` text. Quoin classes answer `None` here — their doc
+    /// is the `"*` block above `source`, extracted lazily (docs/DOCS_ARCH.md §4/§6).
+    pub doc: Option<String>,
+    /// Every statically-named reopen site (`Name <-- { … }`), in load order. The doc block
+    /// above a reopen documents the *extension*; for a native class this is where its qnlib
+    /// class doc lives.
+    pub extension_sources: Vec<SourceLoc>,
 }
 
 /// A method = its selector plus the chain of typed/guarded overloads (multimethod).
@@ -59,6 +69,9 @@ pub struct MethodVariant {
     pub guarded: bool,
     pub native: bool,
     pub source: Option<SourceLoc>,
+    /// A native variant's `.doc(..)` text. Quoin variants answer `None` — their doc is the
+    /// `"*` block above `source`, extracted lazily (docs/DOCS_ARCH.md §4/§6).
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +154,12 @@ pub fn find_namespaces<'gc>(vm: &VmState<'gc>, prefix: &str) -> Vec<String> {
 }
 
 /// Resolve a class by its exact (rendered) global name. Exact lookup honors `$`-internals.
+/// The class named `name`, as a Gc handle — the REPL's `$doc` resolves a name once and then
+/// asks per-side. Public counterpart of the private lookup below.
+pub fn find_class_gc<'gc>(vm: &VmState<'gc>, name: &str) -> Option<Gc<'gc, RefLock<Class<'gc>>>> {
+    find_class(vm, name)
+}
+
 fn find_class<'gc>(vm: &VmState<'gc>, name: &str) -> Option<Gc<'gc, RefLock<Class<'gc>>>> {
     vm.globals.borrow().iter().find_map(|(key, val)| match val {
         Value::Class(c) if key.to_string() == name => Some(*c),
@@ -152,6 +171,7 @@ fn find_class<'gc>(vm: &VmState<'gc>, name: &str) -> Option<Gc<'gc, RefLock<Clas
 pub fn describe_class<'gc>(vm: &VmState<'gc>, name: &str) -> Option<ClassInfo> {
     let class_gc = find_class(vm, name)?;
     let class = class_gc.borrow();
+    let meta = vm.class_meta.get(&class.name);
     Some(ClassInfo {
         name: class.name.to_string(),
         parent: class.parent.map(|p| p.borrow().name.to_string()),
@@ -165,7 +185,72 @@ pub fn describe_class<'gc>(vm: &VmState<'gc>, name: &str) -> Option<ClassInfo> {
         class_methods: methods_of(vm, &class.class_methods),
         is_sealed: class.is_sealed,
         is_abstract: class.is_abstract,
+        source: meta.and_then(|m| m.source.as_ref()).map(|si| SourceLoc {
+            file: si.filename.clone(),
+            line: si.line,
+            column: si.column,
+        }),
+        doc: meta.and_then(|m| m.doc.clone()),
+        extension_sources: meta
+            .map(|m| {
+                m.extensions
+                    .iter()
+                    .map(|si| SourceLoc {
+                        file: si.filename.clone(),
+                        line: si.line,
+                        column: si.column,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
+}
+
+/// The reference doc for the class named `name`: a native class's `.class_doc(..)` text,
+/// else the `"*` block above its definition, else the block above its first documented reopen
+/// (docs/DOCS_ARCH.md §6). Lazy — source is read (embedded stdlib or disk) only when asked.
+pub fn doc_of_class<'gc>(vm: &VmState<'gc>, name: &str) -> Option<String> {
+    let key = crate::value::NamespacedName::parse(name);
+    let meta = vm.class_meta.get(&key)?;
+    if let Some(doc) = &meta.doc {
+        return Some(doc.clone());
+    }
+    let lift = |si: &crate::value::SourceInfo| {
+        crate::docs::unit_source(&si.filename).and_then(|t| crate::docs::doc_above(&t, si.line))
+    };
+    meta.source
+        .as_ref()
+        .and_then(&lift)
+        .or_else(|| meta.extensions.iter().find_map(&lift))
+}
+
+/// The reference doc for `selector` on `class` — instance side, or the class side with
+/// `class_side` (the `.meta.docFor:` path). Walks the hierarchy like dispatch does, then the
+/// multimethod chain: a native variant's `.doc(..)` text, else the `"*` block above the first
+/// located Quoin variant. Lazy, like [`doc_of_class`].
+pub fn doc_of_method<'gc>(
+    vm: &VmState<'gc>,
+    class: gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::Class<'gc>>>,
+    selector: &str,
+    class_side: bool,
+) -> Option<String> {
+    let head = vm.lookup_in_class_hierarchy(class, selector, class_side)?;
+    let mut curr = Some(head);
+    while let Some(method_val) = curr {
+        if let Some(doc) = vm.candidate_doc(method_val) {
+            return Some(doc);
+        }
+        if let Some(si) = vm
+            .get_block_from_method(method_val)
+            .and_then(|b| b.template.source_info.clone())
+            && let Some(text) = crate::docs::unit_source(&si.filename)
+            && let Some(doc) = crate::docs::method_doc_above(&text, si.line, selector)
+        {
+            return Some(doc);
+        }
+        curr = vm.get_next_method_in_chain(method_val);
+    }
+    None
 }
 
 /// Selectors defined on `class` (and, with `include_inherited`, on its parent + mixins)
@@ -285,6 +370,7 @@ fn method_info<'gc>(vm: &VmState<'gc>, selector: &str, head: Value<'gc>) -> Meth
             guarded,
             native: block.is_none(),
             source,
+            doc: vm.candidate_doc(method_val),
         });
         curr = vm.get_next_method_in_chain(method_val);
     }
@@ -531,6 +617,7 @@ mod tests {
             guarded: false,
             native: false,
             source: None,
+            doc: None,
         };
         assert_eq!(
             signature(
@@ -540,7 +627,8 @@ mod tests {
                     ret_type: None,
                     guarded: false,
                     native: false,
-                    source: None
+                    source: None,
+                    doc: None,
                 }
             ),
             "sound"
@@ -554,7 +642,8 @@ mod tests {
                     ret_type: None,
                     guarded: false,
                     native: false,
-                    source: None
+                    source: None,
+                    doc: None,
                 }
             ),
             "at:Integer put:"
@@ -567,7 +656,8 @@ mod tests {
                     ret_type: None,
                     guarded: true,
                     native: false,
-                    source: None
+                    source: None,
+                    doc: None,
                 }
             ),
             "g: {…}"

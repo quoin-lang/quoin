@@ -152,6 +152,22 @@ fn wrap_handle<'gc>(
 pub fn build_worker_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Worker", Some("Object"))
         .construct_with("use Worker.spawn: / Worker.start:")
+        .class_doc(
+            "An isolate: a fresh VM on its own OS thread (or child process) with message \
+             lanes to its parent. Parent side: `Worker.spawn:'unit.qn'` answers a handle -- \
+             `send:` / `receive` exchange values, `join` parks until the unit finishes. \
+             Worker side, inside the spawned unit: class-side `Worker.receive` / \
+             `Worker.send:` are the mirror lanes, and `Worker.worker?` says which side you \
+             are on. Messages deep-copy plain data (numbers, strings, booleans, nil, Bytes, \
+             Lists, Maps); symbols, instances, and resources refuse -- and blocks cross \
+             only as a whole thread-backed message. See docs/CONCURRENCY_ARCH.md.\n\n\
+             ```\n\
+             var w = Worker.spawn:'jobs/indexer.qn';\n\
+             w.send:#( 'index' 'docs/' );\n\
+             var answer = w.receive;\n\
+             w.join\n\
+             ```",
+        )
         // ---- parent side (class-side spawn, instance-side lanes) ----
         .class_method("spawn:", |vm, mc, receiver, args| {
             let path = args[0]
@@ -169,6 +185,11 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 spawn_worker(path),
             )
         })
+        .doc(
+            "Boot a fresh VM running the unit at the String path on its own OS thread and \
+             answer its handle immediately. The unit runs to completion; `join` observes \
+             it. `Worker.spawn:(VM.unit)` runs another copy of the current program.",
+        )
         // §13.2: backing is a spawn-time choice — thread (default) or a
         // child qn process bridged by the pump.
         .class_method("spawn:backing:", |vm, mc, receiver, args| {
@@ -203,6 +224,11 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "As `spawn:`, choosing the backing at spawn time: 'thread' (the default) or \
+             'process' -- a child qn process bridged over the extension wire, whose \
+             messages carry data only (blocks cannot cross a process boundary).",
+        )
         // Portable blocks are in-process by nature; the explicit form
         // documents WHY rather than silently doing the wrong thing.
         .class_method("start:backing:", |vm, mc, receiver, args| {
@@ -224,6 +250,11 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "As `start:` for 'thread' backing. Blocks cannot cross a process boundary \
+             (templates are in-process references), so 'process' refuses loudly -- put the \
+             code in a unit and `Worker.spawn:backing:` it instead.",
+        )
         // Portable blocks (docs/CONCURRENCY_ARCH.md §10): ship the block's
         // template by reference plus a deep-copied SNAPSHOT of its free
         // reads; join returns the block's value. The portability scan
@@ -262,6 +293,18 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 spawn_worker_block(pb),
             )
         })
+        .doc(
+            "Spawn a thread-backed worker from a portable BLOCK instead of a unit file: the \
+             block's template ships by reference plus a deep-copied snapshot of its free \
+             reads, and `join` answers the block's value (unlike a unit worker's nil). The \
+             portability scan refuses write-captures, `^^`, `self`/`@fields`, guarded \
+             blocks, and class/method definition -- loudly, at submit time. The block takes \
+             no parameters; send it data through the lanes.\n\n\
+             ```\n\
+             var h = Worker.start:{ 21 * 2 };\n\
+             h.join    \"* -> 42\n\
+             ```",
+        )
         .instance_method("send:", |vm, _mc, receiver, args| {
             let (tx, backing) = receiver
                 .with_native_state::<NativeWorkerHandle, _, _>(|h| (h.inbox_tx.clone(), h.backing))
@@ -271,6 +314,10 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 .map_err(|_| QuoinError::Other("Worker.send: the worker has exited".into()))?;
             Ok(vm.new_nil(_mc))
         })
+        .doc(
+            "Send a value into the worker's inbox (deep-copied; a thread-backed worker also \
+             accepts a portable block). Raises if the worker has exited. Answers nil.",
+        )
         .instance_method("receive", |vm, mc, receiver, _args| {
             let rx = receiver
                 .with_native_state::<NativeWorkerHandle, _, _>(|h| h.outbox_rx.clone())
@@ -283,6 +330,11 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "Park until the worker sends a value back (its class-side `Worker.send:`); nil \
+             once the worker has exited and its outbox is drained. Parks like any I/O wait, \
+             so it composes with `Async.gather:` / `timeout:do:` / cancellation.",
+        )
         // handle.label:'name' — restamp the registry row (VM.ps/psTree show
         // it; the Plan layer marks ownership and orphans this way).
         .instance_method("label:", |vm, _mc, receiver, args| {
@@ -297,6 +349,10 @@ pub fn build_worker_class() -> NativeClassBuilder {
             }
             Ok(receiver)
         })
+        .doc(
+            "Restamp the worker's row in `VM.ps` / `VM.psTree` with a human-readable name; \
+             answers the handle. The Plan layer marks ownership and orphans this way.",
+        )
         // handle.terminate — REAL cancellation, process backing only (a
         // thread worker cannot be killed; orphan it instead). Idempotent;
         // join afterwards reports the exit as an error.
@@ -315,6 +371,11 @@ pub fn build_worker_class() -> NativeClassBuilder {
             }
             Ok(Value::Nil)
         })
+        .doc(
+            "Kill a process-backed worker -- REAL cancellation, idempotent; a later `join` \
+             reports the exit as an error. A thread-backed worker cannot be killed: this \
+             raises, so orphan or join it instead.",
+        )
         .instance_method("join", |vm, mc, receiver, _args| {
             let rx = receiver
                 .with_native_state::<NativeWorkerHandle, _, _>(|h| {
@@ -337,6 +398,11 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "Park until the worker finishes. A `Worker.start:` block worker answers the \
+             block's value (copied); a unit worker answers nil. Raises the worker's error, \
+             catchably, if it failed. A handle can be joined once -- a second join raises.",
+        )
         // ---- worker side (class-side lanes, live only inside a worker) ----
         .class_method("receive", |vm, mc, _receiver, _args| {
             let Some(link) = vm.worker_link.as_ref() else {
@@ -353,6 +419,11 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "Worker side (inside a spawned unit): park for the next value from the parent; \
+             nil once the parent's lane is closed and drained. Raises when not inside a \
+             worker.",
+        )
         .class_method("send:", |vm, mc, _receiver, args| {
             let Some(link) = vm.worker_link.as_ref() else {
                 return Err(QuoinError::Other("Worker.send: not inside a worker".into()));
@@ -364,9 +435,18 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 .map_err(|_| QuoinError::Other("Worker.send: the parent has gone away".into()))?;
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Worker side (inside a spawned unit): send a value to the parent's `receive` \
+             lane (deep-copied). Raises when not inside a worker, or when the parent has \
+             gone away. Answers nil.",
+        )
         .class_method("worker?", |vm, mc, _receiver, _args| {
             Ok(vm.new_bool(mc, vm.worker_link.is_some()))
         })
+        .doc(
+            "True inside a spawned worker, false in the main program -- how a unit that can \
+             run both ways tells which side it is on.",
+        )
 }
 
 /// Value → String helper used by `spawn:` (mirrors `arg!` string extraction

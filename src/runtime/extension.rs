@@ -1500,6 +1500,15 @@ fn load_package<'gc>(
 pub fn build_extension_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Extension", Some("Object"))
         .construct_with("use Extension.loadPackage:")
+        .class_doc(
+            "A connected out-of-process extension: a subprocess speaking the Quoin \
+             extension wire, providing classes and operations to the host program. \
+             `Extension.loadPackage:` is the managed entry point (spawn per the package's \
+             extension.toml, install its classes under the package namespace, run its \
+             init.qn glue) -- `use name:*` does this for you. The handle's `call:with:` \
+             family is the raw op surface that package glue builds on. See \
+             docs/EXT_PACKAGING.md.",
+        )
         // `Extension spawn: '<path-to-binary>'` -> spawn the extension subprocess and connect to
         // it, returning an Extension handle. The unmanaged escape hatch (`EXT_PACKAGING.md` §4):
         // it installs the manifest's `ClassDecl` names *verbatim* (possibly bare globals), unlike
@@ -1520,6 +1529,12 @@ pub fn build_extension_class() -> NativeClassBuilder {
             }
             Ok(ext_val)
         })
+        .doc(
+            "Spawn the extension binary at the String path, connect to it, and answer the \
+             Extension handle. The unmanaged escape hatch for dev/testing: the manifest's \
+             class names install VERBATIM as globals (no namespace enforcement); the \
+             managed path is `loadPackage:`.",
+        )
         // `Extension loadPackage: '<dir>'` -> load an extension *package* (a folder with an
         // `extension.toml` launch/identity spec + an optional `init.qn` of Quoin-side glue;
         // `EXT_PACKAGING.md`). Spawns the subprocess per the manifest, installs the provided classes
@@ -1529,6 +1544,13 @@ pub fn build_extension_class() -> NativeClassBuilder {
             let dir = arg!(args, String, 0).to_string();
             load_package(vm, mc, &dir)
         })
+        .doc(
+            "Load an extension PACKAGE -- a folder with an extension.toml launch/identity \
+             spec and optional init.qn glue: spawn the subprocess per the manifest, install \
+             its classes under the package namespace (no bare-global pollution), run \
+             init.qn, and cache the live extension (idempotent per folder). `use name:*` \
+             resolves a package folder and calls this.",
+        )
         // `ext call: '<op>' with: '<arg>'` -> send the `Call`, then service the conversation:
         // a loop of re-entrant host-ops the extension may issue (each answered inline) until it
         // sends the terminal `CallReturn`. Op + arg are strings; the result is a string or a
@@ -1538,6 +1560,12 @@ pub fn build_extension_class() -> NativeClassBuilder {
             let argv = arg!(args, String, 1).to_string();
             run_extension_method(vm, mc, receiver, op, argv, Vec::new(), None)
         })
+        .doc(
+            "The raw call surface: send the op (a String) with a String argument, then \
+             service the conversation -- re-entrant host-ops the extension may issue -- \
+             until it returns. Answers a String or a resource handle. Package glue normally \
+             wraps this; `call:with:args:` / `call:with:data:` pass richer arguments.",
+        )
         // `ext call: '<op>' with: '<arg>' args: #( v1 v2 … )` -> like `call:with:`, but also
         // passes typed handle arguments: each `ExtResource` in the list passes its resource id;
         // every other value (a block, string, etc.) is minted a call-local host-value handle.
@@ -1550,6 +1578,12 @@ pub fn build_extension_class() -> NativeClassBuilder {
             let call_args = extract_args(list)?;
             run_extension_method(vm, mc, receiver, op, argv, call_args, None)
         })
+        .doc(
+            "As `call:with:`, additionally passing a List of typed handle arguments: an \
+             extension-backed instance passes its resource id; every other value (a block, \
+             a string, ...) is minted a call-local host-value handle the extension can call \
+             back into.",
+        )
         // `ext call: '<op>' with: '<arg>' data: <value>` -> like `call:with:`, but also passes a
         // structured-value payload (any Quoin value, serialized to a `DataValue` tree). The
         // extension reads it as native structured data; the result may likewise be structured.
@@ -1561,6 +1595,11 @@ pub fn build_extension_class() -> NativeClassBuilder {
             })?;
             run_extension_method(vm, mc, receiver, op, argv, Vec::new(), Some(data))
         })
+        .doc(
+            "As `call:with:`, additionally passing one structured payload (any Quoin data \
+             value, serialized as a tree) that the extension reads as native structured \
+             data; the result may likewise come back structured.",
+        )
         // `Extension resourceIdOf: v` -> the extension-assigned instance id behind an
         // extension-backed value (its object-table key; unique within one extension). Identity
         // reflection for package glue: ext-backed instances can't carry Quoin-side state, and a
@@ -1579,4 +1618,11 @@ pub fn build_extension_class() -> NativeClassBuilder {
                 })?;
             Ok(vm.new_int(mc, id as i64))
         })
+        .doc(
+            "The extension-assigned instance id behind an extension-backed value (its \
+             object-table key, unique within one extension). Identity reflection for \
+             package glue: ext-backed instances carry no Quoin-side state and a package may \
+             overload `==` (numpy's elementwise comparisons, say), so this is the only \
+             stable per-instance key.",
+        )
 }

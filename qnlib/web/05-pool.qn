@@ -1,6 +1,6 @@
-"* ===========================================================================
-"* [Web]Pool — multi-core request execution over worker isolates
-"* (docs/WEB_ARCH.md workers; docs/CONCURRENCY_ARCH.md §13).
+"* Multi-core request execution over worker isolates — the pool behind
+"* [Web]App's serve:workers: (docs/WEB_ARCH.md workers;
+"* docs/CONCURRENCY_ARCH.md §13).
 "*
 "* Sockets never cross worker lanes — the transport VM keeps every
 "* connection, and REQUESTS TRAVEL AS DATA: a connection task ships
@@ -24,14 +24,18 @@
 "* streaming over the lanes is a recorded follow-up).
 [Web]Pool <- { | @workers @alive @pendings @routers @next @counter |
     .meta <-- {
+        "* Spawn a pool of `n` workers, each re-running `unit` under a 'thread'
+        "* or 'process' backing, and return it ready to handle:.
         spawn:unit:backing: -> { |n unit backing|
             ^[Web]Pool.new.startWorkers:n unit:unit backing:backing
         };
 
         "* -- wire shapes -------------------------------------------------
-        "* Request -> data: headers stay the order/duplicate-preserving
-        "* #(name value) pair list; the body drains to bytes here in the
-        "* transport VM (it is stream-backed until someone reads it).
+
+        "* Request -> wire data, transport side: headers stay the
+        "* order/duplicate-preserving #(name value) pair list; the body
+        "* drains to bytes here in the transport VM (it is stream-backed
+        "* until someone reads it).
         requestToData:id: -> { |req id|
             ^#{
                 'id': id
@@ -89,6 +93,8 @@
             Worker.send:#{ 'id': id 'end': true }
         };
 
+        "* Wire data -> [HTTP]ServerResponse, transport side (plain single-frame
+        "* replies; streamed replies rebuild in handle: instead).
         dataToResponse: -> { |m|
             ^[HTTP]ServerResponse.new:{
                 var status = m.at:'status';
@@ -98,6 +104,7 @@
         }
     };
 
+    "* Internal: empty registries — workers, liveness, per-worker pendings, routers.
     init -> {
         @workers = #();
         @alive = #();
@@ -107,6 +114,8 @@
         @counter = 0
     };
 
+    "* Internal: spawn the `n` workers (pool sentinel pre-buffered) and one
+    "* reply-router task per worker; returns self.
     startWorkers:unit:backing: -> { |n unit backing|
         var me = self;
         (0..n).each:{ |i|
@@ -152,6 +161,7 @@
         self
     };
 
+    "* Internal: mark worker `i` dead and fail its in-flight requests with a 502.
     markDead: -> { |i|
         @alive.at:i put:false;
         var pending = @pendings.at:i;
@@ -162,6 +172,7 @@
         }
     };
 
+    "* How many pool workers are still alive.
     aliveCount -> {
         var n = 0;
         @alive.each:{ |a| a.if:{ n = n + 1 } };

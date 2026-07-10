@@ -271,11 +271,31 @@ fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, QuoinError> {
 pub fn build_worker_service_class() -> NativeClassBuilder {
     NativeClassBuilder::new("WorkerService", Some("Object"))
         .construct_with("use WorkerService.host:class:")
+        .class_doc(
+            "Host a class in a dedicated worker isolate and get a PROXY whose ordinary \
+             method sends become RPC over the worker lanes: sticky state with serialized \
+             access -- an actor, effectively. Arguments and returns follow the worker data \
+             taxonomy (plain data crosses; blocks and instances refuse), errors in the \
+             hosted method raise catchably at the call site, and one call runs at a time \
+             (concurrent callers queue fairly).\n\n\
+             ```\n\
+             var index = WorkerService.host:'search/index.qn' class:'SearchIndex';\n\
+             index.add:doc;\n\
+             var hits = index.query:'quoin'\n\
+             ```",
+        )
         .class_method("host:class:", |vm, mc, receiver, args| {
             let path = string_arg(args[0], "the unit path")?;
             let class_name = string_arg(args[1], "the class name")?;
             host(vm, mc, receiver, path, class_name, "thread")
         })
+        .doc(
+            "Spawn a worker running the unit at the path, instantiate the named class in it \
+             (`TheClass.new`), and answer the proxy once the service reports ready. Every \
+             selector the proxy doesn't define itself (everything except `serviceStop`) \
+             forwards as RPC and parks for the reply, so calls compose with `Async.gather:` \
+             / `timeout:do:` like any parked wait.",
+        )
         // Backing is a spawn-time choice by DESIGN (docs/CONCURRENCY_ARCH.md
         // §10): 'thread' is this v1; 'process' — the sanctioned escape from
         // the macOS cluster ceiling for compute-heavy services — is the
@@ -293,6 +313,11 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "As `host:class:`, choosing the backing at spawn time: 'thread' (the default) \
+             or 'process' (a child qn process -- the escape from the in-process thread \
+             ceiling for compute-heavy services).",
+        )
         // Stop the service: waits for in-flight calls (takes the token),
         // sends the nil end-of-service message, and joins the worker.
         // Subsequent calls raise 'the service is stopped'.
@@ -316,4 +341,9 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "Stop the service: wait for in-flight calls to finish, send the end-of-service \
+             message, and join the worker. Further calls raise 'the service is stopped'. \
+             Answers nil.",
+        )
 }

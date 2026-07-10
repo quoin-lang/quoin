@@ -79,6 +79,9 @@ Statuses were re-verified against the tree on 2026-07-09. The vocabulary:
 
 - [`DEBUGGER_ARCH.md`](DEBUGGER_ARCH.md) — SHIPPED. `qn debug`, and DAP over stdio.
 - [`REPL_DESIGN.md`](REPL_DESIGN.md) — SHIPPED (P0–P2). `qn repl`.
+- [`DOCS_ARCH.md`](DOCS_ARCH.md) — PARTIAL (phases 1–2 shipped). Reference docs from comment
+  blocks: `qn doc` (HTML + JSON), `doc`/`docFor:`/`$doc`, and `qn highlight --html` sharing
+  one set of code styles. Phase 3 (doctests) remains.
 
 ### Stdlib
 

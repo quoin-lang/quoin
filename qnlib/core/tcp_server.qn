@@ -8,6 +8,13 @@
 "* task registry stays bounded by live concurrency rather than growing one entry per connection
 "* ever served — the tradeoff is that `join` does not return per-connection results.
 TcpServer <- { |@address @listener @tasks @acceptTask|
+    "* Bind and listen on `address` immediately (a ':0' port picks an
+    "* ephemeral one — read it back with `port`); connections are not
+    "* accepted until `start:`.
+    "*
+    "* ```
+    "* var server = TcpServer.new:{ var address = '127.0.0.1:0' }
+    "* ```
     init: -> { |address|
         @address = address;
         @tasks = #();

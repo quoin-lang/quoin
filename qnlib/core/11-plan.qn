@@ -22,34 +22,88 @@
 "* Timeouts compose: Async.timeout:ms do:{ plan.await }.
 Plan <- { | @kind @code @msg @label @children @policy |
     .meta <-- {
-        "* --- constructors --------------------------------------------
+        "* An in-VM task leaf: run block `b` as a Task on this VM's scheduler
+        "* — same heap, ordinary closure, so it may capture freely (the only
+        "* leaf kind that can).
+        "*
+        "* ```
+        "* (Plan.task:{ 1 + 1 }).await    "* -> 2
+        "* ```
         task: -> { |b| ^^Plan.new.setKind:'task' code:b };
+        "* A thread-isolate leaf: `c` is a portable block, or a unit path
+        "* (String) loaded fresh in the isolate. The work runs on its own
+        "* thread with its own heap; the result deep-copies back.
+        "*
+        "* ```
+        "* (Plan.thread:{ 6 * 7 }).await    "* -> 42
+        "* ```
         thread: -> { |c| ^^Plan.new.setKind:'thread' code:c };
+        "* A thread leaf whose worker is sent `m` as its first message at
+        "* launch — the code reads it with `Worker.receive`.
+        "*
+        "* ```
+        "* (Plan.thread:{ Worker.receive * 2 } send:21).await    "* -> 42
+        "* ```
         thread:send: -> { |c m| ^^(Plan.new.setKind:'thread' code:c).setMsg:m };
+        "* A thread leaf stamped with registry label `l`, so `VM.psTree` shows
+        "* which plan owns the worker.
         thread:label: -> { |c l| ^^(Plan.new.setKind:'thread' code:c).setLabel:l };
+        "* A thread leaf with both an input message (see `thread:send:`) and a
+        "* registry label (see `thread:label:`).
         thread:send:label: -> { |c m l|
             ^^((Plan.new.setKind:'thread' code:c).setMsg:m).setLabel:l
         };
+        "* A child-process leaf: run unit file `u` in its own `qn` process.
+        "* Unit-form only — blocks cannot cross a process boundary — and the
+        "* lanes carry data-only values.
         process: -> { |u| ^^Plan.new.setKind:'process' code:(Plan.unitPath:u) };
+        "* A process leaf whose child is sent `m` as its first message at
+        "* launch (see `thread:send:`).
         process:send: -> { |u m|
             ^^(Plan.new.setKind:'process' code:(Plan.unitPath:u)).setMsg:m
         };
+        "* A process leaf stamped with registry label `l` (see `thread:label:`).
         process:label: -> { |u l|
             ^^(Plan.new.setKind:'process' code:(Plan.unitPath:u)).setLabel:l
         };
+        "* A process leaf with both an input message and a registry label.
         process:send:label: -> { |u m l|
             ^^((Plan.new.setKind:'process' code:(Plan.unitPath:u)).setMsg:m).setLabel:l
         };
+        "* Structural gather: a composite that launches every plan in `plans`
+        "* in parallel; `await` answers a List isomorphic to the input. The
+        "* failure policy defaults to 'cancelRest' (see `all:onError:`).
+        "*
+        "* ```
+        "* (Plan.all:#( (Plan.task:{ 1 + 1 }) (Plan.thread:{ 2 + 2 }) )).await    "* -> #(2 4)
+        "* ```
         all: -> { |plans| ^^Plan.new.setKind:'all' children:plans };
+        "* A gather with an explicit failure policy: 'cancelRest' (the first
+        "* error cancels the remaining children and re-raises) or 'collect'
+        "* (no slot is lost — each resolves to #{'ok': v} or #{'err': message}).
+        "* Any other policy string throws.
+        "*
+        "* ```
+        "* (Plan.all:#( (Plan.task:{ 1 }) (Plan.task:{ 'boom'.throw }) ) onError:'collect').await
+        "*     "* -> #(#{'ok': 1} #{'err': 'boom'})
+        "* ```
         all:onError: -> { |plans policy|
             ((policy == 'cancelRest') || (policy == 'collect'))
                 .else:{ ('Plan onError: unknown policy ' + policy.s
                     + ' (cancelRest|collect)').throw };
             ^^(Plan.new.setKind:'all' children:plans).setPolicy:policy
         };
+        "* Race: launch every child; the first SUCCESS wins — `await` answers
+        "* its value and cancels the rest. Errors don't win the race: if every
+        "* branch fails, `await` throws with the last error.
+        "*
+        "* ```
+        "* (Plan.any:#( (Plan.task:{ Async.sleep:50; 1 }) (Plan.task:{ 2 }) )).await    "* -> 2
+        "* ```
         any: -> { |plans| ^^Plan.new.setKind:'any' children:plans };
 
-        "* process leaves are unit-form only (§13.2: blocks cannot cross)
+        "* Internal: validate a process-leaf target — unit paths (Strings)
+        "* only, because blocks cannot cross a process boundary (§13.2).
         unitPath: -> { |u|
             (u.class.name == 'String')
                 .else:{ ('Plan.process: needs a unit path — blocks cannot cross a '
@@ -57,7 +111,8 @@ Plan <- { | @kind @code @msg @label @children @policy |
             ^u
         };
 
-        "* settle a LIVE node from a fresh task (no captured instance)
+        "* Internal: settle a live node from a fresh task (no captured
+        "* instance state).
         settleNode: -> { |live| ^(live.at:'plan').settle:live };
 
         "* Cancel whatever part of a live subtree has not completed:
@@ -79,6 +134,8 @@ Plan <- { | @kind @code @msg @label @children @policy |
         }
     };
 
+    "* A fresh Plan defaults to an empty in-VM task leaf under the
+    "* 'cancelRest' policy; the class-side constructors overwrite from here.
     init -> {
         @kind = 'task';
         @code = nil;
@@ -88,17 +145,47 @@ Plan <- { | @kind @code @msg @label @children @policy |
         @policy = 'cancelRest'
     };
 
-    "* --- internal setters (constructors only) ------------------------
+    "* Internal setter used by the constructors: stamp the leaf kind and its
+    "* code (portable block or unit path). Answers self for chaining.
     setKind:code: -> { |k c| @kind = k; @code = c; ^self };
+    "* Internal setter used by the constructors: stamp a composite kind
+    "* ('all' / 'any') and its child plans. Answers self for chaining.
     setKind:children: -> { |k cs| @kind = k; @children = cs; ^self };
+    "* Internal setter used by the constructors: record the message a worker
+    "* leaf is sent at launch. Answers self for chaining.
     setMsg: -> { |m| @msg = m; ^self };
+    "* Internal setter used by the constructors: record the registry label
+    "* stamped onto a worker leaf at launch. Answers self for chaining.
     setLabel: -> { |l| @label = l; ^self };
+    "* Internal setter used by the constructors: set a composite's failure
+    "* policy ('cancelRest' or 'collect'). Answers self for chaining.
     setPolicy: -> { |p| @policy = p; ^self };
+    "* The node's kind: 'task', 'thread' or 'process' for leaves, 'all' or
+    "* 'any' for composites.
+    "*
+    "* ```
+    "* (Plan.task:{ 1 }).kind    "* -> task
+    "* ```
     kind -> { @kind };
+    "* The failure policy a composite settles under: 'cancelRest' (the
+    "* default) or 'collect'.
     policy -> { @policy };
+    "* The registry label for a worker leaf, or nil when unlabelled.
+    "*
+    "* ```
+    "* (Plan.thread:{ 1 } label:'demo').label    "* -> demo
+    "* ```
     label -> { @label };
 
-    "* --- run ----------------------------------------------------------
+    "* Run the plan: launch the whole spec tree without waiting (that is what
+    "* makes siblings start in parallel), then join it in structure. Answers
+    "* the leaf's value or the composite's result; failures re-raise here,
+    "* subject to the composite's policy. The calling task parks until the
+    "* answer is ready — compose a deadline with `Async.timeout:do:`.
+    "*
+    "* ```
+    "* (Plan.task:{ 1 + 1 }).await    "* -> 2
+    "* ```
     await -> {
         var live = self.launch;
         ^self.settle:live
@@ -148,6 +235,11 @@ Plan <- { | @kind @code @msg @label @children @policy |
         (out.at:1).throw
     };
 
+    "* Internal join for an 'all' composite: children settle through a shared
+    "* channel in COMPLETION order — under 'cancelRest' a fast failure cancels
+    "* the in-flight siblings immediately; under 'collect' each slot files
+    "* #{'ok': v} or #{'err': message} — while results land by index, so the
+    "* answer matches the children's order.
     settleAll: -> { |live|
         var kids = live.at:'children';
         var n = kids.count;
@@ -187,6 +279,9 @@ Plan <- { | @kind @code @msg @label @children @policy |
         ^results
     };
 
+    "* Internal join for an 'any' composite: the first success cancels every
+    "* other child and becomes the answer; when all branches fail, throws
+    "* with the last error.
     settleAny: -> { |live|
         var kids = live.at:'children';
         var n = kids.count;

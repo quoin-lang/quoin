@@ -147,9 +147,20 @@ fn stdin_may_be_a_file_redirect_not_only_a_pipe() {
 
 #[test]
 fn a_read_parks_the_task_rather_than_freezing_the_scheduler() {
-    // A task sleeping 100ms must run to completion while the main task waits on a line that the
-    // writer withholds. If the read blocked the single-threaded scheduler, TICK could only print
-    // after the line arrived.
+    // The property: a task parked on stdin must not freeze the single-threaded scheduler —
+    // the spawned task's TICK must print while the main task is waiting on a line.
+    //
+    // Event-driven, not clock-driven. An earlier version slept a fixed 700ms before writing
+    // LINE and lost that race on a loaded CI runner: the child took longer than that to boot,
+    // so LINE was already buffered when the VM first ran, the read never parked, and the
+    // output was ["LINE", "TICK"]. Here the writer releases LINE only after TICK has been
+    // OBSERVED — and TICK can only arrive while the read is parked, so a regression that
+    // froze the scheduler shows up as "TICK never arrived" at the reader deadline rather
+    // than as a wrong order or a wedged CI job.
+    use std::io::BufRead;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_qn"))
         .args([
             "-e",
@@ -162,18 +173,47 @@ fn a_read_parks_the_task_rather_than_freezing_the_scheduler() {
         .spawn()
         .expect("spawn qn");
 
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    // Lines arrive through a channel so each wait can carry a deadline; a blocking read
+    // would turn a scheduler freeze into a hang.
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut next_line = |what: &str, child: &mut std::process::Child| -> String {
+        match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(line) => line,
+            Err(_) => {
+                let _ = child.kill();
+                panic!("{what}");
+            }
+        }
+    };
+
+    let first = next_line(
+        "TICK never arrived: the parked read froze the scheduler",
+        &mut child,
+    );
+
+    // Only now — with the sleeping task provably finished and the main task parked on the
+    // read — release the line.
     let mut stdin = child.stdin.take().expect("stdin");
     stdin.write_all(b"LINE\n").unwrap();
     drop(stdin);
 
-    let out = child.wait_with_output().expect("qn exits");
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
+    let second = next_line("LINE was never echoed after it was written", &mut child);
+    let status = child.wait().expect("qn exits");
+    reader.join().expect("reader thread");
+
+    assert!(status.success());
     assert_eq!(
-        lines,
-        ["TICK", "LINE"],
+        (first.as_str(), second.as_str()),
+        ("TICK", "LINE"),
         "the sleeping task must finish while the read is parked"
     );
 }

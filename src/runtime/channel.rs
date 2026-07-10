@@ -405,8 +405,21 @@ impl<'gc> VmState<'gc> {
 pub fn build_channel_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("Channel", Some("Object"))
         .construct_with("use Channel.new or Channel.buffered:")
+        .class_doc(
+            "A CSP-style channel for passing values between tasks. `Channel.new` is an \
+             unbuffered rendezvous -- a send parks until a receiver takes the value; \
+             `Channel.buffered:n` queues up to n values before sends park. `close` ends the \
+             conversation: further sends raise, receives drain the buffer then answer nil, \
+             and `each:` ends.\n\n\
+             ```\n\
+             var ch = Channel.new;\n\
+             Task.spawn:{ ch.send:42 };\n\
+             ch.receive    \"* -> 42\n\
+             ```",
+        )
         // Channel.new -> an unbuffered (rendezvous) channel.
         .class_method("new", |vm, mc, _r, _a| Ok(make_channel(vm, mc, 0)))
+        .doc("An unbuffered (rendezvous) channel: every send waits for its receiver.")
         // Channel.buffered:n -> a channel that buffers up to n values (0 == unbuffered).
         .typed_class_method("buffered:", &["Integer"], |vm, mc, _r, args| {
             let n = arg!(args, Int, 0);
@@ -416,24 +429,46 @@ pub fn build_channel_class() -> NativeClassBuilder {
                 )));
             }
             Ok(make_channel(vm, mc, n as usize))
-        });
+        })
+        .doc(
+            "A channel that buffers up to n values before sends park (0 is unbuffered).\n\n\
+             ```\n\
+             var ch = Channel.buffered:2;\n\
+             ch.send:1; ch.send:2; ch.close;\n\
+             #( ch.receive ch.receive )    \"* -> #(1 2)\n\
+             ```",
+        );
     b.instance_method("send:", |vm, mc, receiver, args| {
         vm.channel_send(mc, receiver, args[0])?;
         Ok(vm.new_nil(mc))
     })
+    .doc(
+        "Send a value: hand it to a waiting receiver, else buffer it if there is room, \
+         else park until a receiver takes it. Raises on a closed channel. Answers nil.",
+    )
     .instance_method("receive", |vm, mc, receiver, _args| {
         match vm.channel_recv(mc, receiver)? {
             Some(v) => Ok(v),
             None => Ok(vm.new_nil(mc)),
         }
     })
+    .doc(
+        "The next value, parking until one is available -- buffered values first (FIFO), \
+         else directly from a parked sender. On a closed, drained channel answers nil.",
+    )
     .instance_method("close", |vm, mc, receiver, _args| {
         vm.channel_close(mc, receiver)?;
         Ok(vm.new_nil(mc))
     })
+    .doc(
+        "Close the channel (idempotent); answers nil. Parked and future sends raise; \
+         buffered values remain receivable; a drained receive answers nil and `each:` \
+         ends.",
+    )
     .instance_method("closed?", |vm, mc, receiver, _args| {
         Ok(vm.new_bool(mc, vm.channel_is_closed(receiver)?))
     })
+    .doc("True once the channel has been closed.")
     // count -> the number of buffered (not-yet-received) values.
     .instance_method("count", |vm, mc, receiver, _args| {
         let n = receiver
@@ -441,6 +476,7 @@ pub fn build_channel_class() -> NativeClassBuilder {
             .map_err(QuoinError::Other)?;
         Ok(vm.new_int(mc, n as i64))
     })
+    .doc("How many values are currently buffered (sent but not yet received).")
     // capacity -> the buffer capacity (0 for an unbuffered channel).
     .instance_method("capacity", |vm, mc, receiver, _args| {
         let cap = receiver
@@ -448,8 +484,20 @@ pub fn build_channel_class() -> NativeClassBuilder {
             .map_err(QuoinError::Other)?;
         Ok(vm.new_int(mc, cap as i64))
     })
+    .doc("The buffer capacity; 0 for an unbuffered (rendezvous) channel.")
     .typed_instance_method("each:", &["Block"], |vm, mc, receiver, args| {
         let block = arg!(args, Block, 0);
         vm.channel_each(mc, receiver, block)
     })
+    .doc(
+        "Run the block on each received value until the channel is closed and drained, \
+         parking between values; answers nil.\n\n\
+         ```\n\
+         var ch = Channel.buffered:3;\n\
+         ch.send:1; ch.send:2; ch.close;\n\
+         var sum = 0;\n\
+         ch.each:{ |v| sum = sum + v };\n\
+         sum    \"* -> 3\n\
+         ```",
+    )
 }

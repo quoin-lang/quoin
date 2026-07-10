@@ -20,6 +20,9 @@ pub enum MethodBody {
         /// Declared checker return type (Fork-1b native half), e.g. `Some("String")`. Compile-time
         /// only — never consulted at dispatch; surfaced via `introspect` for the type checker.
         ret_type: Option<String>,
+        /// Reference-doc text (`.doc(..)` on the builder; docs/DOCS_ARCH.md §5). Never
+        /// consulted at dispatch; surfaced via `introspect` for `qn doc` and `$doc`.
+        doc: Option<String>,
     },
     /// An extension-backed method (Phase 3): the selector dispatches over the socket to `ext`
     /// (the owning `Extension` instance, kept GC-rooted via the method table). Whether the send
@@ -55,6 +58,7 @@ impl NativeMethodState {
         func: NativeFunc,
         param_types: Option<Vec<String>>,
         ret_type: Option<String>,
+        doc: Option<String>,
     ) -> Self {
         Self {
             selector,
@@ -62,6 +66,7 @@ impl NativeMethodState {
                 func,
                 param_types,
                 ret_type,
+                doc,
             },
             is_extension: false,
             next: None,
@@ -128,6 +133,15 @@ impl NativeMethodState {
             MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
         }
     }
+
+    /// Reference-doc text for a native method (`.doc(..)`), or `None` for a user block (whose
+    /// doc lives in source, above its definition), an extension body, or an undocumented one.
+    pub fn native_doc(&self) -> Option<String> {
+        match &self.body {
+            MethodBody::Native { doc, .. } => doc.clone(),
+            MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
+        }
+    }
 }
 
 impl AnyCollect for NativeMethodState {
@@ -164,26 +178,45 @@ impl AnyCollect for NativeMethodState {
 pub fn build_method_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Method", Some("Object"))
         .construct_with("method objects are created by the VM")
+        .class_doc(
+            "A method as an object: the reflective handle behind a selector in a class's \
+             method table. Method objects are created by the VM when classes define or \
+             extend methods; there is no public constructor.",
+        )
         .sdk_instance_method("selector", |host, receiver, _args| {
             let selector =
                 receiver.with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
             Ok(host.new_symbol(selector))
         })
+        .returns("Symbol")
+        .doc("The selector this method answers to, as a Symbol (`#at:put:` style).")
         .sdk_instance_method("name", |host, receiver, _args| {
             let selector =
                 receiver.with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
             Ok(host.new_symbol(selector))
         })
+        .returns("Symbol")
+        .doc("The selector as a Symbol; a synonym for `selector`.")
         .sdk_instance_method("extension?", |host, receiver, _args| {
             let is_ext =
                 receiver.with_native_state::<NativeMethodState, _, _>(|m| m.is_extension)?;
             Ok(host.new_bool(is_ext))
         })
+        .returns("Boolean")
+        .doc(
+            "Whether this method was added by a class extension (`Name <-- { ... }` or a \
+             method override) rather than the class's original definition.",
+        )
         .sdk_instance_method("block", |host, receiver, _args| {
             // A native method has no user block; report it as nil.
             let block = receiver.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
             Ok(block.unwrap_or_else(|| host.new_nil()))
         })
+        .returns("Block?")
+        .doc(
+            "The Block holding this method's body, or nil for a method implemented natively \
+             in the VM.",
+        )
         .sdk_instance_method("callOn:", |host, receiver, args| {
             let block_val =
                 receiver.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
@@ -194,7 +227,13 @@ pub fn build_method_class() -> NativeClassBuilder {
                 None => Err(QuoinError::Other("Method block is not a Block".to_string())),
             }
         })
+        .doc(
+            "Invoke the method with the argument as its receiver (`self`). Raises for a \
+             native method, whose body is not a Block.",
+        )
         .sdk_instance_method("==:", |host, receiver, args| {
             Ok(host.new_bool(receiver == args[0]))
         })
+        .returns("Boolean")
+        .doc("Identity: whether both sides are the same method object.")
 }

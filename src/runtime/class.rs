@@ -18,6 +18,13 @@ fn name_text(v: Value<'_>) -> Option<String> {
 pub fn build_class_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Class", Some("Object"))
         .construct_with("define classes with Name <- { … }")
+        .class_doc(
+            "The class of classes: `Integer`, `List`, and every user-defined class are \
+             instances of Class. Define one with `Name <- { ... }` (a subclass with \
+             `Parent <- Name <- { ... }`), reopen one with `Name <-- { ... }`, and reflect \
+             with `name` / `parent` / `class`. Note that on classes `==` is the SUBTYPE \
+             test, and `Pattern ~ x` is instance-of.",
+        )
         // Ask whether a class exists *by name*, rather than by reading the name and seeing
         // whether it came back nil — reading an unbound name is a `NameError`. Namespaced
         // classes need a quoted symbol: `Class.exists?:#'[ADBC]Database'`.
@@ -32,10 +39,23 @@ pub fn build_class_class() -> NativeClassBuilder {
             let found = matches!(vm.globals.borrow().get(&key), Some(Value::Class(_)));
             Ok(vm.new_bool(mc, found))
         })
+        .returns("Boolean")
+        .doc(
+            "Whether a class named by the Symbol or String argument is defined -- \
+             `Class.exists?:#Point`, or `Class.exists?:#'[IO]File'` for a namespaced class. \
+             The way to ask without reading the name, which would raise a NameError if it is \
+             unbound.",
+        )
         .instance_method("name", |vm, mc, receiver, _args| {
             let clz = recv!(receiver, Class);
             Ok(vm.new_string(mc, clz.borrow().name.to_string()))
         })
+        .doc(
+            "The class's name as a String, including any namespace ('[IO]File').\n\n\
+             ```\n\
+             Integer.name    \"* -> Integer\n\
+             ```",
+        )
         .instance_method("class", |vm, _mc, _receiver, _args| {
             let class_key = NamespacedName::new(Vec::new(), "Class".to_string());
             Ok(vm
@@ -45,6 +65,12 @@ pub fn build_class_class() -> NativeClassBuilder {
                 .expect("Class global not found")
                 .clone())
         })
+        .doc(
+            "The class `Class` itself -- every class is an instance of Class.\n\n\
+             ```\n\
+             Integer.class.name    \"* -> Class\n\
+             ```",
+        )
         .instance_method("parent", |vm, mc, receiver, _args| {
             let clz = recv!(receiver, Class);
             let parent = clz.borrow().parent;
@@ -54,6 +80,12 @@ pub fn build_class_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
+        .doc(
+            "The superclass, or nil for Object (the root).\n\n\
+             ```\n\
+             Integer.parent.name    \"* -> Object\n\
+             ```",
+        )
         .instance_method("mix:", |vm, mc, receiver, args| {
             let clz = recv!(receiver, Class);
             vm.ensure_not_sealed(clz)?;
@@ -83,18 +115,38 @@ pub fn build_class_class() -> NativeClassBuilder {
             }
             Ok(Value::Class(mixin))
         })
+        .doc(
+            "Mix a mixin class into the receiver: the mixin's methods join dispatch (they \
+             can shadow a parent's), and its instance variables and `init` join \
+             instantiation. If the mixin defines a class-side `assertMeetsRequirements:`, \
+             that check runs at the end of the enclosing class body, once the host class is \
+             fully defined. Answers the mixin.\n\n\
+             ```\n\
+             Mixin <- M <- { hi -> { 'hi' } };\n\
+             A <- { .mix:M };\n\
+             A.new.hi    \"* -> hi\n\
+             ```",
+        )
         .instance_method("sealed!", |_vm, mc, receiver, _args| {
             // Freeze the class: no further extension or subclassing.
             let clz = recv!(receiver, Class);
             clz.borrow_mut(mc).is_sealed = true;
             Ok(Value::Class(clz))
         })
+        .doc(
+            "Freeze the class: further extension (`Name <-- { ... }`, `mix:`) and \
+             subclassing are refused with an error. Answers the class.",
+        )
         .instance_method("abstract!", |_vm, mc, receiver, _args| {
             // Forbid instantiating this class itself (subclasses may still be).
             let clz = recv!(receiver, Class);
             clz.borrow_mut(mc).is_abstract = true;
             Ok(Value::Class(clz))
         })
+        .doc(
+            "Forbid instantiating this class itself: `new` on it raises, while subclasses \
+             may still be instantiated. Answers the class.",
+        )
         .instance_method("==:", |vm, mc, receiver, args| {
             let lhs = receiver;
             let rhs = args[0];
@@ -107,4 +159,13 @@ pub fn build_class_class() -> NativeClassBuilder {
             };
             Ok(vm.new_bool(mc, res))
         })
+        .doc(
+            "On classes, `==` is the SUBTYPE test: `A == B` is true when A is B or a \
+             descendant of B (metaclasses compare the same way) -- so it is deliberately \
+             not symmetric.\n\n\
+             ```\n\
+             Integer == Object    \"* -> true\n\
+             Object == Integer    \"* -> false\n\
+             ```",
+        )
 }

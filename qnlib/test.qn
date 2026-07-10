@@ -3,8 +3,17 @@
 "* test files just build their suite — no return-value plumbing or explicit registration.
 [Test]Suites <- #();
 
+"* The assertion vocabulary test methods write against (`isTrue:`,
+"* `is:equalTo:`, `does:throw:`, …) — a Mixin, mixed into Test. Every
+"* assertion takes the value under test as a BLOCK (`.is:{ 1 + 1 } equalTo:2`)
+"* so it can be timed and its source location reported; each one records a
+"* TestAssertionResult through the host's `addResult:` — a failure is
+"* evidence for the reporter, not a thrown error, so the test keeps running.
 Mixin <- BuiltinAssertions <- {
     .meta <-- {
+        "* Mixin contract check, run when a class mixes BuiltinAssertions in:
+        "* the host must implement `addResult:` (the sink every assertion
+        "* files its TestAssertionResult into), or this throws.
         assertMeetsRequirements: -> { |class:Class|
             (class.can?:#addResult:).else:{
                 ('Class % must implement #addResult: to use BuiltinAssertions' % class.name).throw
@@ -12,6 +21,11 @@ Mixin <- BuiltinAssertions <- {
         }
     };
 
+    "* The primitive every assertion funnels through: run `testBlock` (a pass
+    "* is answering exactly `true`), time it, file a TestAssertionResult
+    "* carrying the #( expected comparison actual ) evidence triple plus the
+    "* asserted block's name and source location, and notify the reporter.
+    "* Answers the recorded result — build custom assertions on this.
     recordResult:evidence:block: -> { |testBlock:Block evidenceArg:List block:Block|
         var assertionName = block.name.defined?.if:{ block.name } else:{ '{code}' };
 
@@ -36,23 +50,48 @@ Mixin <- BuiltinAssertions <- {
         ^r
     };
 
+    "* Assert the block answers exactly `true` (not merely truthy). A failure
+    "* reports `true != {code}`.
+    "*
+    "* ```
+    "* .isTrue:{ #(1 2 3).any?:{ |n| n == 2 } }
+    "* ```
     isTrue: -> { |block:Block|
         .recordResult:{ true == block.value } evidence:#( true '!=' '{code}' ) block:block
     };
+    "* Assert the block answers exactly `false`. A failure reports
+    "* `false != {code}`.
     isFalse: -> { |block:Block|
         .recordResult:{ false == block.value } evidence:#( false '!=' '{code}' ) block:block
     };
 
+    "* Assert the block's value is an instance of `expected` — matched with
+    "* `~`, so any pattern `~` accepts works. A failure reports
+    "* `expected !~ actual`.
+    "*
+    "* ```
+    "* .is:{ 6 * 7 } a:Integer
+    "* ```
     is:a: -> { |block:Block expected|
         var actual = block.value;
         .recordResult:{ expected ~ actual } evidence:#( expected '!~' actual ) block:block
     };
+    "* Alias of `is:a:` that reads better before a vowel:
+    "* `.is:{ 6 * 7 } an:Integer`.
     is:an: -> { |block:Block expected| .is:block a:expected };
 
+    "* Assert the block's value `==` `expected` — the workhorse assertion. A
+    "* failure reports `expected != actual`.
+    "*
+    "* ```
+    "* .is:{ (1..5).collect:{ |n| n * 10 } } equalTo:#( 10 20 30 40 )
+    "* ```
     is:equalTo: -> { |block:Block expected|
         var actual = block.value;
         .recordResult:{ expected == actual } evidence:#( expected '!=' actual ) block:block
     };
+    "* Assert the block's value differs from `expected` under `==`. A failure
+    "* reports that the two compared equal.
     is:notEqualTo: -> { |block:Block expected|
         var actual = block.value;
         .recordResult:{ expected != actual } evidence:#( expected '==' actual ) block:block
@@ -62,6 +101,12 @@ Mixin <- BuiltinAssertions <- {
     "* tolerance (1e-9), enough to absorb last-ULP variation in non-correctly-rounded libm results
     "* (log/exp/pow/trig) across platforms; `closeTo:within:` sets the tolerance explicitly.
     is:closeTo: -> { |block:Block expected| .is:block closeTo:expected within:0.000000001 };
+    "* Assert |actual - expected| < `tolerance` — `is:closeTo:` with the
+    "* tolerance stated explicitly instead of the 1e-9 default.
+    "*
+    "* ```
+    "* .is:{ 22.0 / 7.0 } closeTo:3.14 within:0.01
+    "* ```
     is:closeTo:within: -> { |block:Block expected tolerance|
         var actual = block.value;
         .recordResult:{ (actual - expected).abs < tolerance }
@@ -69,34 +114,65 @@ Mixin <- BuiltinAssertions <- {
          block:block
     };
 
+    "* Assert the block's value is < `expected`. A failure reports
+    "* `actual not < expected`.
     is:lessThan: -> { |block:Block expected|
         var actual = block.value;
         .recordResult:{ actual < expected } evidence:#( actual 'not <' expected ) block:block
     };
+    "* Assert the block's value is > `expected`. A failure reports
+    "* `actual not > expected`.
     is:greaterThan: -> { |block:Block expected|
         var actual = block.value;
         .recordResult:{ actual > expected } evidence:#( actual 'not >' expected ) block:block
     };
+    "* Assert the block's value is <= `expected`. A failure reports
+    "* `actual not <= expected`.
     is:lessThanOrEqualTo: -> { |block:Block expected|
         var actual = block.value;
         .recordResult:{ actual < = expected } evidence:#( actual 'not <=' expected ) block:block
     };
+    "* Assert the block's value is >= `expected`. A failure reports
+    "* `actual not >= expected`.
     is:greaterThanOrEqualTo: -> { |block:Block expected|
         var actual = block.value;
         .recordResult:{ actual > = expected } evidence:#( actual 'not >=' expected ) block:block
     };
 
+    "* Assert the block's value, used as the pattern, `~`-matches `expected`:
+    "* a Regex value matches the string, a Range value contains the number, a
+    "* Class value matches an instance. A failure reports that it didn't
+    "* match.
+    "*
+    "* ```
+    "* .does:{ (1..5) } match:3
+    "* .does:{ #/qu.+n/ } match:'quoin'
+    "* ```
     does:match: -> { |block:Block expected|
         var actual = block.value;
         .recordResult:{ actual ~ expected }
          evidence:#( expected 'didn\'t match' actual )
          block:block
     };
+    "* Assert the block's value, used as the pattern, does NOT `~`-match
+    "* `expected` (see `does:match:`). A failure reports that it matched.
+    "*
+    "* ```
+    "* .does:{ #/xyz/ } notMatch:'quoin'
+    "* ```
     does:notMatch: -> { |block:Block expected|
         var actual = block.value;
         .recordResult:{ !(actual ~ expected) } evidence:#( expected 'matched' actual ) block:block
     };
 
+    "* Run the block for its effects, then assert `expectedBlock` answers
+    "* exactly `true` — for checking state after an action rather than the
+    "* action's own value.
+    "*
+    "* ```
+    "* var list = #();
+    "* .does:{ list.add:1 } resultIn:{ list.count == 1 }
+    "* ```
     does:resultIn: -> { |block:Block expectedBlock:Block|
         block.value;
         .recordResult:{ expectedBlock.value == true }
@@ -104,6 +180,15 @@ Mixin <- BuiltinAssertions <- {
          block:block
     };
 
+    "* Assert the block throws, and that `expectedError` matches what was
+    "* thrown: an error Class, or a regex/string matched against both the
+    "* error value and its message string. A failure reports what was thrown
+    "* instead (nil when the block completed without throwing).
+    "*
+    "* ```
+    "* .does:{ 1 / 0 } throw:ArithmeticError
+    "* .does:{ 1 / 0 } throw:#/Division by zero/
+    "* ```
     does:throw: -> { |block:Block expectedError|
         var actualError = nil;
         { #doesThrowBlock | - | block.value }.catch:{ #doesThrowCatchBlock |x| actualError = x };
@@ -115,13 +200,27 @@ Mixin <- BuiltinAssertions <- {
     }
 };
 
+"* Collection assertions layered on BuiltinAssertions; mixed into Test
+"* alongside it.
 BuiltinAssertions <- IterateAssertions <- {
+    "* Assert two collections hold the same elements irrespective of order:
+    "* both sides are sorted, then compared with `==`.
+    "*
+    "* ```
+    "* .elementsOf:{ #(3 1 2) } areEqualTo:#(1 2 3)
+    "* ```
     elementsOf:areEqualTo: -> { |block:Block expected|
         .is:{ block.value.sort } equalTo:expected.sort
     }
 };
 
+"* The record of one assertion: the verdict, the #( expected comparison
+"* actual ) evidence triple failure messages are built from, timing, and the
+"* asserted block's source location. Assertions construct these through
+"* BuiltinAssertions#recordResult:evidence:block:; reporters render them.
 TestAssertionResult <- { |@test @name @passed? @location @elapsed @evidence|
+    "* Internal: store the fields captured by `new:`'s builder block;
+    "* recordResult:evidence:block: is the one constructor call site.
     init: -> { |test name:String passed?:Boolean location evidence:List elapsed|
         @test = test;
         @name = name;
@@ -131,23 +230,38 @@ TestAssertionResult <- { |@test @name @passed? @location @elapsed @evidence|
         @evidence = evidence
     };
 
+    "* The Test this assertion ran inside.
     test -> { @test };
+    "* The asserted block's name, or '{code}' when the block is anonymous.
     name -> { @name };
+    "* true when the assertion held.
     passed? -> { @passed? };
+    "* The asserted block's raw source location as #( file line column ), via
+    "* Block#source; nil when unavailable.
     location -> { @location };
+    "* How long the assertion's check took, in microseconds.
     elapsed -> { @elapsed };
+    "* The #( expected comparison actual ) triple failure messages are built
+    "* from; `expected` / `comparison` / `actual` read its parts.
     evidence -> { @evidence };
+    "* The expected side of the evidence triple.
     expected -> { @evidence.first };
+    "* The comparison word of the evidence triple (e.g. '!=' or 'not <').
     comparison -> { @evidence.second };
+    "* The actual side of the evidence triple.
     actual -> { @evidence.third };
 
-    "* Source location of the failed block as #( file line column ), via Block#source;
-    "* nil when unavailable. `column` is reported 1-indexed to match the VM's error
-    "* output; all three fall back to '?' so the reporter always has something to show.
+    "* The source file of the asserted block; '?' when no location is
+    "* available, so the reporter always has something to show.
     locationFile   -> { @location.defined?.if:{ @location.first } else:{ '?' } };
+    "* The source line of the asserted block; '?' when unavailable.
     locationLine   -> { @location.defined?.if:{ @location.second } else:{ '?' } };
+    "* The source column of the asserted block, reported 1-indexed to match
+    "* the VM's error output; '?' when unavailable.
     locationColumn -> { @location.defined?.if:{ (@location.third) + 1 } else:{ '?' } };
 
+    "* Debug rendering: test, verdict, evidence, timing and location in one
+    "* line.
     s --> {
         'TestAssertionResult{%1 %2 %3%4%5 %6µs %7}' % #(
             @test
@@ -161,10 +275,16 @@ TestAssertionResult <- { |@test @name @passed? @location @elapsed @evidence|
     }
 };
 
+"* One test: a named method (declared with TestSuite#test:) that runs with
+"* the Test itself as receiver, so the body's bare `.is:...` / `.does:...`
+"* sends land on the mixed-in assertion vocabulary (BuiltinAssertions,
+"* IterateAssertions) and accumulate TestAssertionResults here.
 Test <- { |@name @method @assertions @reporter @wallElapsed|
     .mix:BuiltinAssertions;
     .mix:IterateAssertions;
 
+    "* Internal: wrap the test Method; its selector becomes the test's name.
+    "* TestSuite#test: is the constructor's call site.
     init: -> { |method:Method|
         @method = method;
         @name = method.selector;
@@ -172,20 +292,33 @@ Test <- { |@name @method @assertions @reporter @wallElapsed|
         @assertions = #()
     };
 
+    "* File one assertion's result — the sink the BuiltinAssertions mixin
+    "* requires of its host. Answers the result.
     addResult: -> { |result:TestAssertionResult|
         @assertions.add:result;
         ^result
     };
 
+    "* The test's name: its method's selector.
     name -> { @name };
+    "* The reporter of the run in progress (set by run:); assertions notify
+    "* it as they start and finish.
     reporter -> { @reporter };
+    "* The assertion results recorded so far that passed.
     passes -> { @assertions.select:{ |a| a.passed? } };
+    "* The assertion results recorded so far that failed.
     failures -> { @assertions.select:{ |a| a.passed? == false } };
+    "* The sum of the assertions' own check times, in microseconds.
     elapsed -> { @assertions.sum:{ |a| a.elapsed } };
+    "* Wall-clock time of the whole test method run, in microseconds —
+    "* includes the work between assertions, unlike `elapsed`.
     wallElapsed -> { @wallElapsed };
 
+    "* A Test prints as its name.
     s -> { @name };
 
+    "* Run the test method with this Test as the receiver, timing the whole
+    "* body; answers a TestResult summarizing the recorded assertions.
     run: -> { |reporter|
         @reporter = reporter;
 
@@ -201,7 +334,12 @@ Test <- { |@name @method @assertions @reporter @wallElapsed|
     }
 };
 
+"* Immutable summary of one Test's run: its assertion results plus
+"* assertion-time and wall-time totals. Built by Test#run:, consumed by
+"* reporters and by [Test]Main's overall pass/fail verdict.
 TestResult <- { |@test @name @assertions @elapsed @wallElapsed|
+    "* Internal: store the fields captured by `new:`'s builder block;
+    "* Test#run: is the constructor's call site.
     init: -> { |test:Test name:String assertions:List elapsed wallElapsed|
         @test = test;
         @name = name;
@@ -210,19 +348,41 @@ TestResult <- { |@test @name @assertions @elapsed @wallElapsed|
         @wallElapsed = wallElapsed
     };
 
+    "* The Test that produced this result.
     test -> { @test };
 
+    "* The test's name.
     name -> { @name };
+    "* Every TestAssertionResult the run recorded, in order.
     assertions -> { @assertions };
+    "* The assertion results that passed.
     passes -> { @assertions.select:{ .passed? } };
+    "* The assertion results that failed.
     failures -> { @assertions.select:{ .passed? == false } };
+    "* The sum of the assertions' check times, in microseconds.
     elapsed -> { @elapsed };
+    "* Wall-clock time of the whole test method run, in microseconds.
     wallElapsed -> { @wallElapsed };
 
+    "* Debug rendering: test, name, timing and the assertion list.
     s --> { 'TestResult{%1 %2 %3µs [%4]}' % #( @test @name @elapsed @assertions ) }
 };
 
+"* A named group of tests — the unit a test file declares. Constructing one
+"* registers it in the global [Test]Suites registry, so a file just builds
+"* its suite and `qn test` collects and runs everything registered.
+"*
+"* ```
+"* (TestSuite.new:{ var name = 'Math' }).add:{
+"*     .test:
+"*     addition -> {
+"*         .is:{ 1 + 1 } equalTo:2
+"*     }
+"* }
+"* ```
 TestSuite <- { |@name @tests @skipped? @reason|
+    "* Register the new suite under `name` in [Test]Suites — registration IS
+    "* construction; there is no separate register call.
     init: -> { |name:String|
         @name = name;
 
@@ -231,7 +391,9 @@ TestSuite <- { |@name @tests @skipped? @reason|
         [Test]Suites.add:self
     };
 
+    "* The suite's name, shown as the [Tag] in reporter output.
     name -> { @name };
+    "* A TestSuite prints as its name.
     s -> { @name };
 
     "* Mark this whole suite skipped, with a human-readable reason (e.g. an optional
@@ -245,22 +407,39 @@ TestSuite <- { |@name @tests @skipped? @reason|
         ^self
     };
 
+    "* true once skip: has marked the suite.
     skipped? -> { @skipped? };
+    "* The reason passed to skip:, or nil when the suite runs.
     reason -> { @reason };
 
+    "* Declare the suite's contents: the block runs with the suite as `self`,
+    "* so bare `.test:` (and `.skip:`) sends inside it land here. Answers
+    "* self.
     add: -> { |b:Block|
         b.valueWithSelf:self;
         ^self
     };
 
+    "* Add one test: `m` is a method literal (`name -> { … }`) whose body
+    "* makes assertion sends and whose selector names the test. The method
+    "* may declare at most one parameter.
     test: -> { |m:Method|
-        (m.block.arity > 1).if:{ %'Test method %{m.selector} must have 0 or 1 args'.throw };
+        "* `block` is nil for a native method; only user-defined methods register as tests.
+        var body = m.block;
+        (body.defined?).if:{
+            (body.arity > 1).if:{ %'Test method %{m.selector} must have 0 or 1 args'.throw }
+        };
         @tests.add:Test.new:{ var method = m }
     };
 
+    "* The Tests declared so far, in declaration order.
     tests -> { @tests }
 };
 
+"* Abstract lifecycle interface for test output. TestRunner announces the
+"* run/suite/test/assertion boundaries through these hooks; a concrete
+"* reporter overrides them to render (AnsiTestReporter is the built-in).
+"* Elapsed values are microseconds — format them with `humanize:`.
 TestReporter <- {
     .abstract!;
 
@@ -274,27 +453,45 @@ TestReporter <- {
         '%1.%2s' % #( (us / 1000000) ((us / 100000) % 10) )
     };
 
+    "* Hook: the run is starting; receives every suite about to run.
     startRun: -> { |suites:List| ... };
+    "* Hook: every suite has finished; receives the suites and the run's
+    "* wall-clock time.
     endRun:elapsed: -> { |suites:List elapsed| ... };
 
+    "* Hook: `suite` is about to run (fires for skipped suites too).
     startSuite: -> { |suite:TestSuite| ... };
+    "* Hook: `suite` finished; receives its wall-clock time.
     endSuite:elapsed: -> { |suite:TestSuite elapsed| ... };
 
+    "* Hook: `test` is about to run.
     startTest: -> { |test:Test| ... };
+    "* Hook: a test finished; receives its TestResult.
     endTest: -> { |result:TestResult| ... };
 
+    "* Hook: an assertion is about to run; receives the assertion's name.
     startAssertion: -> { |assertion| ... };
+    "* Hook: an assertion was recorded; receives its TestAssertionResult.
     endAssertion: -> { |result| ... }
 };
 
+"* The built-in terminal reporter: aligned [Suite] tags, one line per test
+"* with a green '.' or red '!' per assertion, per-suite and whole-run
+"* summaries, and failure detail with file:line:column locations — all in
+"* ANSI color on the stream given at construction (`qn test` passes
+"* [IO]Stdout).
 TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
+    "* Set the output stream: anything answering `write:` / `writeln:`.
     init: -> { |out| @out = out };
 
     "* Current suite's name padded to the widest suite name, so every [Tag] aligns."
     paddedName -> { @currentSuite.name.padRight:@nameWidth };
 
+    "* Measure the widest suite name, so every [Suite] tag aligns.
     startRun: --> { |suites:List| @nameWidth = (suites.collect:{ |s| s.name.length }).max };
 
+    "* Print the whole-run summary: total assertion time, wall time, and
+    "* pass / failure / skip counts.
     endRun:elapsed: --> { |suites:List elapsed|
         var skips = (suites.select:{ |s| s.skipped? }).count;
         "* Skipped suites register no tests, and `.sum:` over an empty list yields nil
@@ -313,6 +510,8 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
         )
     };
 
+    "* Announce the suite: 'Running N tests', or the SKIPPED line with the
+    "* suite's reason.
     startSuite: --> { |suite:TestSuite|
         @currentSuite = suite;
         suite.skipped?.if:{
@@ -323,6 +522,8 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
         }
     };
 
+    "* Print the suite's summary line: pass/failure counts, assertion time
+    "* and wall time.
     endSuite:elapsed: --> { |suite:TestSuite elapsed|
         "* A skipped suite already announced itself in startSuite: and ran no tests.
         suite.skipped?.if:{ ^^nil };
@@ -338,10 +539,14 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
         )
     };
 
+    "* Start the test's output line: suite tag and test name; the assertion
+    "* marks follow on the same line.
     startTest: --> { |test:Test|
         @out.write:#ANSI'[$#5fd7af;bw[%1$]]   Test $#ab82ff[%2$] ' % #(.paddedName test.name)
     };
 
+    "* Finish the test's line with its timings; a failing test then lists
+    "* each failed assertion's evidence and file:line:column.
     endTest: --> { |result:TestResult|
         @out.write:#ANSI' $#00bfff[%1$] ($#00bfff[%2$])' % #(
             (.humanize:result.elapsed)
@@ -372,19 +577,31 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
         else:{ @out.writeln:#ANSI' $#69ff61[% passed$]' % result.passes.count }
     };
 
+    "* No mark at assertion start — the '.'/'!' prints once the outcome is
+    "* known, in endAssertion:.
     startAssertion: --> { |assertion| };
+    "* Print the assertion's mark: a green '.' for a pass, a red '!' for a
+    "* failure.
     endAssertion: --> { |assertionResult|
         @out.write:assertionResult.passed?.if:{#ANSI'$#69ff61[.$]'} else:{#ANSI'$#ff6961[!$]'}
     }
 };
 
+"* Drives suites against a reporter, firing the lifecycle hooks in order;
+"* [Test]Main.run builds one over the global [Test]Suites registry.
 TestRunner <- { |@suites|
+    "* Start with no suites enrolled.
     init -> { @suites = #() };
 
+    "* Enroll `suite` to be run.
     add: -> { |suite:TestSuite| @suites.add:suite };
 
+    "* The suites enrolled so far.
     suites -> { @suites };
 
+    "* Run every enrolled suite in order against `reporter`; a skipped suite
+    "* fires its reporter hooks but runs no tests. Answers the flattened List
+    "* of TestResults.
     run: -> { |reporter|
         var results = #();
         reporter.startRun:@suites;
@@ -426,6 +643,9 @@ TestRunner <- { |@suites|
 "* makes `qn test` exit non-zero.
 [Test]Main <- {
     .meta <-- {
+        "* Run every suite registered in [Test]Suites with an AnsiTestReporter
+        "* on stdout. Answers true when no test failed — the program's value,
+        "* hence `qn test`'s exit status.
         run -> {
             var runner = TestRunner.new;
             [Test]Suites.each:{ |s| runner.add:s };

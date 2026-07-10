@@ -554,8 +554,20 @@ pub enum Instruction {
         name: NamespacedName,
         parent_name: Option<NamespacedName>,
         instance_vars: Vec<String>,
+        /// Where the definition sits in source, recorded into `VmState::class_meta` so doc
+        /// extraction can find the `"*` block above it (docs/DOCS_ARCH.md §4). Methods carry
+        /// their own location on the template; classes had nowhere to keep one until this.
+        source: Option<SourceInfo>,
     },
     ExecuteBlockWithSelf,
+    /// A statically-named class reopen (`Name <-- { … }`) records where it happened, so the
+    /// `"*` block above the reopen is reachable for docs (docs/DOCS_ARCH.md §4 — extension
+    /// sites list beneath the definition's doc). No stack effect; emitted just before the
+    /// reopen's `ExecuteBlockWithSelf`. A computed-target reopen emits nothing.
+    RecordClassSite {
+        name: NamespacedName,
+        source: SourceInfo,
+    },
     DefineMethod(String),
     OverrideMethod(String),
     LoadField(String),

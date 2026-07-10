@@ -13,6 +13,18 @@ use indexmap::IndexMap;
 pub fn build_csv_class() -> NativeClassBuilder {
     NativeClassBuilder::new("CSV", Some("Object"))
         .abstract_class()
+        .class_doc(
+            "Parse and generate CSV, RFC 4180 tabular text.\n\n\
+             CSV is untyped, so parsing always yields Strings (convert fields yourself), and \
+             generating stringifies every field via its `.s`. Rows come in two shapes: \
+             positional (`parse:` / `generate:` — Lists of Lists) and header-keyed \
+             (`parseWithHeaders:` / `generateWithHeaders:` — Lists of Maps). Quoting and \
+             escaping are handled per RFC 4180.\n\n\
+             ```\n\
+             CSV.parse:'a,b\\n1,2'                  \"* -> #(#(a b) #(1 2))\n\
+             CSV.generate:#( #('id' 'n') #(1 2) )  \"* -> 'id,n\\n1,2\\n'\n\
+             ```",
+        )
         // CSV.parse:'a,b\n1,2' -> #( #('a' 'b') #('1' '2') ) — every field a String.
         .sdk_typed_class_method("parse:", &["String"], |host, _r, args| {
             let s = arg!(args, String, 0);
@@ -32,6 +44,15 @@ pub fn build_csv_class() -> NativeClassBuilder {
             }
             Ok(host.new_list(rows))
         })
+        .doc(
+            "Parse CSV text into a List of rows, each row a List of String fields (every \
+             field is a String — CSV is untyped). There is no header handling here; use \
+             `parseWithHeaders:` when the first row names the columns. Malformed input \
+             throws a ParseError.\n\n\
+             ```\n\
+             CSV.parse:'a,b\\n1,2'     \"* -> #(#(a b) #(1 2))\n\
+             ```",
+        )
         // CSV.parseWithHeaders:'name,age\nAlice,30' -> #( #{'name': 'Alice' 'age': '30'} ). The
         // header row keys each data row (column order preserved — Maps are insertion-ordered).
         .sdk_typed_class_method("parseWithHeaders:", &["String"], |host, _r, args| {
@@ -59,6 +80,14 @@ pub fn build_csv_class() -> NativeClassBuilder {
             }
             Ok(host.new_list(rows))
         })
+        .doc(
+            "Parse CSV whose first row is a header, yielding a List of Maps — one per data \
+             row, keyed by the header fields, in column order (Maps are insertion-ordered). \
+             Every value is a String.\n\n\
+             ```\n\
+             CSV.parseWithHeaders:'name,age\\nAlice,30'     \"* -> #(#{'name': 'Alice' 'age': '30'})\n\
+             ```",
+        )
         // CSV.generate:#( #('id' 'n') #(1 2) ) -> 'id,n\n1,2\n' (fields stringified via .s).
         .sdk_typed_class_method("generate:", &["List"], |host, _r, args| {
             let rows = list_of(args[0], "CSV.generate:")?;
@@ -74,6 +103,14 @@ pub fn build_csv_class() -> NativeClassBuilder {
             }
             finish(host, wtr)
         })
+        .doc(
+            "Generate CSV text from a List of rows (each a List of fields). Fields are \
+             stringified via their `.s`, so numbers and booleans work directly; fields \
+             containing commas, quotes, or newlines are quoted per RFC 4180.\n\n\
+             ```\n\
+             CSV.generate:#( #('id' 'n') #(1 2) )     \"* -> 'id,n\\n1,2\\n'\n\
+             ```",
+        )
         // CSV.generateWithHeaders:#( #{'id': 1 'n': 2} ) -> 'id,n\n1,2\n'. The header comes from
         // the first row's keys (in order); a key missing from a later row is an empty field.
         .sdk_typed_class_method("generateWithHeaders:", &["List"], |host, _r, args| {
@@ -118,6 +155,14 @@ pub fn build_csv_class() -> NativeClassBuilder {
             }
             finish(host, wtr)
         })
+        .doc(
+            "Generate CSV text from a List of Maps, writing a header row first. The header \
+             comes from the first row's keys, in order; a key missing from a later row \
+             becomes an empty field. Values are stringified via `.s`.\n\n\
+             ```\n\
+             CSV.generateWithHeaders:#( #{'id': 1 'n': 2} )     \"* -> 'id,n\\n1,2\\n'\n\
+             ```",
+        )
 }
 
 fn list_of<'gc>(v: Value<'gc>, who: &str) -> Result<Vec<Value<'gc>>, QuoinError> {

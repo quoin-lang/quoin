@@ -3,6 +3,22 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the Quoin standard library (`qnlib`) files and test suites.
 
 ## Misc
+- [ ] **Support light terminal backgrounds in all colored output.** The ANSI palette
+  (`colors_for` in `crates/quoin-syntax/src/highlight.rs`) is tuned for a dark
+  terminal — literally `#ffffff` for operators/returns — and it feeds everything
+  colored: `qn highlight`, the REPL's live highlighting and `$class` output, error
+  annotations' source snippets, MNU candidate signatures, and the test reporter.
+  On a light background much of that output is faint-to-invisible. The doc
+  generator hit the same wall and hand-picked a light-scheme CSS map
+  (`light()` in `src/highlighter.rs::code_stylesheet`) next to the dark scheme it
+  generates from the ANSI table; the terminal needs the same second palette.
+  Sketch: give `colors_for` a light/dark axis, hoisting the doc generator's
+  `light()` choices as the light values so terminal and web agree in both
+  schemes; detect via `COLORFGBG` (set by iTerm2/rxvt/kitty; `;15` ≈ light) or an
+  OSC 11 query where available, with an explicit `QN_THEME=light|dark` override —
+  auto-detection is unreliable enough that the override is the load-bearing part.
+  `NO_COLOR`/`supports_color` gating is unchanged; this is about *which* colors,
+  not whether.
 - [x] **Lint: `^` inside an `if:`/`else:` arm that intends a method return.** DONE —
   `^` returns from the BLOCK (by design — it's `break`); `^^` returns from the
   method. The trap is `cond.if:{ ^expr }` written to mean "return from the
