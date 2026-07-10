@@ -338,6 +338,38 @@ it. None is fixed.
   (`compile_program_with`'s `define_self` flag distinguishes the cases).
   Tests: tests/exit_code.rs (all three entry points), 05-classes.qn.
 
+- [x] **`T?` on a method parameter makes the variant unreachable.** FIXED in
+  the dispatch scorer: a nullable hint is base-type-or-nil — nil scores an
+  exact match (the annotation says nil is expected), a non-nil argument scores
+  as the base type, and typed siblings still win their own types. The book's
+  Part VII gotcha that taught the workaround is now a worked example of the
+  correct behavior — the doc harness flagged it the moment dispatch changed.
+  Test: 06-methods.qn nullableParamsDispatch.
+
+- [x] **Sealed-subclass error is a bare String throw.** FIXED: typed
+  `ClassError`, symmetric with sealed-extension; the book's note about the
+  asymmetry updated (the harness caught the stale doc — behavior improvements
+  now break doc checks, exactly as designed). Test in 05-classes.qn.
+
+- [ ] **A spinning task starves the whole VM — cancellation and timers never
+  land.** Verified 2026-07-10: `Task.spawn:{ {true}.whileDo:{…} }` then
+  `t.cancel` from main — the cancel never takes effect, and main's own expired
+  `Async.sleep:` never resumes; the process had to be SIGKILLed. Batch-yield
+  boundaries exist (QN_BATCH), but the driver resumes the same task at a
+  cooperative yield instead of rotating to ready tasks/expired timers
+  (run-to-block by design; zero fairness at yield points is the bug-or-decision
+  to make explicit). The book's Part V documents the behavior as a gotcha.
+
+- [ ] **Checker reality vs. claims — two drifts found writing Part VII.**
+  (a) `qnlib/warnings.qn` gallery drift: `badEachParam` no longer warns, while
+  `wellFormed:` (in the "must emit NO warning" section) now warns
+  `expected List(Integer), found List`. (b) Compile-time argument-type MNU
+  effectively never fires for builtins (gated to from_vm+sealed `Instance`
+  receivers with one fully-typed variant): `5.pow:'x'` is silent at check time.
+  Also statically-visible bad literal elements (`var x: List(Integer) =
+  #(1 'two')`) don't warn — insertions do. Align the gallery + decide whether
+  the arg-check gate should widen.
+
 - [x] **Add `Block#finally:`.** DONE: `{ … }.finally:{ cleanup }` =
   `catch:finally:` with an empty handler list — the cleanup runs and whatever
   unwound (value, throw, cancellation, exit, `^^`) propagates unchanged; an
