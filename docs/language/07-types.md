@@ -149,6 +149,9 @@ Block(Integer Integer ^Integer)                "* …this type
 >   (§33); malformed generic shapes.
 > - `qnlib/warnings.qn` is the maintained gallery: one method per diagnostic.
 >   `qn check qnlib/warnings.qn` renders every warning the checker can produce.
+> - A deliberate warning can be silenced in place: a **trailing** `"* allow: <kind>`
+>   comment suppresses that kind on its own line only. The pragma polices itself —
+>   an unknown kind name, or a pragma on its own line, is a warning.
 
 Given a file with three bugs:
 
@@ -226,6 +229,24 @@ level:
 var d: Double = 1        "* no warning: the literal 1 becomes 1.0
 d.class.name             "* -> 'Double'
 ```
+
+Finally, the escape hatch. Sometimes the flagged behavior is the point — a test
+that *wants* to send `if:` to a maybe-nil value to pin the runtime error, say.
+A trailing `allow:` comment silences exactly that warning kind, exactly there:
+
+```quoin norun
+(flags.at:n).if:{ ^^1 };  "* allow: nil-receiver (nil -> MNU is the point)
+```
+
+The kind name is the warning's family — `nil-receiver`, `caret-discard`, `mnu`,
+`no-variant`, `element-type`, `type-mismatch`, `return-type`, `unknown-type`,
+`annotation` — and several can be listed, separated by commas. A parenthesized
+rationale is encouraged and ignored by the parser. Three rules keep suppressions
+honest: the pragma must **trail** the warned line (on a line of its own it would
+be captured as a doc comment, so that placement warns instead of silently doing
+nothing); an unknown kind name warns rather than no-ops, so a typo can't leave a
+phantom suppression; and a pragma only reaches its own line, so it can't blanket
+a file.
 
 ---
 

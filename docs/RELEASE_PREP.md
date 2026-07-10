@@ -446,6 +446,24 @@ SIGPIPE scoping is the model. Tests: `exit_code.rs::broken_pipe`.
 
 ---
 
+## `"* allow:` warning suppression (2026-07-10)
+
+**`"* allow: <kind>` silences a checker warning in place.** The qnlib suite ran
+with four warnings that were all *deliberate* (45-controlflow-inline pins the
+`^` fall-through; 50-aot-parity pins nil→MNU; 62-docs asserts nullable stdlib
+docs exist) and had no way to say so. A trailing `"* allow: <kind> (rationale)`
+comment now suppresses exactly that kind on exactly that line. Every diagnostic
+carries a stable kind slug (`WARNING_KINDS` in `src/compiler/mod.rs`); the parser
+recovers pragmas from raw source (`quoin-syntax/src/pragmas.rs` — comments are
+pest trivia) onto `ProgramNode`, and the compiler validates + filters at the one
+`warn` sink, so `qn check`'s exit code and every report agree. Self-policing:
+unknown kind → warning; pragma on its own line (a doc-block collision) →
+warning; kinds stop at a `(rationale)`. The suite now runs warning-free; the
+gallery (`qn check qnlib/warnings.qn`, 29 warnings) demonstrates suppression and
+both misuse warnings, pinned by `tests/check_warnings.rs`. Book: §30.
+
+---
+
 ## Relocatable stdlib loading (2026-07-09)
 
 **The binary is self-contained.** `build.rs` compiles the *shipping* stdlib subset

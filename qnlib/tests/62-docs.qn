@@ -49,7 +49,7 @@ TDocBare <-- {
 
     "* Native docs flow through the same surface: `.class_doc(..)` / `.doc(..)` set in Rust.
     .test:nativeDocsAnswer -> {
-        .isTrue:{ ([IO]Stdin.doc).contains?:'standard input' };
+        .isTrue:{ ([IO]Stdin.doc).contains?:'standard input' }; "* allow: nil-receiver (asserting the doc exists)
         .isTrue:{ ([IO]Stdin.meta.docFor:#stream).contains?:'created on first use' };
         "* ...and a Quoin delegator on the same native class extracts from qnlib source.
         .isTrue:{ ([IO]Stdin.meta.docFor:#readLine).contains?:'without its terminator' }
@@ -63,7 +63,7 @@ TDocBare <-- {
     .test:aReopenDocStandsInForAMissingClassDoc -> {
         .is:{ TDocBare.doc } equalTo:'A reopen doc standing in for a missing class doc.';
         "* ...and the first rung: a native .class_doc wins over any comment block.
-        .isTrue:{ ([IO]Stdin.doc).contains?:'standard input' }
+        .isTrue:{ ([IO]Stdin.doc).contains?:'standard input' } "* allow: nil-receiver (asserting the doc exists)
     };
 
     .test:docForRejectsNonSelectors -> {

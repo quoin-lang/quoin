@@ -191,4 +191,19 @@ GenericFlow <- {
     goodCaretBreak: -> { |l: List(Integer)| l.each:{ |x| ^x }; nil }
 };
 
+"* --- the `allow:` suppression pragma ---
+AllowGallery <- {
+    "* --- this is CORRECT and must emit NO warning ---
+    "* a trailing `"* allow: <kind>` comment suppresses exactly that kind on its line;
+    "* a parenthesized rationale is encouraged.
+    allowedNilReceiver: -> { |x: Integer?| x.abs };  "* allow: nil-receiver (gallery: deliberate)
+
+    "* a typo'd kind is itself flagged — and suppresses nothing, so both warnings fire.
+    badAllowKind: -> { |x: Integer?| x.abs };  "* allow: nil-reciever
+
+    "* a pragma on its own line would read as a doc block, so it must trail: two warnings.
+    "* allow: nil-receiver
+    badAllowPlacement: -> { |x: Integer?| x.abs }
+};
+
 'Defined Warnings — see the diagnostics printed above.'.print

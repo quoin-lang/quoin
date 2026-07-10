@@ -2075,6 +2075,7 @@ fn type_warnings_route_through_the_capture_sink() {
     arena.mutate_root(|_mc, vm| {
         vm.output.capture = true;
         vm.report_type_warnings(&[crate::compiler::Diagnostic {
+            kind: "unknown-type",
             message: "unknown type `Widget`".to_string(),
             span: None,
             notes: vec![],
@@ -2113,6 +2114,7 @@ fn type_warnings_render_source_block_and_provenance_note() {
         vm.options.supports_color = false;
         vm.output.capture = true;
         vm.report_type_warnings(&[crate::compiler::Diagnostic {
+            kind: "type-mismatch",
             message: "type mismatch".to_string(),
             span: Some(span.clone()),
             notes: vec![note.clone()],
