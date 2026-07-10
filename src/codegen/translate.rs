@@ -181,6 +181,52 @@ fn ret_type(r: AotRet) -> Type {
     }
 }
 
+/// Instruction reachability from the entry, following jumps — the pure-set
+/// scan's model of which instructions a PURE translation would visit. Edge
+/// policy mirrors the translator:
+///
+/// - `BranchIfNotBool` follows only the fall-through edge. In a member with
+///   no slot sources the operand is always a translation-time constant, so
+///   the guard either folds away (a provably-Bool condition — untyped fib's
+///   speculated `n <= 1` — takes the hot edge and the cold span is dead) or
+///   pins the cold edge, whose slot ops then trip the translation purity
+///   check and demote the member — the same verdict either way, decided by
+///   the authority.
+/// - Unknown or future instructions default to plain fall-through. Every
+///   inaccuracy here only ADMITS too much: the translation-time purity check
+///   is the soundness backstop for every admission the scan makes, and the
+///   cost of a wrong admission is one demote-retry compile, never a wrong
+///   program.
+fn reachable_ips(insts: &[Instruction]) -> Vec<bool> {
+    let mut seen = vec![false; insts.len()];
+    let mut work = vec![0usize];
+    while let Some(ip) = work.pop() {
+        if ip >= insts.len() || std::mem::replace(&mut seen[ip], true) {
+            continue;
+        }
+        let mut succ = |o: isize| {
+            if let Some(t) = ip.checked_add_signed(o) {
+                work.push(t);
+            }
+        };
+        match &insts[ip] {
+            Instruction::Jump(o) => succ(*o),
+            Instruction::IfJump(o) | Instruction::ElseJump(o) => {
+                succ(*o);
+                succ(1);
+            }
+            Instruction::BranchIfNotBool(_) => succ(1),
+            Instruction::BranchIfNotList(o, _) | Instruction::BranchIfNotPlainNew(o) => {
+                succ(*o);
+                succ(1);
+            }
+            Instruction::Return | Instruction::MethodReturn | Instruction::BlockReturn => {}
+            _ => succ(1),
+        }
+    }
+    seen
+}
+
 /// The scalar-pure subset of a group: all-scalar signatures whose bodies stay
 /// in the scalar instruction set and send only to other scalar-pure siblings.
 /// These keep the direct native-call path; everything else outcalls.
@@ -206,42 +252,21 @@ fn scalar_pure_set(
             if !pure.contains(&tid) {
                 continue;
             }
-            // The guarded-conditional COLD spans (F1, strict Boolean
-            // conditionals) are excluded from the scan: `BranchIfNotBool(off)`
-            // jumps to a cold path that re-materializes the arm blocks and
-            // re-dispatches the real `if:`/`if:else:` send, and the hot span's
-            // trailing `Jump` hops over it. That span is dynamically DEAD
-            // whenever the condition proves Bool at translation — for a
-            // speculated-scalar compare (untyped fib's `n <= 1`) the guard
-            // folds away entirely — so its block literals and dynamic send
-            // must not evict the member syntactically. A member whose guard
-            // does NOT fold reaches the cold span at translation and trips
-            // the slot-window purity check there, demoting exactly as before
-            // (the same optimistic-admission contract as scalar operators
-            // below). Shipping this blind spot cost untyped fib 8x: the F1
-            // shape evicted it from the pure set, which killed direct
-            // self-recursion, which made its speculated scalar return
-            // unprovable, which demoted it to an Obj ret.
+            // The scan checks only instructions a pure translation would
+            // VISIT (`reachable_ips`), so a guard's dead cold span — F1's
+            // strict-Boolean conditionals re-materialize their arm blocks and
+            // re-dispatch the real send there — cannot evict the member. A
+            // reachability-blind version of this scan shipped and cost
+            // untyped fib 8x: eviction killed direct self-recursion, which
+            // made its speculated scalar return unprovable, which demoted it
+            // to an Obj ret.
             let insts = &c.block.bytecode.0;
-            let mut cold = vec![false; insts.len()];
-            for (i, inst) in insts.iter().enumerate() {
-                if let Instruction::BranchIfNotBool(off) = inst
-                    && let Some(cs) = i.checked_add_signed(*off)
-                    && cs >= 1
-                    && cs <= insts.len()
-                    && let Some(Instruction::Jump(k)) = insts.get(cs - 1)
-                    && let Some(ce) = (cs - 1).checked_add_signed(*k)
-                    && ce >= cs
-                    && ce <= insts.len()
-                {
-                    cold[cs..ce].iter_mut().for_each(|d| *d = true);
-                }
-            }
+            let live = reachable_ips(insts);
             let ok = insts.iter().enumerate().all(|(i, inst)| match inst {
-                _ if cold[i] => true,
-                // The strict-Boolean guards themselves: free when the value
-                // proves Bool (the pure case); a Dyn operand cannot arise in
-                // a pure member (no slot sources), so admission is safe.
+                _ if !live[i] => true,
+                // The strict-Boolean guards themselves cost nothing in a pure
+                // member: with no slot sources the operand is a translation
+                // constant, so they fold (see `reachable_ips`).
                 Instruction::BranchIfNotBool(..) | Instruction::RequireBool => true,
                 Instruction::Push(
                     Constant::Int(_) | Constant::Double(_) | Constant::Bool(_) | Constant::Nil,

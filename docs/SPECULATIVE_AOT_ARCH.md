@@ -338,8 +338,13 @@ not-statically-Bool conditional. The syntactic `scalar_pure_set` scan is
 reachability-blind, so that dynamically-dead cold span evicted untyped fib
 from the pure set → no direct self-recursion → recursive results Dyn → the
 speculated scalar ret failed `emit_return`'s static proof → `RetDemote` →
-Obj ret → **8× unnoticed** (0.016 → 0.077s whole-process). The scan now
-masks guarded-conditional cold spans and admits `BranchIfNotBool`/
-`RequireBool` optimistically; a guard that does NOT fold still trips the
-translation-time slot-window purity check and demotes as before. Pinned by
+Obj ret → **8× unnoticed** (0.016 → 0.077s whole-process). The scan is now
+reachability-aware (`reachable_ips`): it checks only instructions a pure
+translation would visit, with `BranchIfNotBool` following only its
+fall-through edge — in a member with no slot sources the operand is a
+translation constant, so the guard either folds (hot edge only) or pins the
+cold edge, whose slot ops then trip the translation-time purity check and
+demote; the same verdict either way, decided by the authority. Unknown
+instructions default to fall-through: every scan inaccuracy only ADMITS too
+much, and the translation purity check backstops every admission. Pinned by
 `guarded_conditional_cold_span_keeps_untyped_fib_scalar_pure`.
