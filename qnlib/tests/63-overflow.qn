@@ -1,0 +1,48 @@
+"* Integer overflow raises a catchable ArithmeticError (src/devirt_ops.rs int_bin; mirrored by
+"* the AOT codegen's emit_int_bin -- codegen/tests.rs sweeps the two against each other).
+"*
+"* It used to WRAP in a release build and PANIC the whole VM in a debug build (RELEASE_PREP
+"* Tier 4b, found writing verified doc examples): `9223372036854775807 + 1` aborted the
+"* process while `2.pow:63` raised properly. Every tier now agrees: interpreter, the
+"* devirtualized superinstructions, and compiled code all raise the same error.
+"*
+"* i64::MIN cannot be written as a literal (its magnitude exceeds the max positive literal),
+"* so the tests construct it by arithmetic.
+
+(TestSuite.new:{ var name = 'IntegerOverflow' }).add:{
+    .test:additionOverflowRaises -> {
+        .does:{ 9223372036854775807 + 1 } throw:ArithmeticError;
+        .does:{ 9223372036854775807 + 1 } throw:#/Integer overflow/;
+        "* ...and the boundary itself is fine.
+        .is:{ 9223372036854775807 + 0 } equalTo:9223372036854775807
+    };
+
+    .test:subtractionOverflowRaises -> {
+        var min = (0 - 9223372036854775807) - 1;
+        .does:{ min - 1 } throw:ArithmeticError;
+        .is:{ min + 0 } equalTo:min
+    };
+
+    .test:multiplicationOverflowRaises -> {
+        "* 3037000500^2 is just past i64::MAX (3037000499^2 is just under).
+        .does:{ 3037000500 * 3037000500 } throw:ArithmeticError;
+        .is:{ 3037000499 * 3037000499 } equalTo:9223372030926249001
+    };
+
+    "* The one overflowing quotient: MIN / -1 (its true value, 2^63, has no i64 home).
+    "* MIN % -1 is 0 -- defined, not an overflow.
+    .test:minDividedByMinusOne -> {
+        var min = (0 - 9223372036854775807) - 1;
+        .does:{ min / (0 - 1) } throw:ArithmeticError;
+        .is:{ min % (0 - 1) } equalTo:0;
+        .is:{ min / 1 } equalTo:min
+    };
+
+    "* Overflow is an ordinary error: catch:, recover, keep running.
+    .test:overflowIsCatchable -> {
+        var saw = nil;
+        { 9223372036854775807 + 1 }.catch:{ |e: ArithmeticError| saw = e.message };
+        .is:{ saw } equalTo:'Integer overflow';
+        .is:{ 1 + 1 } equalTo:2
+    }
+}

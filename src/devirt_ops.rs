@@ -29,27 +29,32 @@ fn division_by_zero() -> QuoinError {
     QuoinError::ArithmeticError("Division by zero".to_string())
 }
 
-/// Integer binary op. Arithmetic wraps like `i64` (checked only in debug builds, via the plain
-/// operators); `/`/`%` raise "Division by zero" on a zero divisor; comparisons yield a `Bool`.
+fn integer_overflow() -> QuoinError {
+    QuoinError::ArithmeticError("Integer overflow".to_string())
+}
+
+/// Integer binary op. Arithmetic that overflows `i64` raises a catchable "Integer overflow"
+/// (it used to wrap in release and PANIC in debug — RELEASE_PREP Tier 4b); `/`/`%` raise
+/// "Division by zero" on a zero divisor; comparisons yield a `Bool`. The AOT codegen's
+/// `emit_int_bin` (translate.rs) mirrors these semantics instruction for instruction —
+/// `codegen/tests.rs` sweeps the edges to hold the two together.
 #[inline]
 pub fn int_bin(kind: IntBinKind, a: i64, b: i64) -> Result<IntBinOut, QuoinError> {
     use IntBinKind::*;
     use IntBinOut::{Bool, Int};
     Ok(match kind {
-        Add => Int(a + b),
-        Sub => Int(a - b),
-        Mul => Int(a * b),
-        // Only a zero *divisor* is an error. `i64::MIN / -1` PANICS in plain
-        // Rust `/` (every build — it's LLVM UB otherwise; the old comment
-        // claiming it wraps was wrong, BUGS.md Finding 2), so the -1 divisor
-        // wraps explicitly — matching the AOT codegen's ineg/0 lowering
-        // exactly (translate.rs), which is what the interpreter must mirror.
+        Add => Int(a.checked_add(b).ok_or_else(integer_overflow)?),
+        Sub => Int(a.checked_sub(b).ok_or_else(integer_overflow)?),
+        Mul => Int(a.checked_mul(b).ok_or_else(integer_overflow)?),
+        // Only a zero *divisor* is a division error. The one overflowing quotient,
+        // `i64::MIN / -1` (which PANICS in plain Rust `/` in every build — LLVM UB
+        // otherwise, BUGS.md Finding 2), raises "Integer overflow" like the other ops.
         Div => {
             if b == 0 {
                 return Err(division_by_zero());
             }
             if b == -1 {
-                Int(a.wrapping_neg())
+                Int(a.checked_neg().ok_or_else(integer_overflow)?)
             } else {
                 Int(a / b)
             }

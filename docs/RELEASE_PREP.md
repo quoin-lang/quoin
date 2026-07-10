@@ -262,14 +262,27 @@ it. None is fixed.
 - [ ] **Compile errors carry no line/column.** `compile_program` returns a bare
   `String`, unlike parse errors and checker diagnostics, which have spans.
 
-- [ ] **Integer overflow panics the VM (debug) / wraps (release).**
-  `9223372036854775807 + 1` aborts with a Rust arithmetic-overflow panic at
-  `src/devirt_ops.rs:39` in a debug build; a release build wraps silently. Found
-  while writing verified doc examples for Integer. `2.pow:63` raises a proper
-  catchable ArithmeticError, so the checked path exists — the devirtualized
-  arithmetic ops need the same treatment (checked ops raising ArithmeticError,
-  or a promotion-to-BigInteger decision). Same uncatchable-crash family as the
-  Tier 1 SIGBUS fixes.
+- [x] **Integer overflow panics the VM (debug) / wraps (release).** FIXED:
+  overflow now raises a catchable `ArithmeticError("Integer overflow")` in every
+  tier — `int_bin` (interpreter + devirtualized superinstructions) uses checked
+  ops, and the AOT codegen's `emit_int_bin` emits `sadd/ssub/smul_overflow` with
+  a cold bail to the new `TAG_INT_OVERFLOW`. `i64::MIN / -1` (the one
+  overflowing quotient, previously deliberately wrapped to match the compiled
+  `ineg`) raises too; `MIN % -1` stays 0. The `codegen/tests.rs` parity sweep
+  holds the two implementations together over the MAX/MIN edges, and its oracle
+  lost its "wherever the reference can't panic" carve-out — `int_bin` can no
+  longer panic on any input. Tests: `qnlib/tests/63-overflow.qn`,
+  `tests/overflow_aot.rs` (a warmed compiled method overflows catchably; AOT-off
+  agrees byte for byte).
+
+  Measured free (interleaved A/B, release, min of 7 pairs/program): fib_typed
+  +0.14%, fib_untyped +0.20%, richards −0.61%; worst first reading (strings
+  +2.15%) shrank to +0.32% at 15 pairs — layout noise. The overflow flag is what
+  the hardware computes anyway; the bail branch is never taken.
+
+  Deliberately NOT taken: promotion to BigInteger on overflow (Smalltalk-style).
+  That is a language-semantics decision with a value-representation cost on the
+  hottest paths; raising keeps v0.1 honest and leaves promotion open.
 
 - [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
   and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so
