@@ -22,7 +22,8 @@
 "* after splitting on '/', so an encoded %2F can never create a segment boundary.
 "* ```
 "* var r = [Web]Route.of:'/users/:id/files/*rest';
-"* r ~ '/users/7/files/a/b';       "* -> true (routes implement the ~ protocol)
+"* r ~ '/users/7/files/a/b'       "* -> true
+"* "* routes implement the ~ protocol; bind: extracts the captures
 "* r.bind:'/users/7/files/a/b'     "* -> #{'id': '7' 'rest': 'a/b'}
 "* ```
 [Web]Route <- { | @pattern @segments @kinds |

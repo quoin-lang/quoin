@@ -17,15 +17,17 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 > - `Generator.from:{ ^> … }` wraps a yielding block as a **lazy, re-runnable** iterable (it mixes in `Iterate`). `collection.iterator` returns an external pull iterator with `hasNext?` / `next`.
 
 ```quoin
-f = Fiber.new:{ Fiber.yield:1; Fiber.yield:2; 'done' }
-f.resume        "* 1     (runs to first yield)
-f.resume        "* 2
-f.resume        "* 'done'   (block's final value)
-f.done?         "* true
-
-evens = Generator.from:{ n = 0; { true }.whileDo:{ ^> n; n = n + 2 } }
-evens.take:4    "* #(0 2 4 6)   (infinite source, consumed lazily)
+var f = Fiber.new:{ Fiber.yield:1; Fiber.yield:2; 'done' }
+f.resume        "* -> 1
+f.resume        "* -> 2
+f.resume        "* -> 'done'
+f.done?         "* -> true
+var evens = Generator.from:{ var n = 0; { true }.whileDo:{ ^> n; n = n + 2 } }
+evens.take:4    "* -> #(0 2 4 6)
 ```
+
+The first `resume` runs to the first yield; the third returns the block's final
+value. `evens` is an infinite source, consumed lazily by `take:`.
 
 > **⚠ Gotcha — resuming a finished or failed fiber throws.** Once `status` is
 > `'done'` or `'failed'`, `resume` raises a `FiberError`. So does `Fiber.yield:`
@@ -64,13 +66,16 @@ Lazy: `lazyCollect:`, `lazySelect:`.
 ```quoin
 MyRange <- { |@start @end|
     .mix:Iterate
-    each: -> { |b| i = @start; { i < @end }.whileDo:{ b.valueWithSelfOrArg:i; i = i + 1 } }
+    each: -> { |b| var i = @start; { i < @end }.whileDo:{ b.valueWithSelfOrArg:i; i = i + 1 } }
 }
 
-r = MyRange.new:{ start = 0; end = 5 }
-r.collect:{ |n| n * n }        "* #(0 1 4 9 16)   — all from one each:
-r.select:{ |n| n > 2 }.list    "* #(3 4)
+var r = MyRange.new:{ start = 0; end = 5 }
+r.collect:{ |n| n * n }        "* -> #(0 1 4 9 16)
+r.select:{ |n| n > 2 }         "* -> #(3 4)
 ```
+
+Every combinator here — `collect:`, `select:`, and the rest — comes from that one
+`each:`.
 
 > **⚠ Gotcha — combinators return materialized lists; use the `lazy*` forms for
 > infinite or expensive sources.** `collect:`/`select:` walk the whole collection

@@ -307,6 +307,16 @@ it. None is fixed.
   That is a language-semantics decision with a value-representation cost on the
   hottest paths; raising keeps v0.1 honest and leaves promotion open.
 
+- [ ] **Non-trailing splat destructuring binds wrong.** Found making the book's
+  §4 example runnable (2026-07-10), confirmed by hand: `var a *_ z = #(1 2 3 4 5)`
+  binds `z = 3` (should be 5), and `var *init last = #(1 2)` binds `init` to the
+  WHOLE list while `last = 2` — the splat greedily takes everything to the end and
+  post-splat targets still bind positionally from the start. Trailing splats
+  (`var p q *rest = …`) are correct. No test coverage exists for non-trailing
+  splats. Either fix the compiler's binding plan or restrict the grammar to
+  trailing splats; the book's §4 prose currently soft-claims "any position" and
+  shows only verified trailing forms — align it with whichever way this goes.
+
 - [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
   and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so
   cleanup-on-every-path with no interest in the error must name a handler that

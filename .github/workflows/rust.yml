@@ -29,6 +29,12 @@ jobs:
       run: cargo test --verbose $WORKSPACE
     - name: Run Quoin tests
       run: cargo run --verbose -- test qnlib/tests
+    # Every fenced example in the reference docs and the language book must run and match
+    # its `"* -> value` annotations (docs/DOCS_ARCH.md phase 3 / RELEASE_PREP Tier 2).
+    - name: Check documentation examples
+      run: |
+        cargo run -- doc --check
+        cargo run -- doc --check docs/language
 
   # Dylint lints: no_borrow_across_yield is deny-level (a violation fails this
   # job); no_gc_across_yield stays advisory (warnings only). The lint libraries

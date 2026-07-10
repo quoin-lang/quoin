@@ -71,12 +71,11 @@ exclusive end). Plus `Iterate` combinators.
 > - ANSI strings are the `#ANSI'…'` literal (a user string mixing in `ActAsUserString`); `%`-formatting works on them too.
 
 ```quoin
-'hello %' % 'world'                  "* 'hello world'
-'%1 then %2' % #('a' 'b')            "* 'a then b'        (positional, 1-based)
-'%h-%w' % #{ 'h':'hi' 'w':'world' }  "* 'hi-world'        (named, 1-char keys)
-
-a = 'foo'; b = 'bar'
-%'value is %{a + b}!'                "* 'value is foobar!' (inline, lexical)
+'hello %' % 'world'                  "* -> 'hello world'
+'%1 then %2' % #('a' 'b')            "* -> 'a then b'
+'%h-%w' % #{ 'h':'hi' 'w':'world' }  "* -> 'hi-world'
+var a = 'foo'; var b = 'bar';        "* the ; matters: the next line starts with an operator
+%'value is %{a + b}!'                "* -> 'value is foobar!'
 ```
 
 > **⚠ Gotcha — two different `%`.** Binary `%` (between a string and an argument)
@@ -90,20 +89,20 @@ a = 'foo'; b = 'bar'
 ## 20. Namespaces
 
 > **Rules**
-> - `name = value` assigns a **reassignable local**. `Name <- value` defines a **constant** global — redefining it throws (`"Global […]Name is already defined in this scope"`).
+> - `var name = value` declares a **reassignable local** (§4). `Name <- value` defines a **constant** global — redefining it throws (`"Global […]Name is already defined in this scope"`).
 > - Namespaced names: `[NS]Name` (e.g. `[IO]File`), multi-segment `[A/B]Name`, and root `[/]Name`. A bare `Name` and `[/]Name` both refer to the **root** namespace.
 > - Globals are stored by full namespace + name; namespaces are a lookup/organization mechanism, not modules with their own scope.
 
 ```quoin
 Pi <- 3.14159           "* constant; a second `Pi <- …` throws
-radius = 2              "* local; reassignable
+var radius = 2          "* local; reassignable
 
-out = [IO]Stdout        "* namespaced global
-root = [/]Object        "* explicit root; same as bare `Object`
+var out = [IO]Stdout    "* namespaced global
+var root = [/]Object    "* explicit root; same as bare `Object`
 ```
 
 > **⚠ Gotcha — constants can't be reassigned, locals can't be `<-`.** Use `<-` for
-> things defined once (classes, constants) and `=` for mutable locals. Trying to
+> things defined once (classes, constants) and `var` for mutable locals. Trying to
 > redefine a `<-` constant is a runtime throw, not a silent overwrite.
 
 ---
@@ -117,12 +116,16 @@ root = [/]Object        "* explicit root; same as bare `Object`
 > - **`dir/*`** globs a directory, loading every `.qn` in it in **UTF-8-sorted** order.
 > - Loading is filesystem-**agnostic**: resolution goes through a host-supplied resolver (disk on the CLI; host-provided units on WASM / embedded). There is no way to load an arbitrary OS path.
 
-```quoin
+These forms are illustrative — `self:` paths resolve against *your* project
+(`self:helpers` names a `helpers.qn` this document doesn't ship), so the block
+isn't runnable as pasted:
+
+```quoin norun
 use core/*;             "* every .qn in the stdlib's core/ dir, in sorted order
 use self:helpers;       "* the current project's helpers.qn
 use std:io/file;        "* explicit stdlib; `std:` and bare are the same package
 
-MyThing = [IO]File;     "* aliasing is just assignment — not a `use` concern
+MyFile <- [IO]File;     "* aliasing is just an ordinary definition — not a `use` concern
 ```
 
 > **⚠ Gotcha — `use` loads, the namespace names.** `use` does not pull symbols into a

@@ -10,21 +10,23 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 ## 14. Pattern matching & `case`
 
 > **Rules**
-> - `subject.case:{ .when:cond do:result … .default:fallback }` — tests each `cond` against `subject` with the `~` operator; the **first match wins**. With no match and no `default:`, the result is `nil`.
+> - `subject.case:{ .when:cond do:result; … .default:fallback }` — tests each `cond` against `subject` with the `~` operator; the **first match wins**. With no match and no `default:`, the result is `nil`. Each arm is an ordinary statement, so end it with `;` — a following line that starts with `.when:`'s leading dot would otherwise continue the previous arm (§2).
 > - `do:` (and `default:`) accept either a **block** (the block receives the subject as its argument) or a **plain value** (used as the result).
 > - The **`~` match protocol**: `a ~ b` is `a.~:(b)` — the matcher is the **left** operand, so dispatch is class-first on `a`'s `~:` (define `~:` on your own class to customize). Built-in matchers: a **Class** tests is-instance-of (`Integer ~ 5`), a **Regex** tests a match against the string (`#/…/ ~ str`), a **Block** runs as a predicate over `b`, a **range** tests membership, and the default `Object#~:` is `==:` equality. (Because the matcher is on the left, `case` puts the `cond` first: `cond ~ subject`.)
 
 ```quoin
-grade = score.case:{
-    .when:(90..101) do:'A'                 "* range membership
-    .when:(80..90)  do:'B'
-    .when:{ |n| n < 0 } do:'invalid'       "* predicate block, gets the subject
+var score = 87
+var grade = score.case:{
+    .when:(90..101) do:'A';                "* range membership
+    .when:(80..90)  do:'B';
+    .when:{ |n| n < 0 } do:'invalid';      "* predicate block, gets the subject
     .default:'F'
 }
-
+grade;                                     "* -> 'B'
+var name = 'Ada'
 name.case:{
-    .when:#/^[A-Z]+$/ do:{ 'shouting'.print }   "* regex match
-    .when:'Ada'       do:{ 'hi Ada'.print }     "* equality
+    .when:#/^[A-Z]+$/ do:{ 'shouting'.print };   "* regex match
+    .when:'Ada'       do:{ 'hi Ada'.print };     "* equality
     .default:{ 'unknown'.print }
 }
 ```
@@ -50,14 +52,16 @@ The same `~` operator works standalone, with the matcher on the left:
 > - **Runtime errors are structured**: the VM maps its internal errors to these Quoin `Error` objects at the `catch:` boundary, so you can catch and inspect them.
 
 ```quoin
-result = {
-    (amount < 0).if:{ ArgumentError.throw:'amount must be >= 0' }
-    process:amount
+var amount = -5
+var result = {
+    (amount < 0).if:{ ArgumentError.throw:'amount must be >= 0' };
+    .process:amount                "* reached only when the check passes
 }.catch:{ |e:ArgumentError| ('bad input: ' + e.message).print; 0 }
  catch:{ |e:IoError|        ('io failed: ' + e.message).print; -1 }
  finally:{ 'done'.print }
 "* anything that isn't an ArgumentError or IoError re-raises automatically —
 "* most-specific handler first, no explicit re-throw needed.
+result                             "* -> 0
 ```
 
 Internal failures surface as the matching Quoin error type — e.g. an out-of-range

@@ -33,7 +33,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
              only).\n\n\
              ```\n\
              var d = [IO]Folder.open:'/tmp'\n\
-             var entry = d.next     \"* -> an [IO]File, or nil once exhausted\n\
+             var entry = d.next     \"* an [IO]File, or nil once exhausted\n\
              ```",
         )
         .class_method("open:", |vm, mc, _receiver, args| {

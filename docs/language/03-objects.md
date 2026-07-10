@@ -38,25 +38,24 @@ Point <- Point3D <- { |@z|                            "* subclass adds @z
                        + ((@z - other.z) * (@z - other.z))).sqrt }
 }
 
-p = Point.newX:3 y:4
-p.x                                                   "* 3
-
-a = Point3D.new:{ x = 0; y = 0; z = 0 }
-b = Point3D.new:{ x = 1; y = 2; z = 2 }
-a.dist:b                                              "* 3
+var p = Point.newX:3 y:4
+p.x                                                   "* -> 3
+var a = Point3D.new:{ x = 0; y = 0; z = 0 }
+var b = Point3D.new:{ x = 1; y = 2; z = 2 }
+a.dist:b                                              "* -> 3
 ```
 
 Reopen a class with `<--` to add methods later; extend a single value with `<--`
 to give just that object new behavior (a singleton/eigenclass, named `$Type`
-internally):
+internally). Note that a **sealed** class refuses both (§12) — and the unboxed
+built-ins (`Integer`, `Double`, `Boolean`, `List`) ship sealed; `String` is open:
 
 ```quoin
-Integer <-- { doubled -> { self + self } }    "* every Integer gains doubled
-21.doubled                                     "* 42
-
-n = 42
-n <-- { greet -> { 'hi from this 42' } }       "* only this object gains greet
-n.greet                                        "* 'hi from this 42'
+String <-- { shout -> { .upper + '!' } }      "* every String gains shout
+'code'.shout                                  "* -> 'CODE!'
+var s = 'plain'
+s <-- { fancy -> { '~' + self + '~' } }       "* only this one string gains fancy
+s.fancy                                       "* -> '~plain~'
 ```
 
 > **Note — redefining vs. adding a variant.** Within one class, a later definition
@@ -143,17 +142,22 @@ Widget.new.hello       "* 'hi from Widget'   (found via the mixin)
 > - No matching variant → `MessageNotUnderstood` — and if the selector *does* exist with non-matching argument types, the error lists those filtered-out variants as a hint.
 
 ```quoin
-describe: -> { |n:Integer| 'int ' + n.s }
-describe: --> { |s:String|  'str ' + s }
-describe: --> { |n:Integer { n > 100 }| 'big number' }   "* a guard refines :Integer
+Describer <- {
+    describe: -> { |n:Integer| 'int ' + n.s }
+    describe: --> { |s:String|  'str ' + s }
+    describe: --> { |n:Integer { n > 100 }| 'big number' }   "* a guard refines :Integer
+}
 
-describe:5         "* 'int 5'        (the guard fails, so plain :Integer matches)
-describe:'hi'      "* 'str hi'
-describe:150       "* 'big number'   (the guarded :Integer beats the unguarded one)
+var d = Describer.new
+d.describe:5         "* -> 'int 5'
+d.describe:'hi'      "* -> 'str hi'
+d.describe:150       "* -> 'big number'
 ```
 
 Type-based variants are the right tool when you want different behavior per
-argument type; the dispatcher chooses the most specific match.
+argument type; the dispatcher chooses the most specific match: `5` fails the
+guard, so the plain `:Integer` variant handles it, while `150` passes it and the
+guarded variant outranks the unguarded one.
 
 > **⚠ Gotcha — equal-specificity matches are ambiguous, not ordered.** If two
 > variants match the same argument with the **same** type-specificity *and* the same

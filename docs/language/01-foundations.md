@@ -28,7 +28,7 @@ can read "send the message `m` to the object `x`" for every `x.m`, you can read
 almost all of it. A method with no explicit receiver is sent to `self`, written
 with a bare leading dot:
 
-```quoin
+```quoin norun
 .print: 'hello'        "* sends print: to self
 person.greet           "* sends greet to person
 (1..5).collect:{ |n| n * 10 }
@@ -62,7 +62,7 @@ A block comment. It opens with a quote that is NOT followed by '*',
 spans as many lines as you like, and closes at the next quote.
 "
 
-x = 1 "this trailing block comment ends here" + 2   "* x is 3
+var x = 1 "this trailing block comment ends here" + 2   "* x is 3
 ```
 
 > **⚠ Gotcha — a stray `"` swallows code.** Because the `"…"` block comment runs
@@ -163,7 +163,7 @@ var n: Integer = 42         "* typed local
 
 var a b c = #(1 2 3)        "* a=1, b=2, c=3
 var first *rest = #(1 2 3 4) "* first=1, rest=#(2 3 4)
-var a *_ z = #(1 2 3 4 5)   "* a=1, z=5, middle discarded
+var p q *_ = #(1 2 3 4 5)   "* p=1, q=2, rest discarded
 var head (x2 y) = #(1 #(2 3)) "* head=1, x2=2, y=3  (nested)
 
 Pi <- 3.14159               "* a constant; a second `Pi <- …` would throw
@@ -188,7 +188,7 @@ trail. `_` (and `*_`) ignore the corresponding element(s).
 > - **Suffix selectors**: `name!` (e.g. `.sealed!`) and `name?` (e.g. `fiber.done?`) are ordinary method names.
 > - Method (postfix) sends bind **tighter** than infix operators: `a.b + c.d` is `(a.b) + (c.d)`.
 
-```quoin
+```quoin norun
 42.abs                         "* unary
 'a,b,c'.split:','              "* one keyword arg
 scores.at:'amy' put:95         "* selector is at:put:, two args
