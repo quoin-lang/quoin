@@ -66,6 +66,38 @@
         };
     };
 
+    "* Bare `finally:` — cleanup on every path, nothing absorbed (RELEASE_PREP
+    "* Tier 4b; replaces the `catch:{|e| e.throw} finally:` idiom).
+    .test:
+    bareFinally -> {
+        "* Success: cleanup runs, the value propagates.
+        var log = #();
+        .is:{ { 41 + 1 }.finally:{ log.add:'ran' } } equalTo:42;
+        .is:{ log } equalTo:#('ran');
+
+        "* Throw: cleanup runs FIRST, then the error re-raises unchanged.
+        var order = #();
+        { { 'boom'.throw }.finally:{ order.add:'cleaned' } }.catch:{ |e| order.add:e };
+        .is:{ order } equalTo:#('cleaned' 'boom');
+
+        "* A typed handler outside still sees the original error type.
+        var seen = nil;
+        { { ValueError.throw:'v' }.finally:{ nil } }.catch:{ |e: ValueError| seen = e.class.name };
+        .is:{ seen } equalTo:'ValueError';
+
+        "* An error thrown by the cleanup overrides a normal result.
+        .does:{ { 1 }.finally:{ 'late'.throw } } throw:#/late/;
+    };
+
+    "* `^^` unwinding through `.finally:` runs the cleanup and still wins.
+    .test:
+    finallyRunsOnNonLocalReturn -> {
+        var cleaned = false;
+        var m = homeFor -> { { ^^7 }.finally:{ cleaned = true }; 99 };
+        .is:{ .homeFor } equalTo:7;
+        .isTrue:{ cleaned };
+    };
+
     .test:
     match -> {
         .does:{ { .length == 3 } } match:'abc';

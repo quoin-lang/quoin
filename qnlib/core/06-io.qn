@@ -31,26 +31,26 @@
 "* One-shot writes, over the buffered streams the native class provides. These are what a
 "* script that just wants to save its output should reach for: each opens, writes, and closes,
 "* so nothing is left for the exit flush to do.
-"* `catch:{|e| e.throw} finally:{...}` is the close-on-every-path idiom: the handler re-raises so
-"* the caller still sees the error, and `finally:` closes either way. `close` flushes.
+"* `.finally:` is the close-on-every-path idiom: the cleanup runs and whatever happened —
+"* a value, a throw, a cancellation — propagates unchanged. `close` flushes.
 [IO]File <-- {
     .meta <-- {
         "* Replace `path`'s contents with `text` (creating it if absent).
         write:to: -> { |text: String path: String|
             var s = ([IO]File.create:path).stringStream;
-            { s.write:text }.catch:{ |e: Error| e.throw } finally:{ s.close }
+            { s.write:text }.finally:{ s.close }
         };
 
         "* Add `text` to the end of `path` (creating it if absent).
         append:to: -> { |text: String path: String|
             var s = ([IO]File.append:path).stringStream;
-            { s.write:text }.catch:{ |e: Error| e.throw } finally:{ s.close }
+            { s.write:text }.finally:{ s.close }
         };
 
         "* The whole file as one String.
         read: -> { |path: String|
             var s = ([IO]File.open:path).stringStream;
-            { ^s.readAll }.catch:{ |e: Error| e.throw } finally:{ s.close }
+            { ^s.readAll }.finally:{ s.close }
         }
     }
 };
