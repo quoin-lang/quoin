@@ -1238,10 +1238,24 @@ fn invoke_tail<'gc>(
     finish_frame(vm, outcome, base, minted)
 }
 
-/// The compiled entry for a block template, compiling LAZILY on first use
+/// The compiled entry for a block template, compiling LAZILY once warm
 /// (B3a): registry hit → done; else a pending candidate stashed at unit load
-/// compiles now (once — a refusal tombstones). `None` = run interpreted.
-pub fn block_entry_for<'gc>(vm: &mut VmState<'gc>, template_id: u32) -> Option<&'static AotEntry> {
+/// compiles at the warmth threshold (once — a refusal tombstones). `None` =
+/// run interpreted.
+///
+/// The warmth window doubles as S1-style ARGUMENT observation (`arg` is the
+/// `valueWithSelfOrArg:` item): a one-param block whose observed args
+/// saturate to one scalar kind compiles that param into a register lane with
+/// an entry precondition — `invoke_block` checks it and Bails to the
+/// interpreted body on mismatch, tombstoning after `BAIL_TOMBSTONE`
+/// consecutive misses, exactly like a speculated method. This is what lets
+/// `(x * 3) + 1` inside `collect:{ |x| … }` devirt to native arithmetic
+/// instead of paying two classic outcalls per element.
+pub fn block_entry_for<'gc>(
+    vm: &mut VmState<'gc>,
+    template_id: u32,
+    arg: Value<'gc>,
+) -> Option<&'static AotEntry> {
     if let Some(entry) = lookup(template_id) {
         return (entry.role == AotRole::BlockTemplate).then_some(entry);
     }
@@ -1253,13 +1267,27 @@ pub fn block_entry_for<'gc>(vm: &mut VmState<'gc>, template_id: u32) -> Option<&
     // threshold in its first handful of elements.
     let warm = warm_threshold();
     {
-        let (count, _) = vm.aot_pending_blocks.get_mut(&template_id)?;
+        let (count, arg_kind, _) = vm.aot_pending_blocks.get_mut(&template_id)?;
         *count += 1;
+        *arg_kind = spec::merge(*arg_kind, spec::kind_of(arg));
         if *count < warm {
             return None;
         }
     }
-    let (_, cand) = vm.aot_pending_blocks.remove(&template_id)?;
+    let (_, arg_kind, mut cand) = vm.aot_pending_blocks.remove(&template_id)?;
+    // Zero-param blocks receive the item as `self`, not as the param — only
+    // a real one-param block speculates its (single) argument lane. And only
+    // when the body has something a scalar lane can devirt: the lane costs a
+    // per-invocation precondition branch plus a return re-boxing (~+12% on an
+    // identity block, measured), so a body with no scalar-op sends stays a
+    // slot-resident Obj.
+    if cand.block.param_syms.len() == 1
+        && block_body_has_scalar_ops(&cand.block)
+        && let Some(kind) = spec::scalar_kind(arg_kind)
+    {
+        cand.params = vec![AotParam::Scalar(kind)];
+        cand.spec_preconditions = vec![Some(kind)];
+    }
     compile_candidates(vec![cand]);
     match lookup(template_id) {
         Some(entry) if entry.role == AotRole::BlockTemplate => Some(entry),
@@ -1268,6 +1296,25 @@ pub fn block_entry_for<'gc>(vm: &mut VmState<'gc>, template_id: u32) -> Option<&
             None
         }
     }
+}
+
+/// Does this block body contain a send a scalar param could devirt — any
+/// selector `IntBinKind` recognizes (the same table the translator's
+/// scalar-op devirt keys on, so the heuristic can't drift from the payoff)?
+fn block_body_has_scalar_ops(block: &crate::instruction::StaticBlock) -> bool {
+    use crate::instruction::{Instruction as I, IntBinKind};
+    block.bytecode.0.iter().any(|inst| {
+        let sel = match inst {
+            I::Send(s, _)
+            | I::SendLocal(_, s, _)
+            | I::SendConst(_, s, _)
+            | I::SendField(_, s, _)
+            | I::SendLocalLocal(_, _, s, _)
+            | I::SendLocalConst(_, _, s, _) => *s,
+            _ => return false,
+        };
+        IntBinKind::from_selector(sel.as_str()).is_some()
+    })
 }
 
 /// Invoke a compiled BLOCK TEMPLATE (B3a) with `valueWithSelfOrArg:`
@@ -1312,6 +1359,29 @@ pub fn invoke_block<'gc>(
     if !entry_gates(vm, entry) {
         return AotOutcome::Bail;
     }
+    // Speculated-argument precondition (the block-side S1 gate): a scalar
+    // lane was compiled from the warmth window's observations — check the
+    // live argument BEFORE any stack effect, Bail to the interpreted body on
+    // mismatch, and tombstone after BAIL_TOMBSTONE consecutive misses (the
+    // speculation was wrong about this program).
+    let mut arg_lane: Option<i64> = None;
+    if let Some(&Some(kind)) = entry.param_preconditions.first() {
+        use std::sync::atomic::Ordering;
+        arg_lane = match (kind, arg) {
+            (AotKind::Int, Value::Int(v)) => Some(v),
+            (AotKind::Double, Value::Double(d)) => Some(d.to_bits() as i64),
+            (AotKind::Bool, Value::Bool(b)) => Some(b as i64),
+            _ => None,
+        };
+        if arg_lane.is_none() {
+            let bails = entry.spec_bails.fetch_add(1, Ordering::Relaxed) + 1;
+            if bails >= spec::BAIL_TOMBSTONE {
+                tombstone(entry.template_id);
+            }
+            return AotOutcome::Bail;
+        }
+        entry.spec_bails.store(0, Ordering::Relaxed);
+    }
     // The invoked closure's lexical parent AND its `^^` home: a closure the
     // template's cold path materializes belongs to the same home method this
     // closure does (S5) — including `None` (a homeless block's `^^` errors,
@@ -1343,7 +1413,9 @@ pub fn invoke_block<'gc>(
         let slots_ptr = vm.stack.head_addr();
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
         let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
-        let raw_args: [i64; 1] = [base as i64 + 1];
+        // A speculated scalar rides its lane; an Obj param takes its window
+        // slot's index (slot 1), exactly like a method Obj param.
+        let raw_args: [i64; 1] = [arg_lane.unwrap_or(base as i64 + 1)];
         unsafe {
             (entry.raw)(
                 vm_ptr,

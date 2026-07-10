@@ -442,7 +442,7 @@ unsafe extern "C" fn block_call_impl(
                 Some(e)
             }
             None => {
-                let e = super::block_entry_for(vm, btid);
+                let e = super::block_entry_for(vm, btid, arg);
                 if let (Some(e), true) = (e, site != u32::MAX) {
                     vm.aot_block_site_fill(site as usize, e, recv);
                 }

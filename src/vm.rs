@@ -574,11 +574,15 @@ pub struct VmState<'gc> {
     pub aot_pending_error: Option<QuoinError>,
     /// Block templates collected at unit load but NOT yet compiled (B3a lazy
     /// compilation): most literals are never invoked, and eager Cranelift
-    /// work for all of them cost ~+34ms startup. A template compiles on its
-    /// FIRST `valueWithSelfOrArg:` invocation (`codegen::block_entry_for`),
-    /// once; refusals tombstone so they never retry.
+    /// work for all of them cost ~+34ms startup. A template compiles once
+    /// warm at the `valueWithSelfOrArg:` seam (`codegen::block_entry_for`);
+    /// refusals tombstone so they never retry. The tuple is (invocations,
+    /// observed arg-kind lattice, candidate): the warmth window doubles as
+    /// the block's S1-style argument observation, so a monomorphic-scalar
+    /// block compiles its param into a register lane with an entry
+    /// precondition instead of a slot-resident Obj.
     #[collect(require_static)]
-    pub aot_pending_blocks: rustc_hash::FxHashMap<u32, (u32, crate::codegen::AotCandidate)>,
+    pub aot_pending_blocks: rustc_hash::FxHashMap<u32, (u32, u8, crate::codegen::AotCandidate)>,
     #[collect(require_static)]
     pub aot_refused_blocks: rustc_hash::FxHashSet<u32>,
     /// Speculative pending methods: template id → warmth + kind profile +
@@ -3696,7 +3700,8 @@ impl<'gc> VmState<'gc> {
                 continue;
             };
             if cand.role == AotRole::BlockTemplate {
-                self.aot_pending_blocks.insert(tid, (0, cand));
+                self.aot_pending_blocks
+                    .insert(tid, (0, spec::K_UNKNOWN, cand));
             } else if cand.speculative() {
                 cand.block.spec_state.set(spec::OBSERVING);
                 let n_params = cand.params.len();
@@ -3720,13 +3725,7 @@ impl<'gc> VmState<'gc> {
 
     /// The kind lattice value of a runtime value (spec-AOT observation).
     fn spec_kind(v: Value<'gc>) -> u8 {
-        use crate::codegen::spec;
-        match v {
-            Value::Int(_) => spec::K_INT,
-            Value::Double(_) => spec::K_DOUBLE,
-            Value::Bool(_) => spec::K_BOOL,
-            _ => spec::K_OBJ,
-        }
+        crate::codegen::spec::kind_of(v)
     }
 
     /// Merge a method entry's arg kinds into its speculative profile and

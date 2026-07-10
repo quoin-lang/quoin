@@ -27,6 +27,18 @@ pub fn merge(lat: u8, observed: u8) -> u8 {
     }
 }
 
+/// A runtime value's lattice kind. Nil is `Obj` deliberately — a nil-carrying
+/// value can never scalar-speculate (see the module doc).
+pub fn kind_of(v: crate::value::Value<'_>) -> u8 {
+    use crate::value::Value;
+    match v {
+        Value::Int(_) => K_INT,
+        Value::Double(_) => K_DOUBLE,
+        Value::Bool(_) => K_BOOL,
+        _ => K_OBJ,
+    }
+}
+
 /// Per-template state riding in `VmState.aot_spec_state`, indexed by
 /// template id (dense: ids come from one global counter). Everything not
 /// registered stays `NOT_SPECULATIVE`, so the interpreter's gate is one
