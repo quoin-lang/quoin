@@ -113,15 +113,27 @@ fn stdlib_docs_carry_both_native_and_quoin_doc_text() {
 
 #[test]
 fn user_units_are_documented_alongside_the_stdlib() {
-    // A scratch project dir: the unit is loaded `use self:...`, CWD-relative.
+    // A scratch project dir: the unit is loaded `use self:...`, CWD-relative. The class has a
+    // definition doc AND a documented reopen with a fenced example — the reopen must land
+    // under `extensions` (the definition supplied the class doc), and the fence must render
+    // through the shared highlighter.
     let proj = fresh_out("proj");
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::write(
         proj.join("shapes.qn"),
         "\"* A circle, by radius.\n\
+         \"*\n\
+         \"* ```\n\
+         \"* var c = Circle.new:{ r = 2 };\n\
+         \"* ```\n\
          Circle <- { |@r|\n\
          \x20   \"* The enclosing area.\n\
          \x20   area -> { @r * @r * 355 / 113 }\n\
+         }\n\
+         \"* Growth, added after the fact.\n\
+         Circle <-- {\n\
+         \x20   \"* A circle one bigger.\n\
+         \x20   grown -> { Circle.new:{ r = @r + 1 } }\n\
          }\n",
     )
     .unwrap();
@@ -141,12 +153,75 @@ fn user_units_are_documented_alongside_the_stdlib() {
         .iter()
         .find(|c| c["name"] == "Circle")
         .expect("user class documented");
-    assert_eq!(circle["doc"], "A circle, by radius.");
     assert_eq!(
-        circle["instance_methods"].as_array().unwrap()[0]["doc"],
-        "The enclosing area."
+        circle["doc"].as_str().unwrap().lines().next().unwrap(),
+        "A circle, by radius."
+    );
+    let method_doc = |sel: &str| {
+        circle["instance_methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["selector"] == sel)
+            .unwrap_or_else(|| panic!("{sel} missing"))["doc"]
+            .clone()
+    };
+    assert_eq!(method_doc("area"), "The enclosing area.");
+    // The reopen's method extracts like any other...
+    assert_eq!(method_doc("grown"), "A circle one bigger.");
+    // ...and the reopen site itself lists under extensions (the definition took the doc slot).
+    let exts = circle["extensions"].as_array().unwrap();
+    assert_eq!(exts.len(), 1, "the documented reopen must be listed");
+    assert_eq!(exts[0]["doc"], "Growth, added after the fact.");
+
+    // The fenced example rendered through the shared highlighter: real span classes, and the
+    // page inlines the shared code stylesheet.
+    let page = std::fs::read_to_string(proj.join("docs-out/Circle.html")).unwrap();
+    assert!(
+        page.contains("<pre class=\"qn-code\">") && page.contains("qn-keyword"),
+        "fenced example must render through the shared highlighter"
+    );
+    assert!(
+        page.contains(".qn-keyword {"),
+        "the code stylesheet must be inlined"
+    );
+    assert!(
+        page.contains("extended at"),
+        "the reopen site must appear on the page"
     );
     let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// `qn highlight --html` — the other consumer of the same stylesheet and span classes.
+#[test]
+fn highlight_html_shares_the_doc_generator_styles() {
+    let dir = fresh_out("hl");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("sample.qn");
+    std::fs::write(&src, "var x = 1;\n\"* a comment\n'text'.print;\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .args(["highlight", "--html", src.to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run qn highlight --html");
+    assert!(out.status.success());
+    let html = String::from_utf8_lossy(&out.stdout);
+    for needle in [
+        "<pre class=\"qn-code\">",
+        "qn-keyword",    // `var`
+        "qn-comment",    // the "* line
+        "qn-string",     // 'text'
+        ".qn-keyword {", // the shared stylesheet, same classes the doc pages inline
+        "prefers-color-scheme: dark",
+    ] {
+        assert!(html.contains(needle), "missing {needle} in:\n{html}");
+    }
+    // Spans balance — nothing double-emitted or dropped by the gap-walk.
+    assert_eq!(
+        html.matches("<span").count(),
+        html.matches("</span>").count()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

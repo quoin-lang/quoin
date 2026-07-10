@@ -486,6 +486,10 @@ pub struct Instrumentation {
 pub struct ClassMeta {
     pub source: Option<SourceInfo>,
     pub doc: Option<String>,
+    /// Every statically-named reopen site (`Name <-- { … }`), in load order. The doc block
+    /// above a reopen documents the extension; for a native class this is where its qnlib
+    /// class doc lives.
+    pub extensions: Vec<SourceInfo>,
 }
 
 #[derive(Collect)]
@@ -6099,6 +6103,14 @@ impl<'gc> VmState<'gc> {
                         msg: format!("Regex pattern must be a String, got: {:?}", pattern_val),
                     });
                 }
+                ip += 1;
+            }
+            Instruction::RecordClassSite { name, source } => {
+                self.class_meta
+                    .entry(name.clone())
+                    .or_default()
+                    .extensions
+                    .push(source.clone());
                 ip += 1;
             }
             Instruction::DefineClass {

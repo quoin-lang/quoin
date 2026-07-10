@@ -560,6 +560,14 @@ pub enum Instruction {
         source: Option<SourceInfo>,
     },
     ExecuteBlockWithSelf,
+    /// A statically-named class reopen (`Name <-- { … }`) records where it happened, so the
+    /// `"*` block above the reopen is reachable for docs (docs/DOCS_ARCH.md §4 — extension
+    /// sites list beneath the definition's doc). No stack effect; emitted just before the
+    /// reopen's `ExecuteBlockWithSelf`. A computed-target reopen emits nothing.
+    RecordClassSite {
+        name: NamespacedName,
+        source: SourceInfo,
+    },
     DefineMethod(String),
     OverrideMethod(String),
     LoadField(String),

@@ -208,6 +208,8 @@ pub struct VmRunnerOptions {
     pub doc_json: bool,
     /// `qn doc --coverage`: report undocumented classes/selectors instead of generating.
     pub doc_coverage: bool,
+    /// `qn highlight --html`: emit a standalone HTML page instead of ANSI.
+    pub highlight_html: bool,
 }
 
 /// Recursively collect `.qn` files under `dir`, in sorted order, skipping `target`/`.git`.
@@ -401,6 +403,9 @@ enum Cmd {
     },
     /// Print syntax-highlighted source
     Highlight {
+        /// Emit a standalone HTML page instead of ANSI (shares the doc generator's code styles)
+        #[arg(long)]
+        html: bool,
         #[arg(value_name = "FILE")]
         file: String,
         #[arg(value_name = "ARGS", trailing_var_arg = true)]
@@ -509,6 +514,7 @@ impl VmRunnerOptions {
         let mut fmt_diff = false;
         let mut doc_json = false;
         let mut doc_coverage = false;
+        let mut highlight_html = false;
         let mut target_path = None;
         let mut vm_args = Vec::new();
         let mut coverage = None;
@@ -562,7 +568,8 @@ impl VmRunnerOptions {
                 vm_args = args;
                 VmRunnerMode::Debug
             }
-            Some(Cmd::Highlight { file, args }) => {
+            Some(Cmd::Highlight { html, file, args }) => {
+                highlight_html = html;
                 target_path = Some(file);
                 vm_args = args;
                 VmRunnerMode::Highlight
@@ -643,6 +650,7 @@ impl VmRunnerOptions {
             fmt_diff,
             doc_json,
             doc_coverage,
+            highlight_html,
         }
     }
 }
@@ -737,7 +745,24 @@ impl VmRunner {
                         exit(1);
                     }
                 };
-                print!("{}", highlight_to_ansi(&source));
+                if self.options.highlight_html {
+                    // A standalone page over the shared code stylesheet — the same classes and
+                    // colors the doc generator's fenced examples use (docs/DOCS_ARCH.md §8).
+                    println!(
+                        "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<title>{}</title>\n\
+                         <style>\nbody {{ margin: 2rem auto; max-width: 60rem; padding: 0 1rem; \
+                         background: #ffffff; color: #1a1a1a; }}\n\
+                         @media (prefers-color-scheme: dark) {{ body {{ background: #1e1e1e; \
+                         color: #d4d4d4; }} }}\n\
+                         pre.qn-code {{ font: 14px/1.5 ui-monospace, monospace; }}\n{}</style>\n\
+                         </head>\n<body>\n{}\n</body></html>",
+                        path,
+                        crate::highlighter::code_stylesheet(),
+                        crate::highlighter::highlight_to_html(&source)
+                    );
+                } else {
+                    print!("{}", highlight_to_ansi(&source));
+                }
                 Ok(())
             }
             VmRunnerMode::WorkerServe => {

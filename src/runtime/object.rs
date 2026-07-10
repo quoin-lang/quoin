@@ -162,6 +162,60 @@ pub fn build_object_class() -> NativeClassBuilder {
             };
             Ok(vm.new_bool(mc, responds))
         })
+        // The reference-doc query surface (docs/DOCS_ARCH.md §6): read-only, lazy — Quoin docs
+        // live in source (the `"*` block above the definition) and are extracted on demand;
+        // native docs come from the builder's `.doc(..)`/`.class_doc(..)` metadata. On Object,
+        // like `can?:`, so a Class, a `.meta`, and an instance all answer.
+        .instance_method("doc", |vm, mc, receiver, _args| {
+            let class = match receiver {
+                Value::Class(c) | Value::ClassMeta(c) => Some(c),
+                _ => vm.get_class_for_lookup(receiver),
+            };
+            let doc = class
+                .map(|c| c.borrow().name.to_string())
+                .and_then(|name| crate::introspect::doc_of_class(vm, &name));
+            Ok(match doc {
+                Some(text) => vm.new_string(mc, text),
+                None => vm.new_nil(mc),
+            })
+        })
+        .returns("String?")
+        .doc(
+            "The receiver's class-level reference doc, or nil. Mirrors `can?:`: a Class \
+             answers for itself, an instance for its class.",
+        )
+        // docFor: follows can?:'s receiver convention exactly: a Class receiver answers for
+        // INSTANCE methods, `.meta` for class-side ones (see qnlib/tests/17-can.qn).
+        .instance_method("docFor:", |vm, mc, receiver, args| {
+            let name = match args[0] {
+                Value::Object(obj) => match &obj.borrow().payload {
+                    ObjectPayload::Symbol(s) | ObjectPayload::String(s) => Some((**s).clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let name = name.ok_or_else(|| QuoinError::TypeError {
+                expected: "Symbol or String".to_string(),
+                got: args[0].type_name().to_string(),
+                msg: "docFor: expects a selector (symbol or string)".to_string(),
+            })?;
+            let doc = match receiver {
+                Value::Class(c) => crate::introspect::doc_of_method(vm, c, &name, false),
+                Value::ClassMeta(c) => crate::introspect::doc_of_method(vm, c, &name, true),
+                _ => vm
+                    .get_class_for_lookup(receiver)
+                    .and_then(|c| crate::introspect::doc_of_method(vm, c, &name, false)),
+            };
+            Ok(match doc {
+                Some(text) => vm.new_string(mc, text),
+                None => vm.new_nil(mc),
+            })
+        })
+        .returns("String?")
+        .doc(
+            "The reference doc for a selector, or nil. A Class receiver answers for instance \
+             methods; `.meta.docFor:` for class-side ones -- the same sides `can?:` reports.",
+        )
         .sdk_instance_method("~:", |host, receiver, args| {
             host.call_method(receiver, "==:", vec![args[0]])
         })

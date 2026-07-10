@@ -38,8 +38,16 @@ struct ClassDoc {
     is_abstract: bool,
     doc: Option<String>,
     source: Option<String>,
+    /// Documented reopen sites (`Name <-- { … }`) beyond the one that supplied `doc`.
+    extensions: Vec<ExtensionDoc>,
     instance_methods: Vec<MethodDoc>,
     class_methods: Vec<MethodDoc>,
+}
+
+#[derive(Serialize)]
+struct ExtensionDoc {
+    source: String,
+    doc: String,
 }
 
 #[derive(Serialize)]
@@ -157,10 +165,27 @@ fn build_model(infos: Vec<ClassInfo>) -> DocModel {
     let classes = infos
         .into_iter()
         .map(|info| {
-            let class_doc = info.doc.clone().or_else(|| {
-                let src = info.source.as_ref()?;
-                doc_at(&src.file, src.line)
-            });
+            // Same precedence the runtime `X.doc` uses (introspect::doc_of_class): native
+            // `.class_doc(..)`, else the block above the definition, else the block above the
+            // first documented reopen. Remaining documented reopens list under `extensions`.
+            let mut ext_docs: Vec<ExtensionDoc> = info
+                .extension_sources
+                .iter()
+                .filter_map(|src| {
+                    Some(ExtensionDoc {
+                        source: format!("{}:{}", src.file, src.line),
+                        doc: doc_at(&src.file, src.line)?,
+                    })
+                })
+                .collect();
+            let class_doc = info
+                .doc
+                .clone()
+                .or_else(|| {
+                    let src = info.source.as_ref()?;
+                    doc_at(&src.file, src.line)
+                })
+                .or_else(|| (!ext_docs.is_empty()).then(|| ext_docs.remove(0).doc));
             let mut methods = |list: &[MethodInfo]| -> Vec<MethodDoc> {
                 let mut out: Vec<MethodDoc> = list
                     .iter()
@@ -205,6 +230,7 @@ fn build_model(infos: Vec<ClassInfo>) -> DocModel {
                     .source
                     .as_ref()
                     .map(|s| format!("{}:{}", s.file, s.line)),
+                extensions: ext_docs,
                 instance_methods: methods(&info.instance_methods),
                 class_methods: methods(&info.class_methods),
             }
@@ -278,7 +304,8 @@ fn type_link(name: &str, model: &DocModel) -> String {
     }
 }
 
-/// Doc text -> HTML: paragraphs split on blank lines; fenced blocks become `<pre><code>`.
+/// Doc text -> HTML: paragraphs split on blank lines; fenced blocks render through the shared
+/// highlighter (docs/DOCS_ARCH.md §8) — the same classes and colors as `qn highlight --html`.
 fn doc_html(doc: &str) -> String {
     let mut out = String::new();
     let mut para: Vec<&str> = Vec::new();
@@ -292,7 +319,11 @@ fn doc_html(doc: &str) -> String {
     for line in doc.lines() {
         if let Some(body) = &mut fence {
             if line.trim_start().starts_with("```") {
-                let _ = write!(out, "<pre><code>{}</code></pre>\n", esc(&body.join("\n")));
+                let _ = write!(
+                    out,
+                    "{}\n",
+                    crate::highlighter::highlight_to_html(&body.join("\n"))
+                );
                 fence = None;
             } else {
                 body.push(line);
@@ -308,7 +339,11 @@ fn doc_html(doc: &str) -> String {
     }
     if let Some(body) = fence {
         // Unclosed fence: render what we have rather than losing it.
-        let _ = write!(out, "<pre><code>{}</code></pre>\n", esc(&body.join("\n")));
+        let _ = write!(
+            out,
+            "{}\n",
+            crate::highlighter::highlight_to_html(&body.join("\n"))
+        );
     }
     flush_para(&mut out, &mut para);
     out
@@ -348,9 +383,10 @@ fn page(title: &str, body: &str) -> String {
     format!(
         "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}\n</body></html>\n",
+         <title>{}</title>\n<style>{}\n{}</style>\n</head>\n<body>\n{}\n</body></html>\n",
         esc(title),
         STYLE,
+        crate::highlighter::code_stylesheet(),
         body
     )
 }
@@ -426,6 +462,15 @@ fn render_class(class: &ClassDoc, model: &DocModel) -> String {
     }
     if let Some(doc) = &class.doc {
         body.push_str(&doc_html(doc));
+    }
+    for ext in &class.extensions {
+        let _ = write!(
+            body,
+            "<div class=\"method\"><span class=\"meta-line\">extended at <code>{}</code></span>\
+             <div class=\"body\">{}</div></div>\n",
+            esc(&ext.source),
+            doc_html(&ext.doc)
+        );
     }
 
     for (title, anchor, list) in [

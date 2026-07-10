@@ -2668,6 +2668,14 @@ impl Compiler {
                     self.value_type_def_depth -= 1;
                 }
                 r?;
+                if let NodeValue::Identifier(id) = &class_ext.expression.value
+                    && let Some(si) = node.source_info.clone()
+                {
+                    bytecode.push(Instruction::RecordClassSite {
+                        name: NamespacedName::from_ast(id),
+                        source: si,
+                    });
+                }
                 bytecode.push(Instruction::ExecuteBlockWithSelf);
             }
             NodeValue::MethodDefinition(method_def) => {

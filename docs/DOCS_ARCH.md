@@ -1,16 +1,21 @@
 # Reference documentation — comment docs, one pipeline, `qn doc`
 
-*Status: PHASE 1 SHIPPED (2026-07-09; designed at `944d5d8`, built the same day). `qn doc
-[PATH…] [--out DIR] [--json] [--coverage]` generates HTML + JSON for the stdlib plus user
-units; the §4 extractor is `src/docs.rs`, the generator `src/runner_doc.rs`, and
-`.doc(..)`/`.class_doc(..)` live on `NativeClassBuilder` with `[IO]Stdin` and
-`Class.exists?:` seeded as the proof (one page carries both doc worlds — pinned by
-`tests/doc_gen.rs`). Two implementation notes against the text below: extraction is a
-line-based scan rather than `scan_comments` (a doc line is a whole-line `"*` comment, and
-strings cannot span lines, so no context tracking is needed — recorded in `src/docs.rs`);
-and class-extension sites (`Name <-- {…}`) are not yet recorded, so a reopen's doc block —
-including every native class extended from qnlib — waits for phase 2. Remaining: phase 2
-(`docFor:`/`$doc`, `qn highlight --html`, extension sites) and phase 3 (doctests).*
+*Status: PHASES 1 + 2 SHIPPED (2026-07-09; designed at `944d5d8`, built the same day).
+`qn doc [PATH…] [--out DIR] [--json] [--coverage]` generates HTML + JSON for the stdlib plus
+user units (extractor `src/docs.rs`, generator `src/runner_doc.rs`,
+`.doc(..)`/`.class_doc(..)` on `NativeClassBuilder`). Phase 2: **extension sites** — a
+statically-named reopen records its location (`RecordClassSite` → `class_meta.extensions`),
+so the block above `Name <-- {…}` is reachable and stands in for a missing class doc
+([IO]File answers with its one-shot-writes commentary); **`doc` / `docFor:` on Object** —
+lazy, following `can?:`'s receiver convention (a Class answers for instance methods,
+`.meta` for class-side), plus `$doc Name[.selector]` in the REPL; **`qn highlight --html`**
+— a second formatter over the same `HighlightSpan`s, whose dark-scheme CSS is *generated
+from* the ANSI `colors_for` table (light-scheme colors are hand-picked: the terminal palette
+assumes a dark background), and whose classes + stylesheet the doc generator's fenced
+examples inline — one table, two consumers. Tests: `tests/doc_gen.rs`,
+`qnlib/tests/62-docs.qn`, `src/docs_tests.rs`. One §4 note: extraction is a line-based scan
+rather than `scan_comments` (a doc line is a whole-line `"*` comment and strings cannot span
+lines — recorded in `src/docs.rs`). Remaining: phase 3 (doctests), extension-manifest docs.*
 
 *The three forks are settled: comment docs over a `.doc:` authoring API, plain adjacency over
 a new doc sigil, HTML + JSON output. Companion to `docs/INTROSPECTION.md` (the read-only
