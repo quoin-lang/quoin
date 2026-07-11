@@ -43,6 +43,7 @@ pub mod streams;
 pub mod string;
 pub mod symbol;
 pub mod task;
+pub mod term;
 pub mod time_zone;
 pub mod timer;
 pub mod timestamp;

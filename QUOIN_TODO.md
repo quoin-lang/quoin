@@ -542,10 +542,22 @@ deferred `Mirror` in `## REPL`.
 - [x] **Pretty-printer** — structural, width-aware rendering of nested collections/objects
   (Wadler/Leijen-style groups + line breaks). Wire into the REPL result display for large values;
   console width is already plumbed (`VmOptions.console_width`).
-- [ ] ⭐ **ANSI / color** — public terminal styling API (`[Term]`/`Color`): colors, bold/underline,
-  `NO_COLOR`-aware. (The internal `ansi_colorizer` is for highlighting; this is the user-facing one.)
-- [ ] **Logging** — leveled logger (`debug`/`info`/`warn`/`error`), formatting, pluggable sinks,
-  defaulting to `[IO]Stderr`.
+- [x] ⭐ **ANSI / color** — shipped as the Rich-style markup (`[red bold]…[/]` in `#ANSI'…'`
+  strings; nesting restores, literal-bracket fallback, `on <color>` backgrounds) + the `Term`
+  class (`color?`/`tty?`/`width`/`height`, `render:`/`strip:`), `String#styled:`, and
+  `ANSI#plain`/`renderedLength`. `NO_COLOR`/`CLICOLOR_FORCE`-aware via the one shared
+  detection (`VmOptions.supports_color`). `src/runtime/term.rs`, `src/ansi_colorizer.rs`;
+  book §44 "Terminal & logging" + §45 markup. (Named `Term`, not `[Term]` — a bare
+  namespace can't be a receiver.)
+- [x] **Logging** — `Log` (`qnlib/core/13-log.qn`): `debug:`/`info:`/`warn:`/`error:` taking
+  String | ANSI | Block (lazy: below `Log.level` the block is NEVER evaluated), `level:in:`
+  (throw-safe temporary threshold), one replaceable sink (`sink:`/`resetSink`/`stderrSink`)
+  receiving |level message location| — location captured uniformly per entry via the new
+  `Runtime.callerLocationSkipping:` (filename-skip frame walk; a fixed depth would break
+  under combinators and AOT-elided frames — see the primitive's doc). Default sink:
+  `HH:MM:SS LEVEL file:line:col: message` to [IO]Stderr, colored-on-tty via markup. `???`
+  now desugars to a plain `Log.warn:`. Tests `qnlib/tests/69-term-log.qn`. Later:
+  `Log.includeLocation:` toggle, multiple sinks if fan-out-in-a-block ever hurts.
 
 **Time** — Phases 1+2+3 shipped (`docs/STDLIB_TIME.md`).
 - [x] **DateTime** — zone-aware instants, RFC 3339, components, arithmetic (`jiff`).

@@ -1,0 +1,101 @@
+"* Term (src/runtime/term.rs) and Log (core/13-log.qn) — terminal facts, markup as
+"* an operation, styled strings, and leveled logging with a capturing sink. Runs
+"* piped in CI, so the terminal facts are asserted structurally (type/consistency),
+"* never by value.
+(TestSuite.new:{ var name = 'TermLog' }).add:{
+    .test:
+    termFacts -> {
+        .isTrue:{ #(true false).contains?:Term.color? };
+        .isTrue:{ #(true false).contains?:Term.tty? };
+        "* No terminal (piped CI) -> nil; a terminal -> a positive Integer.
+        .isTrue:{ Term.width.defined?.if:{ Term.width > 0 } else:{ true } };
+        .isTrue:{ Term.height.defined?.if:{ Term.height > 0 } else:{ true } };
+    };
+
+    .test:
+    markupOperations -> {
+        .is:{ Term.strip:'[red]hot[/]' } equalTo:'hot';
+        "* Literal fallback and the [[ escape survive the strip.
+        .is:{ Term.strip:'[IO]Stdout is [[red]' } equalTo:'[IO]Stdout is [red]';
+        "* render: emits escape codes unconditionally; strip: undoes them.
+        .isTrue:{ (Term.render:'[bold]x[/]').length > 1 };
+        .is:{ Term.strip:(Term.render:'[bold]x[/]') } equalTo:'x';
+        "* Both accept an ANSI value directly.
+        .is:{ Term.strip:#ANSI'[red]x[/]' } equalTo:'x';
+    };
+
+    .test:
+    styledStrings -> {
+        .is:{ ('FAIL'.styled:'bold red').s } equalTo:'#ANSI\'[bold red]FAIL[/]\'';
+        "* The receiver is markup-escaped: its brackets can't open tags.
+        .is:{ ('a[b'.styled:'red').plain } equalTo:'a[b';
+        .is:{ #ANSI'a [red]hot[/] pan'.plain } equalTo:'a hot pan';
+        .is:{ #ANSI'[red]hot[/]'.renderedLength } equalTo:3;
+        "* length counts markup; renderedLength counts what shows.
+        .isTrue:{ #ANSI'[red]hot[/]'.length > #ANSI'[red]hot[/]'.renderedLength };
+    };
+
+    .test:
+    logLevels -> {
+        .is:{ Log.level } equalTo:#info;
+        "* level:in: restores — on normal exit and on a throw.
+        .is:{ Log.level:#debug in:{ Log.level } } equalTo:#debug;
+        .is:{ Log.level } equalTo:#info;
+        { Log.level:#error in:{ TypeError.throw:'x' } }.catch:{ |e| nil };
+        .is:{ Log.level } equalTo:#info;
+        "* Unknown levels refuse loudly.
+        .does:{ Log.level:#loud } throw:ValueError;
+        .does:{ Log.rankOf:#chatty } throw:ValueError;
+    };
+
+    .test:
+    logSinkAndFiltering -> {
+        var seen = #();
+        Log.sink:{ |level message location| seen.add:#( level message location ) };
+        { Log.level:#warn in:{
+            Log.info:'dropped';
+            Log.warn:'kept';
+            Log.error:('e=%' % 42)
+        } }.finally:{ Log.resetSink };
+        .is:{ seen.count } equalTo:2;
+        .is:{ (seen.at:0).at:0 } equalTo:#warn;
+        .is:{ (seen.at:0).at:1 } equalTo:'kept';
+        "* Every entry carries its caller's file:line:col.
+        .isTrue:{ ((seen.at:0).at:2).contains?:'69-term-log.qn' };
+        .is:{ (seen.at:1).at:1 } equalTo:'e=42';
+    };
+
+    .test:
+    logLazyMessages -> {
+        "* Below the threshold the message block is NEVER evaluated — this 1/0
+        "* would throw if it ran.
+        var ran = false;
+        Log.level:#error in:{
+            Log.debug:{ ran = true; 1 / 0 };
+            Log.info:{ ran = true; 'x' }
+        };
+        .isFalse:{ ran };
+        "* At or above the threshold, a block message evaluates to the message.
+        var seen = #();
+        Log.sink:{ |level message location| seen.add:message };
+        { Log.warn:{ 'built %' % 'lazily' } }.finally:{ Log.resetSink };
+        .is:{ seen.at:0 } equalTo:'built lazily';
+    };
+
+    .test:
+    placeholderRoutesThroughLog -> {
+        "* `???` is a plain Log.warn: — a custom sink sees it like any warning,
+        "* with the ??? statement's own location.
+        var seen = #();
+        Log.sink:{ |level message location| seen.add:#( level message location ) };
+        { ??? }.finally:{ Log.resetSink };
+        .is:{ (seen.at:0).at:0 } equalTo:#warn;
+        .is:{ (seen.at:0).at:1 } equalTo:'reached `???` placeholder';
+        .isTrue:{ ((seen.at:0).at:2).contains?:'69-term-log.qn' };
+        "* ...and Log.level governs it.
+        var count = 0;
+        Log.sink:{ |level message location| count = count + 1 };
+        { Log.level:#error in:{ ??? } }.finally:{ Log.resetSink };
+        .is:{ count } equalTo:0;
+    };
+}

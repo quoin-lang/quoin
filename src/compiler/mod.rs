@@ -3100,29 +3100,20 @@ impl Compiler {
                 bytecode.push(Instruction::Send(Symbol::intern("throw:"), 1));
             }
             NodeValue::Huh3 => {
-                // `???` — "shouldn't get here, but keep going": a soft warning
-                // on stderr, then nil (the statement's value). Rendered by the
-                // SAME `diag_header` the checker's warnings use — one renderer,
-                // no drift — with color markup baked in; `[IO]Stderr`'s write
-                // path decolorizes when color is off, exactly like every other
-                // colored stderr line. A logger can take over later
-                // (QUOIN_TODO). `[IO]Stderr` is native-registered in every
-                // runner mode, so the desugar has no prelude dependency.
-                let msg = crate::vm::VmState::diag_header(
-                    "warning",
-                    "#ffcc00",
-                    "reached `???` placeholder",
-                    node.source_info.as_ref(),
-                    true,
-                    false,
-                );
-                let msg = msg.trim_end_matches('\n').to_string();
+                // `???` — "shouldn't get here, but keep going": a plain
+                // `Log.warn:` send, then nil (the statement's value). Nothing
+                // bespoke: the entry's `file:line:col` arrives through Log's
+                // uniform caller-location capture (this send site IS the
+                // caller), warn coloring through Log's default sink, and
+                // `Log.level:` / `Log.sink:` govern it like any other warning.
                 bytecode.push(Instruction::LoadGlobal(NamespacedName::new(
-                    vec!["IO".to_string()],
-                    "Stderr".to_string(),
+                    Vec::new(),
+                    "Log".to_string(),
                 )));
-                bytecode.push(Instruction::Push(Constant::String(msg)));
-                bytecode.push(Instruction::Send(Symbol::intern("writeln:"), 1));
+                bytecode.push(Instruction::Push(Constant::String(
+                    "reached `???` placeholder".to_string(),
+                )));
+                bytecode.push(Instruction::Send(Symbol::intern("warn:"), 1));
             }
             NodeValue::Unknown => {
                 return Err("Encountered Unknown NodeValue (ast_visitor bug)".to_string());

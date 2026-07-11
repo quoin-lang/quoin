@@ -436,7 +436,7 @@ fn new_native_io_handle_with_wrapper<'a>(
     )
 }
 
-fn get_io_string<'gc>(
+pub(crate) fn get_io_string<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     val: Value<'gc>,

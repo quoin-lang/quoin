@@ -35,4 +35,17 @@ String <-- {
         var gap = width - .length
         (gap > 0).if:{ self + ((0..gap).collect:{ ' ' }).join:'' } else:{ self }
     }
+
+    "* The receiver styled with color-markup attributes, as an ANSI value — the
+    "* programmatic counterpart of writing the tag in an `#ANSI'…'` literal. The
+    "* receiver is markup-escaped, so its own brackets stay literal; the result
+    "* embeds safely in other ANSI strings (spans nest and restore).
+    "*
+    "* ```
+    "* 'FAIL'.styled:'bold red'    "* -> #ANSI'[bold red]FAIL[/]'
+    "* ```
+    styled: -> { |attrs:String ^ANSI|
+        var text = .ansiEscaped
+        ^ANSI.newUserString:('[%1]%2[/]' % #( attrs text ))
+    }
 }

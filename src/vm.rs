@@ -351,6 +351,7 @@ pub struct VmOptions {
     pub arguments: Vec<String>,
     pub supports_color: bool,
     pub console_width: Option<u16>,
+    pub console_height: Option<u16>,
     /// Shared compile-time class-name accumulator (Phase 2). Threaded into every `Compiler`
     /// this VM spawns for `use`-loads, and used by the runner for the top-level program, so a
     /// unit sees the classes earlier-compiled units defined. Not a runtime knob — it rides

@@ -431,9 +431,24 @@ ANSI <- { |@string|
     }
 
     "* The length of the underlying markup String — markup and interpolation
-    "* characters count too, so this is not the rendered width. (XXX: rendered
-    "* length?)
+    "* characters count too. For the rendered width use `renderedLength`.
     length -> { @string.length }
+
+    "* The visible text — tags applied and stripped, exactly what a non-color
+    "* write emits.
+    "*
+    "* ```
+    "* #ANSI'a [red]hot[/] pan'.plain    "* -> a hot pan
+    "* ```
+    plain -> { ^Term.strip:@string }
+
+    "* How many characters actually render — the width for terminal layout,
+    "* which `length` (markup characters included) overstates.
+    "*
+    "* ```
+    "* #ANSI'[red]hot[/]'.renderedLength    "* -> 3
+    "* ```
+    renderedLength -> { ^.plain.length }
 
     "* Renders as the tagged-literal form.
     "*
