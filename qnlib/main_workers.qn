@@ -40,14 +40,14 @@ var failedLines = #()
             var name = (r.at:'suite').padRight:nameWidth
             (r.at:'skipped').if:{
                 skips = skips + 1
-                out.writeln:#ANSI'[$#5fd7af;bw[%1$]] $#ffd75f[SKIPPED$] — %2' % #( name (r.at:'reason') )
+                out.writeln:#ANSI'[[[#5fd7af bold]%1[/]] [#ffd75f]SKIPPED[/] — %2' % #( name (r.at:'reason') )
             }
             else:{
                 passes = passes + (r.at:'passes')
                 failures = failures + (r.at:'failures')
                 var us = r.at:'us'
                 var took = (us < 1000).if:{ us.s + 'µs' } else:{ (us / 1000).s + 'ms' }
-                out.writeln:#ANSI'[$#5fd7af;bw[%1$]] $#69ff61[%2 passes$] / $#ff6961[%3 failures$] (worker %4, $#00bfff[%5$])' % #(
+                out.writeln:#ANSI'[[[#5fd7af bold]%1[/]] [#69ff61]%2 passes[/] / [#ff6961]%3 failures[/] (worker %4, [#00bfff]%5[/])' % #(
                     name
                     (r.at:'passes')
                     (r.at:'failures')
@@ -60,9 +60,9 @@ var failedLines = #()
     }
 }
 
-failedLines.each:{ |line| out.writeln:#ANSI'  $#ff6961[FAILED$]: %1' % #( line ) }
+failedLines.each:{ |line| out.writeln:#ANSI'  [#ff6961]FAILED[/]: %1' % #( line ) }
 
-out.writeln:#ANSI'All %1 workers finished in $#00bfff[%2$] : $#69ff61[%3 passes$] / $#ff6961[%4 failures$] / $#ffd75f[%5 skipped$]' % #(
+out.writeln:#ANSI'All %1 workers finished in [#00bfff]%2[/] : [#69ff61]%3 passes[/] / [#ff6961]%4 failures[/] / [#ffd75f]%5 skipped[/]' % #(
     workerCount
     ((wall / 1000).s + 'ms')
     passes

@@ -501,7 +501,7 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
         var passes = ran.any?.if:{ ran.sum:{ .passes.count } } else:{ 0 }
         var failures = ran.any?.if:{ ran.sum:{ .failures.count } } else:{ 0 }
         var testsElapsed = ran.any?.if:{ ran.sum:{ .elapsed } } else:{ 0 }
-        @out.writeln:#ANSI'All suites finished in $#00bfff[%1$] ($#00bfff[%2$]) : $#69ff61[%3 passes$] / $#ff6961[%4 failures$] / $#ffd75f[%5 skipped$]' % #(
+        @out.writeln:#ANSI'All suites finished in [#00bfff]%1[/] ([#00bfff]%2[/]) : [#69ff61]%3 passes[/] / [#ff6961]%4 failures[/] / [#ffd75f]%5 skipped[/]' % #(
             (.humanize:testsElapsed)
             (.humanize:elapsed)
             passes
@@ -515,10 +515,10 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
     startSuite: --> { |suite:TestSuite|
         @currentSuite = suite
         suite.skipped?.if:{
-            @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] $#ffd75f[SKIPPED$] — %2' % #( .paddedName suite.reason )
+            @out.writeln:#ANSI'[[[#5fd7af bold]%1[/]] [#ffd75f]SKIPPED[/] — %2' % #( .paddedName suite.reason )
         }
         else:{
-            @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Running %2 tests' % #( .paddedName suite.tests.count )
+            @out.writeln:#ANSI'[[[#5fd7af bold]%1[/]] Running %2 tests' % #( .paddedName suite.tests.count )
         }
     }
 
@@ -530,7 +530,7 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
         var passes = suite.tests.sum:{ .passes.count }
         var failures = suite.tests.sum:{ .failures.count }
         var testsElapsed = suite.tests.sum:{ .elapsed }
-        @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Finished in $#00bfff[%4$] ($#00bfff[%5$]) : $#69ff61[%2 passes$] / $#ff6961[%3 failures$]' % #(
+        @out.writeln:#ANSI'[[[#5fd7af bold]%1[/]] Finished in [#00bfff]%4[/] ([#00bfff]%5[/]) : [#69ff61]%2 passes[/] / [#ff6961]%3 failures[/]' % #(
             .paddedName
             passes
             failures
@@ -542,19 +542,19 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
     "* Start the test's output line: suite tag and test name; the assertion
     "* marks follow on the same line.
     startTest: --> { |test:Test|
-        @out.write:#ANSI'[$#5fd7af;bw[%1$]]   Test $#ab82ff[%2$] ' % #(.paddedName test.name)
+        @out.write:#ANSI'[[[#5fd7af bold]%1[/]]   Test [#ab82ff]%2[/] ' % #(.paddedName test.name)
     }
 
     "* Finish the test's line with its timings; a failing test then lists
     "* each failed assertion's evidence and file:line:column.
     endTest: --> { |result:TestResult|
-        @out.write:#ANSI' $#00bfff[%1$] ($#00bfff[%2$])' % #(
+        @out.write:#ANSI' [#00bfff]%1[/] ([#00bfff]%2[/])' % #(
             (.humanize:result.elapsed)
             (.humanize:result.wallElapsed)
         )
         (result.failures.any?).if:{
             var failedTests = result.failures.collect:{ |r|
-                #ANSI'$#69ff61[%1$] $bw[%2$] $#ff6961[%3$] at $#ffffff;bw[%4$]:$#00bfff[%5$]:$#00bfff[%6$]' % #(
+                #ANSI'[#69ff61]%1[/] [bold]%2[/] [#ff6961]%3[/] at [#ffffff bold]%4[/]:[#00bfff]%5[/]:[#00bfff]%6[/]' % #(
                     r.expected.s.replace:#/\s+/ with:' '
                     r.comparison
                     r.actual.s.replace:#/\s+/ with:' '
@@ -565,16 +565,16 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
             }
             var outTemp = @out
             var suiteName = .paddedName
-            @out.writeln:#ANSI' $#ff6961[%1 of %2 assertions failed$]:' % #(
+            @out.writeln:#ANSI' [#ff6961]%1 of %2 assertions failed[/]:' % #(
                 result.failures.count
                 result.assertions.count
             )
             failedTests.each:{ |ft|
-                outTemp.write:#ANSI'[$#5fd7af;bw[%$]]     ' % suiteName
+                outTemp.write:#ANSI'[[[#5fd7af bold]%[/]]     ' % suiteName
                 outTemp.writeln:ft
             }
         }
-        else:{ @out.writeln:#ANSI' $#69ff61[% passed$]' % result.passes.count }
+        else:{ @out.writeln:#ANSI' [#69ff61]% passed[/]' % result.passes.count }
     }
 
     "* No mark at assertion start — the '.'/'!' prints once the outcome is
@@ -583,7 +583,7 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
     "* Print the assertion's mark: a green '.' for a pass, a red '!' for a
     "* failure.
     endAssertion: --> { |assertionResult|
-        @out.write:assertionResult.passed?.if:{#ANSI'$#69ff61[.$]'} else:{#ANSI'$#ff6961[!$]'}
+        @out.write:assertionResult.passed?.if:{#ANSI'[#69ff61].[/]'} else:{#ANSI'[#ff6961]![/]'}
     }
 }
 

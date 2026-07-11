@@ -879,7 +879,7 @@ impl<'gc> VmState<'gc> {
     ) -> String {
         let pad = if indent { "  " } else { "" };
         let label = if colorize {
-            ansi_colorizer::colorize(&format!("${color}[{level}$]"))
+            ansi_colorizer::colorize(&format!("[{color}]{level}[/]"))
         } else {
             level.to_string()
         };
@@ -889,7 +889,7 @@ impl<'gc> VmState<'gc> {
                 // trace's location (gray separators, cyan numbers).
                 let loc = if colorize {
                     ansi_colorizer::colorize(&format!(
-                        "{}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                        "{}[#808080]:[/][#00bfff]{}[/][#808080]:[/][#00bfff]{}[/]",
                         s.filename,
                         s.line,
                         s.column + 1
@@ -916,7 +916,7 @@ impl<'gc> VmState<'gc> {
         let gutter = span.line.to_string();
         let pad = " ".repeat(gutter.len());
         let pipe = if colorize {
-            ansi_colorizer::colorize("$#808080[|$]")
+            ansi_colorizer::colorize("[#808080]|[/]")
         } else {
             "|".to_string()
         };
@@ -927,7 +927,7 @@ impl<'gc> VmState<'gc> {
         };
         let carets = format!("{}{}", " ".repeat(span.column), "^".repeat(width));
         let carets = if colorize {
-            ansi_colorizer::colorize(&format!("$#ffcc00[{carets}$]"))
+            ansi_colorizer::colorize(&format!("[#ffcc00]{carets}[/]"))
         } else {
             carets
         };
@@ -2942,14 +2942,14 @@ impl<'gc> VmState<'gc> {
 
                 let colorize_selector = |sel: &str, cls: &str| -> String {
                     if supports_color {
-                        format!("$#ab82ff[{}$]$#808080[:$]$#5fd7af[{}$]", sel, cls)
+                        format!("[#ab82ff]{}[/][#808080]:[/][#5fd7af]{}[/]", sel, cls)
                     } else {
                         format!("{}:{}", sel, cls)
                     }
                 };
                 let colorize_simple = |sel: &str| -> String {
                     if supports_color {
-                        format!("$#ab82ff[{}$]", sel)
+                        format!("[#ab82ff]{}[/]", sel)
                     } else {
                         sel.to_string()
                     }
@@ -3043,7 +3043,7 @@ impl<'gc> VmState<'gc> {
                             .to_string();
                         if supports_color {
                             format!(
-                                " $#808080[in$] {}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                                " [#808080]in[/] {}[#808080]:[/][#00bfff]{}[/][#808080]:[/][#00bfff]{}[/]",
                                 display_filename, si.line, si.column
                             )
                         } else {
@@ -3054,7 +3054,7 @@ impl<'gc> VmState<'gc> {
                     };
 
                     let at_str = if supports_color {
-                        "$#808080[at$]"
+                        "[#808080]at[/]"
                     } else {
                         "at"
                     };
@@ -3097,7 +3097,7 @@ impl<'gc> VmState<'gc> {
                             .to_string();
                         if supports_color {
                             format!(
-                                " $#808080[in$] {}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                                " [#808080]in[/] {}[#808080]:[/][#00bfff]{}[/][#808080]:[/][#00bfff]{}[/]",
                                 display_filename, si.line, si.column
                             )
                         } else {
@@ -3108,7 +3108,7 @@ impl<'gc> VmState<'gc> {
                     };
 
                     let at_str = if supports_color {
-                        "$#808080[at$]"
+                        "[#808080]at[/]"
                     } else {
                         "at"
                     };
@@ -3163,7 +3163,7 @@ impl<'gc> VmState<'gc> {
                                 let padding_len = target_alignment.saturating_sub(plain_len);
                                 let padding: String = " ".repeat(padding_len);
                                 let separator = if supports_color {
-                                    ansi_colorizer::colorize("$#808080[<$]")
+                                    ansi_colorizer::colorize("[#808080]<[/]")
                                 } else {
                                     "<".to_string()
                                 };

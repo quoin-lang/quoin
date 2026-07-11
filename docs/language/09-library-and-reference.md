@@ -239,7 +239,8 @@ var mac = [Crypto]Hmac.sha256:'msg' key:'secret'
 >   - `%a`, `%b`, … (single letters) key into a **map** argument.
 > - **`mod` (prefix `%`)** — `%'…%{expr}…'` is inline interpolation: each `%{expr}` is evaluated over the surrounding **locals and parameters** and stringified with `.s`. Note: `self`, a leading-dot send (`%{.name}`), and instance fields (`%{@name}`) are **not** in scope inside `%{…}` — they resolve as `nil`/`MessageNotUnderstood`. Bind what you need to a local first.
 > - Values are converted with `.s` before insertion.
-> - ANSI strings are the `#ANSI'…'` literal (a user string mixing in `ActAsUserString`); `%`-formatting works on them too.
+> - ANSI strings are the `#ANSI'…'` literal (a user string mixing in `ActAsUserString`); `%`-formatting works on them too — interpolated values are markup-escaped automatically, so they can't inject styling.
+> - The markup inside `#ANSI'…'` is Rich-style: `[red bold]text[/]` opens/closes a styled span (named colors use the terminal palette; `#rrggbb` is exact; `on <color>` sets the background; styles: `bold dim italic underline strike reverse blink`). Spans **nest** — `[/]` restores the *enclosing* style. A bracket run that isn't a tag is literal text (`[IO]Stdout` needs no escaping); `[[` writes a literal `[`. On a terminal the markup renders as color; anywhere else it strips.
 
 ```quoin
 #(1 'two' #three).s                  "* -> #(1 two three)

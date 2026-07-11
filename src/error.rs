@@ -303,14 +303,14 @@ impl fmt::Display for QuoinError {
                 writeln!(f, "{}", error)?;
 
                 let at_str = if *supports_color {
-                    crate::ansi_colorizer::colorize("$#808080[at$]")
+                    crate::ansi_colorizer::colorize("[#808080]at[/]")
                 } else {
                     "at".to_string()
                 };
 
                 let formatted_loc = if *supports_color {
                     format!(
-                        "{}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                        "{}[#808080]:[/][#00bfff]{}[/][#808080]:[/][#00bfff]{}[/]",
                         source_info.filename,
                         source_info.line,
                         source_info.column + 1
@@ -333,7 +333,7 @@ impl fmt::Display for QuoinError {
 
                 if let Some(source_text) = &source_info.source_text {
                     let pipe = if *supports_color {
-                        crate::ansi_colorizer::colorize("$#808080[|$]")
+                        crate::ansi_colorizer::colorize("[#808080]|[/]")
                     } else {
                         "|".to_string()
                     };
