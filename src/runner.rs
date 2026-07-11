@@ -343,7 +343,14 @@ struct Cli {
     #[arg(value_name = "FILE")]
     file: Option<String>,
     /// Arguments passed to the program
-    #[arg(value_name = "ARGS", trailing_var_arg = true)]
+    // `allow_hyphen_values`: everything after FILE reaches the program verbatim —
+    // `qn tool.qn --verbose` (and `./tool.qn --verbose` via a shebang) hands
+    // `--verbose` to the SCRIPT, not to qn's own parser. qn's flags go before FILE.
+    #[arg(
+        value_name = "ARGS",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
     args: Vec<String>,
     #[command(flatten)]
     coverage: CoverageArgs,

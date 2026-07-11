@@ -479,3 +479,14 @@ fn semicolons_survive_exactly_the_gluing_boundaries() {
     // a space on one shared line, where it is always load-bearing.
     assert_eq!(fmt("x.foo:{ a; b }"), "x.foo:{ a; b }\n");
 }
+
+/// A shebang is grammar trivia the lowering never sees — the formatter re-emits
+/// it verbatim as the first line (and stays idempotent).
+#[test]
+fn a_shebang_line_survives_formatting() {
+    let out = fmt("#!/usr/bin/env qn\nvar x = 1\nx.print\n");
+    assert!(
+        out.starts_with("#!/usr/bin/env qn\n"),
+        "shebang dropped:\n{out}"
+    );
+}

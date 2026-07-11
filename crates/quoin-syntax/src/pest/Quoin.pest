@@ -39,7 +39,12 @@ op_meth = _{ "-" ~ ">" ~ !"-" }
 
 // Parser Rules
 
-program = { SOI ~ (stmt ~ ";"?)+ ~ EOI }
+// A unix shebang (`#!/usr/bin/env qn`), only at the very start: trivia to the
+// language, load-bearing to the OS. Atomic so nothing inside it lexes; `#!` is
+// unambiguous here (no Quoin construct follows `#` with `!`).
+shebang = @{ "#!" ~ (!"\n" ~ ANY)* }
+
+program = { SOI ~ shebang? ~ (stmt ~ ";"?)+ ~ EOI }
 
 stmt = {
     use_stmt

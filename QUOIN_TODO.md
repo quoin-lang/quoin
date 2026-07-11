@@ -216,6 +216,12 @@ yield operator in `## Misc`, operators-as-`:`-selectors in the dispatch overhaul
 but *not* parser changes — left in place: per-argument guard blocks and `#bind:{}` destructuring,
 both under `## Misc`.)
 
+- [x] **Shebang support.** A leading `#!/usr/bin/env qn` line is grammar trivia (`shebang` rule
+  in Quoin.pest — parsed, not stripped, so diagnostics keep true line numbers); `qn fmt`
+  re-emits it verbatim; and qn's own arg parsing gained `allow_hyphen_values`, so
+  `./tool.qn --verbose` (and `qn tool.qn --verbose`) hands the flags to the SCRIPT — the old
+  `--` separator is no longer needed. Tests: parser/fmt pins + `tests/shebang.rs` (direct
+  exec with hyphen args; unshifted error positions). Book §36.
 - [ ] **Scope a namespace for definitions (`module`-like).** A way to open a namespace in code so
   that `Class` and constant definitions inside the scope implicitly register under it — instead of
   repeating the `[Ns]` prefix on every definition. Analogous to Ruby's `module Foo … end` (or

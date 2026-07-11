@@ -215,3 +215,37 @@ fn split_elements_keep_their_original_source_positions() {
     );
     assert_eq!(second.source_text.as_deref(), Some("-2"));
 }
+
+// --- shebang -----------------------------------------------------------------
+
+/// A leading `#!` line is grammar trivia: no AST node, and — because it PARSES
+/// rather than being stripped — every later statement keeps its true position.
+#[test]
+fn a_shebang_line_is_trivia_with_positions_preserved() {
+    let src = "#!/usr/bin/env qn\n'hi'.print\n";
+    let program = try_parse_quoin_string_named(src, "<test>").expect("parses");
+    let NodeValue::Program(program) = program.value else {
+        panic!("expected a program");
+    };
+    assert_eq!(program.expressions.len(), 1);
+    let si = program.expressions[0]
+        .source_info
+        .as_ref()
+        .expect("statement has a span");
+    assert_eq!(si.line, 2, "the statement after the shebang is on line 2");
+}
+
+/// Only the very start of the file is a shebang — `#!` later is the parse error
+/// it always was (there is no `#!` construct in the language).
+#[test]
+fn a_shebang_anywhere_else_stays_an_error() {
+    assert!(try_parse_quoin_string_named("'x'.print\n#! not a shebang\n", "<test>").is_err());
+}
+
+/// The shebang consumes exactly its own line: arbitrary content (flags, spaces,
+/// even quotes) never leaks into the program.
+#[test]
+fn shebang_content_is_opaque() {
+    let src = "#!/usr/bin/env -S qn \"weird ' content\n1 + 1\n";
+    assert!(try_parse_quoin_string_named(src, "<test>").is_ok());
+}
