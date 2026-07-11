@@ -3073,20 +3073,56 @@ impl Compiler {
                 bytecode.push(Instruction::NewList(user_list.values.len()));
                 bytecode.push(Instruction::Send(Symbol::intern("newUserList:"), 1));
             }
+            // The placeholder statements (statement-position only, by grammar).
+            // Each desugars to ordinary sends, so traces, typed `catch:`, the
+            // DAP stderr capture, and AOT outcalls all just work.
             NodeValue::Dot3 => {
-                // TODO: For now, just throw the string.
-                bytecode.push(Instruction::Push(Constant::String("...".to_string())));
-                bytecode.push(Instruction::Send(Symbol::intern("throw"), 0));
-            }
-            NodeValue::Huh3 => {
-                // TODO: For now, just throw the string.
-                bytecode.push(Instruction::Push(Constant::String("???".to_string())));
-                bytecode.push(Instruction::Send(Symbol::intern("throw"), 0));
+                // `...` — "not written yet", the todo!() of Quoin: throws a
+                // typed NotImplementedError (bootstrap.qn).
+                bytecode.push(Instruction::LoadGlobal(NamespacedName::new(
+                    Vec::new(),
+                    "NotImplementedError".to_string(),
+                )));
+                bytecode.push(Instruction::Push(Constant::String(
+                    "not implemented".to_string(),
+                )));
+                bytecode.push(Instruction::Send(Symbol::intern("throw:"), 1));
             }
             NodeValue::Bang3 => {
-                // TODO: For now, just throw the string.
-                bytecode.push(Instruction::Push(Constant::String("!!!".to_string())));
-                bytecode.push(Instruction::Send(Symbol::intern("throw"), 0));
+                // `!!!` — "can NEVER execute": throws a typed UnreachableError.
+                bytecode.push(Instruction::LoadGlobal(NamespacedName::new(
+                    Vec::new(),
+                    "UnreachableError".to_string(),
+                )));
+                bytecode.push(Instruction::Push(Constant::String(
+                    "reached unreachable code".to_string(),
+                )));
+                bytecode.push(Instruction::Send(Symbol::intern("throw:"), 1));
+            }
+            NodeValue::Huh3 => {
+                // `???` — "shouldn't get here, but keep going": a soft warning
+                // on stderr, then nil (the statement's value). Rendered by the
+                // SAME `diag_header` the checker's warnings use — one renderer,
+                // no drift — with color markup baked in; `[IO]Stderr`'s write
+                // path decolorizes when color is off, exactly like every other
+                // colored stderr line. A logger can take over later
+                // (QUOIN_TODO). `[IO]Stderr` is native-registered in every
+                // runner mode, so the desugar has no prelude dependency.
+                let msg = crate::vm::VmState::diag_header(
+                    "warning",
+                    "#ffcc00",
+                    "reached `???` placeholder",
+                    node.source_info.as_ref(),
+                    true,
+                    false,
+                );
+                let msg = msg.trim_end_matches('\n').to_string();
+                bytecode.push(Instruction::LoadGlobal(NamespacedName::new(
+                    vec!["IO".to_string()],
+                    "Stderr".to_string(),
+                )));
+                bytecode.push(Instruction::Push(Constant::String(msg)));
+                bytecode.push(Instruction::Send(Symbol::intern("writeln:"), 1));
             }
             NodeValue::Unknown => {
                 return Err("Encountered Unknown NodeValue (ast_visitor bug)".to_string());

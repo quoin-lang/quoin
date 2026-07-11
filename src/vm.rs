@@ -869,7 +869,7 @@ impl<'gc> VmState<'gc> {
     /// `file:line:col: <level>: <message>` header, the level keyword colored (yellow warning,
     /// red error, gray note) like uncaught errors. `indent` shifts a provenance note under its
     /// parent. Shared by `report_type_warnings` and `report_compile_error`.
-    fn diag_header(
+    pub(crate) fn diag_header(
         level: &str,
         color: &str,
         message: &str,

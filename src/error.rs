@@ -1,6 +1,6 @@
 use crate::highlighter::{HighlightParser, HighlightSpan};
 use crate::io_backend::IoError;
-use crate::parser::parse_quoin_string;
+use crate::parser::try_parse_quoin_string_named;
 use crate::value::SourceInfo;
 use std::error::Error;
 use std::{cmp, fmt, fs};
@@ -197,7 +197,10 @@ fn get_highlighted_range(
     }
     if let Ok(content) = fs::read_to_string(filename) {
         let parse_and_highlight = || -> Option<String> {
-            let program = parse_quoin_string(&content);
+            // Fallible parse: this runs inside error DISPLAY — a file that no
+            // longer parses (edited since, or not Quoin at all) must degrade
+            // to plain text, never panic the report.
+            let program = try_parse_quoin_string_named(&content, filename).ok()?;
             let mut parser = HighlightParser::new(&content);
             let spans = parser.highlight_program(&program);
 
@@ -222,7 +225,15 @@ fn get_highlighted_range(
         }
     }
     let parse_and_highlight_fallback = || -> Option<String> {
-        let program = parse_quoin_string(fallback_text);
+        // `fallback_text` is an arbitrary EXPRESSION FRAGMENT sliced from a
+        // frame's span (e.g. `^(.new:{ var message = msg }).throw` from
+        // qnlib's `Error.throw:`) — it very often does not parse as a
+        // standalone program. The panicking parser here crashed the whole
+        // interactive REPL on ANY uncaught error with a qnlib frame once the
+        // embedded stdlib made those filenames unreadable from disk (the
+        // read_to_string path above used to mask this). Degrade to plain
+        // text instead.
+        let program = try_parse_quoin_string_named(fallback_text, filename).ok()?;
         let mut parser = HighlightParser::new(fallback_text);
         let spans = parser.highlight_program(&program);
         Some(crate::highlighter::format_ansi(fallback_text, spans))
@@ -663,5 +674,33 @@ mod tests {
             out.contains('\u{1b}'),
             "expected ANSI escapes in colorized output: {out:?}"
         );
+    }
+
+    #[test]
+    fn display_degrades_when_the_snippet_is_an_unparseable_fragment() {
+        // A frame's `source_text` is an arbitrary expression FRAGMENT sliced
+        // from its span — qnlib's `Error.throw:` yields
+        // fragments like `var message = msg }).throw` that do not parse as
+        // standalone programs. With the frame's filename unreadable (the
+        // embedded stdlib's `std:…` names, `<repl>`, `<string>`), the
+        // colorized Display used to re-parse that fragment with the PANICKING
+        // parser: every uncaught error with a qnlib frame crashed the whole
+        // interactive REPL. It must degrade to plain text instead.
+        let frag = "var message = msg }).throw";
+        let err = QuoinError::WithSourceInfo {
+            error: Box::new(QuoinError::Other("boom".to_string())),
+            source_info: SourceInfo {
+                filename: "std:core/00-bootstrap.qn".to_string(),
+                line: 1,
+                column: 0,
+                start: 0,
+                end: frag.len(),
+                source_text: Some(frag.to_string()),
+            },
+            trace: vec![],
+            supports_color: true,
+        };
+        let out = format!("{}", err); // the whole point: this must not panic
+        assert!(out.contains(frag), "the raw snippet still renders: {out:?}");
     }
 }
