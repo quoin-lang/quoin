@@ -141,7 +141,7 @@ fn jump_offset(inst: &Instruction) -> Option<isize> {
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
         | Instruction::BranchIfNotBool(o)
-        | Instruction::BranchIfNotList(o)
+        | Instruction::BranchIfNotList(o, _)
         | Instruction::BranchIfNotPlainNew(o) => Some(*o),
         _ => None,
     }
@@ -153,7 +153,7 @@ fn set_jump_offset(inst: &mut Instruction, off: isize) {
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
         | Instruction::BranchIfNotBool(o)
-        | Instruction::BranchIfNotList(o)
+        | Instruction::BranchIfNotList(o, _)
         | Instruction::BranchIfNotPlainNew(o) => *o = off,
         _ => {}
     }
@@ -841,36 +841,21 @@ impl Compiler {
             // The ERASED dispatch name (`List(Integer)` → `List`), exactly what the
             // runtime guarantees about the arg; the element tag rides separately in
             // `StaticBlock.param_elem_tags`, where the translator picks it up as a
-            // `CollectionOf` proof (B1). A type-var param erases to `Object` and
-            // stays a non-candidate, as before.
+            // `CollectionOf` proof (B1). Every non-scalar name — a class, an erased
+            // type variable's `Object`, a nullable — rides as a slot-resident Obj.
             let name = self.dispatch_type_name(hint);
-            let Some(k) = crate::codegen::AotParam::from_annotation(&name) else {
-                crate::codegen::record_refusal(
-                    selector,
-                    crate::codegen::RefusalKind::PrecheckSignature,
-                    &format!("param annotation '{name}' has no scalar/Obj mapping"),
-                );
-                return;
-            };
-            params.push(k);
+            params.push(crate::codegen::AotParam::from_annotation(&name));
             spec_params.push(false);
         }
         let mut spec_ret = false;
         let ret = match &block_node.return_type {
             // Same erasure as params: `^List(U)` returns a List at runtime
-            // (the variables are checker-only); a type-var return erases to
-            // `Object` and stays a non-candidate.
+            // (the variables are checker-only); `^T?`/`^Object` compile as Obj
+            // returns — this used to end candidacy and silently kept e.g.
+            // `Iterate#detect:` interpreted forever.
             Some(rt) => {
                 let name = self.dispatch_type_name(rt);
-                let Some(ret) = crate::codegen::AotRet::from_annotation(&name) else {
-                    crate::codegen::record_refusal(
-                        selector,
-                        crate::codegen::RefusalKind::PrecheckSignature,
-                        &format!("return annotation '{name}' has no scalar/Obj mapping"),
-                    );
-                    return;
-                };
-                ret
+                crate::codegen::AotRet::from_annotation(&name)
             }
             // An absent return annotation was ALSO a candidacy cliff before
             // S0; the profile observes the real return kind for S2 (Obj until

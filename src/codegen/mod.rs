@@ -69,15 +69,16 @@ pub enum AotParam {
 }
 
 impl AotParam {
-    pub fn from_annotation(name: &str) -> Option<AotParam> {
-        if let Some(k) = AotKind::from_annotation(name) {
-            return Some(AotParam::Scalar(k));
-        }
-        match name {
-            // `Block`: any block value is an ordinary heap object in a slot;
-            // compiled code interacts with it through outcalls only (B2).
-            "List" | "Map" | "String" | "Block" => Some(AotParam::Obj),
-            _ => None,
+    /// Scalar names ride in registers; EVERY other annotation is a boxed value
+    /// in a slot (`Obj` assumes nothing, so any class name — `Block`, a user
+    /// class, an erased type variable's `Object`, a nullable `Integer?` — is
+    /// sound). Nullable scalars land here too, never on `Scalar`: the name
+    /// keeps its `?`, so it can't match the scalar arm, and a nil-carrying
+    /// param must not compile into a register lane.
+    pub fn from_annotation(name: &str) -> AotParam {
+        match AotKind::from_annotation(name) {
+            Some(k) => AotParam::Scalar(k),
+            None => AotParam::Obj,
         }
     }
 }
@@ -91,13 +92,15 @@ pub enum AotRet {
 }
 
 impl AotRet {
-    pub fn from_annotation(name: &str) -> Option<AotRet> {
-        if let Some(k) = AotKind::from_annotation(name) {
-            return Some(AotRet::Scalar(k));
-        }
-        match name {
-            "List" | "Map" | "String" => Some(AotRet::Obj),
-            _ => None,
+    /// Same widening as [`AotParam::from_annotation`]: scalars by name, all
+    /// else `Obj`. This is what lets `detect: -> { … ^T? }` be a candidate at
+    /// all — its return erases to `Object`, which used to end candidacy
+    /// (`precheckSignature`) and silently kept the whole `^T`/`^T?`/`^Object`
+    /// family interpreted.
+    pub fn from_annotation(name: &str) -> AotRet {
+        match AotKind::from_annotation(name) {
+            Some(k) => AotRet::Scalar(k),
+            None => AotRet::Obj,
         }
     }
 }
@@ -1235,28 +1238,106 @@ fn invoke_tail<'gc>(
     finish_frame(vm, outcome, base, minted)
 }
 
-/// The compiled entry for a block template, compiling LAZILY on first use
+/// The compiled entry for a block template, compiling LAZILY once warm
 /// (B3a): registry hit → done; else a pending candidate stashed at unit load
-/// compiles now (once — a refusal tombstones). `None` = run interpreted.
-pub fn block_entry_for<'gc>(vm: &mut VmState<'gc>, template_id: u32) -> Option<&'static AotEntry> {
+/// compiles at the warmth threshold (once — a refusal tombstones). `None` =
+/// run interpreted.
+///
+/// The warmth window doubles as S1-style ARGUMENT observation (`arg` is the
+/// `valueWithSelfOrArg:` item): a one-param block whose observed args
+/// saturate to one scalar kind compiles that param into a register lane with
+/// an entry precondition — `invoke_block` checks it and Bails to the
+/// interpreted body on mismatch, tombstoning after `BAIL_TOMBSTONE`
+/// consecutive misses, exactly like a speculated method. This is what lets
+/// `(x * 3) + 1` inside `collect:{ |x| … }` devirt to native arithmetic
+/// instead of paying two classic outcalls per element.
+pub fn block_entry_for<'gc>(
+    vm: &mut VmState<'gc>,
+    template_id: u32,
+    arg: Value<'gc>,
+) -> Option<&'static AotEntry> {
     if let Some(entry) = lookup(template_id) {
         return (entry.role == AotRole::BlockTemplate).then_some(entry);
     }
     if vm.aot_refused_blocks.contains(&template_id) {
         return None;
     }
-    // Tiering: a once-invoked block would pay Cranelift more than it saves —
-    // compile only once a template proves warm. A combinator loop crosses the
-    // threshold in its first handful of elements.
+    warm_pending_block(vm, template_id, 1, Some(spec::kind_of(arg)))
+}
+
+/// The interpreted `BranchIfNotList` guard's routing question: should this
+/// fused `each:` site take the COLD path (the real send) instead of the
+/// interpreted splice? Yes exactly when the argument block compiled WITH a
+/// speculated scalar param — its body devirts, and the send path reaches it
+/// per element via `invoke_block`, beating the splice ~2x (measured,
+/// bench/micro). An Obj-param compiled block stays spliced: the send would
+/// only wrap the same per-element outcalls in dispatch + entry shell
+/// (measured +23% on maps). While the template is still pending, the guard
+/// FEEDS its tiering instead: the list's elements are the very args the send
+/// path would deliver, so warmth advances by the element count (one hot loop
+/// crosses the threshold at its first call) and the observation lattice
+/// merges the first element's kind (homogeneous lists dominate; a wrong
+/// sample only costs precondition Bails, never wrong answers). A refused or
+/// tombstoned template answers `false` forever — the splice remains the best
+/// available tier.
+pub fn fused_site_prefers_send<'gc>(
+    vm: &mut VmState<'gc>,
+    template_id: u32,
+    len: usize,
+    first: Option<Value<'gc>>,
+) -> bool {
+    let speculated = |entry: &AotEntry| {
+        entry.role == AotRole::BlockTemplate
+            && entry.param_preconditions.iter().any(|p| p.is_some())
+    };
+    if let Some(entry) = lookup(template_id) {
+        return speculated(entry);
+    }
+    if vm.aot_refused_blocks.contains(&template_id) {
+        return false;
+    }
+    let n = u32::try_from(len).unwrap_or(u32::MAX);
+    warm_pending_block(vm, template_id, n, first.map(spec::kind_of)).is_some_and(speculated)
+}
+
+/// Advance a pending block template's warmth/observation by `n` invocations
+/// (kind `Some(k)` merges into the argument lattice) and compile at the
+/// threshold; a refusal tombstones. Returns the entry once compiled.
+///
+/// Tiering rationale: a once-invoked block would pay Cranelift more than it
+/// saves — compile only once a template proves warm. A combinator loop
+/// crosses the threshold in its first handful of elements.
+fn warm_pending_block<'gc>(
+    vm: &mut VmState<'gc>,
+    template_id: u32,
+    n: u32,
+    kind: Option<u8>,
+) -> Option<&'static AotEntry> {
     let warm = warm_threshold();
     {
-        let (count, _) = vm.aot_pending_blocks.get_mut(&template_id)?;
-        *count += 1;
+        let (count, arg_kind, _) = vm.aot_pending_blocks.get_mut(&template_id)?;
+        *count = count.saturating_add(n);
+        if let Some(k) = kind {
+            *arg_kind = spec::merge(*arg_kind, k);
+        }
         if *count < warm {
             return None;
         }
     }
-    let (_, cand) = vm.aot_pending_blocks.remove(&template_id)?;
+    let (_, arg_kind, mut cand) = vm.aot_pending_blocks.remove(&template_id)?;
+    // Zero-param blocks receive the item as `self`, not as the param — only
+    // a real one-param block speculates its (single) argument lane. And only
+    // when the body has something a scalar lane can devirt: the lane costs a
+    // per-invocation precondition branch plus a return re-boxing (~+12% on an
+    // identity block, measured), so a body with no scalar-op sends stays a
+    // slot-resident Obj.
+    if cand.block.param_syms.len() == 1
+        && block_body_has_scalar_ops(&cand.block)
+        && let Some(kind) = spec::scalar_kind(arg_kind)
+    {
+        cand.params = vec![AotParam::Scalar(kind)];
+        cand.spec_preconditions = vec![Some(kind)];
+    }
     compile_candidates(vec![cand]);
     match lookup(template_id) {
         Some(entry) if entry.role == AotRole::BlockTemplate => Some(entry),
@@ -1265,6 +1346,25 @@ pub fn block_entry_for<'gc>(vm: &mut VmState<'gc>, template_id: u32) -> Option<&
             None
         }
     }
+}
+
+/// Does this block body contain a send a scalar param could devirt — any
+/// selector `IntBinKind` recognizes (the same table the translator's
+/// scalar-op devirt keys on, so the heuristic can't drift from the payoff)?
+fn block_body_has_scalar_ops(block: &crate::instruction::StaticBlock) -> bool {
+    use crate::instruction::{Instruction as I, IntBinKind};
+    block.bytecode.0.iter().any(|inst| {
+        let sel = match inst {
+            I::Send(s, _)
+            | I::SendLocal(_, s, _)
+            | I::SendConst(_, s, _)
+            | I::SendField(_, s, _)
+            | I::SendLocalLocal(_, _, s, _)
+            | I::SendLocalConst(_, _, s, _) => *s,
+            _ => return false,
+        };
+        IntBinKind::from_selector(sel.as_str()).is_some()
+    })
 }
 
 /// Invoke a compiled BLOCK TEMPLATE (B3a) with `valueWithSelfOrArg:`
@@ -1309,6 +1409,29 @@ pub fn invoke_block<'gc>(
     if !entry_gates(vm, entry) {
         return AotOutcome::Bail;
     }
+    // Speculated-argument precondition (the block-side S1 gate): a scalar
+    // lane was compiled from the warmth window's observations — check the
+    // live argument BEFORE any stack effect, Bail to the interpreted body on
+    // mismatch, and tombstone after BAIL_TOMBSTONE consecutive misses (the
+    // speculation was wrong about this program).
+    let mut arg_lane: Option<i64> = None;
+    if let Some(&Some(kind)) = entry.param_preconditions.first() {
+        use std::sync::atomic::Ordering;
+        arg_lane = match (kind, arg) {
+            (AotKind::Int, Value::Int(v)) => Some(v),
+            (AotKind::Double, Value::Double(d)) => Some(d.to_bits() as i64),
+            (AotKind::Bool, Value::Bool(b)) => Some(b as i64),
+            _ => None,
+        };
+        if arg_lane.is_none() {
+            let bails = entry.spec_bails.fetch_add(1, Ordering::Relaxed) + 1;
+            if bails >= spec::BAIL_TOMBSTONE {
+                tombstone(entry.template_id);
+            }
+            return AotOutcome::Bail;
+        }
+        entry.spec_bails.store(0, Ordering::Relaxed);
+    }
     // The invoked closure's lexical parent AND its `^^` home: a closure the
     // template's cold path materializes belongs to the same home method this
     // closure does (S5) — including `None` (a homeless block's `^^` errors,
@@ -1340,7 +1463,9 @@ pub fn invoke_block<'gc>(
         let slots_ptr = vm.stack.head_addr();
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
         let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
-        let raw_args: [i64; 1] = [base as i64 + 1];
+        // A speculated scalar rides its lane; an Obj param takes its window
+        // slot's index (slot 1), exactly like a method Obj param.
+        let raw_args: [i64; 1] = [arg_lane.unwrap_or(base as i64 + 1)];
         unsafe {
             (entry.raw)(
                 vm_ptr,

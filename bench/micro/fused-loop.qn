@@ -1,0 +1,29 @@
+"The floor: a hand-fused at:-loop in a compiled method - no block calls,
+no combinator dispatch. Every other file in this ladder pays this cost
+plus its own seam. 20M element visits.
+Run whole-process: `qn bench/micro/fused-loop.qn` (see bench/micro/run.py)."
+
+Micro <- {
+    .meta <-- {
+        sum:n: -> { |data: List n: Integer ^Integer|
+            var s = 0;
+            var i = 0;
+            { i < n }.whileDo:{ s = s + (data.at:i); i = i + 1 };
+            ^s
+        }
+    };
+    .sealed!
+};
+
+var data = #();
+var i = 0;
+{ i < 1000 }.whileDo:{ data.add:i; i = i + 1 };
+
+var sink = 0;
+var k = 0;
+{ k < 20000 }.whileDo:{
+    sink = sink + (Micro.sum:data n:1000);
+    k = k + 1
+};
+
+(sink == 9990000000).if:{ 'fused-loop: ok'.print } else:{ ('fused-loop: FAIL got ' + sink).print }

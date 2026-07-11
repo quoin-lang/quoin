@@ -574,11 +574,15 @@ pub struct VmState<'gc> {
     pub aot_pending_error: Option<QuoinError>,
     /// Block templates collected at unit load but NOT yet compiled (B3a lazy
     /// compilation): most literals are never invoked, and eager Cranelift
-    /// work for all of them cost ~+34ms startup. A template compiles on its
-    /// FIRST `valueWithSelfOrArg:` invocation (`codegen::block_entry_for`),
-    /// once; refusals tombstone so they never retry.
+    /// work for all of them cost ~+34ms startup. A template compiles once
+    /// warm at the `valueWithSelfOrArg:` seam (`codegen::block_entry_for`);
+    /// refusals tombstone so they never retry. The tuple is (invocations,
+    /// observed arg-kind lattice, candidate): the warmth window doubles as
+    /// the block's S1-style argument observation, so a monomorphic-scalar
+    /// block compiles its param into a register lane with an entry
+    /// precondition instead of a slot-resident Obj.
     #[collect(require_static)]
-    pub aot_pending_blocks: rustc_hash::FxHashMap<u32, (u32, crate::codegen::AotCandidate)>,
+    pub aot_pending_blocks: rustc_hash::FxHashMap<u32, (u32, u8, crate::codegen::AotCandidate)>,
     #[collect(require_static)]
     pub aot_refused_blocks: rustc_hash::FxHashSet<u32>,
     /// Speculative pending methods: template id → warmth + kind profile +
@@ -3696,7 +3700,8 @@ impl<'gc> VmState<'gc> {
                 continue;
             };
             if cand.role == AotRole::BlockTemplate {
-                self.aot_pending_blocks.insert(tid, (0, cand));
+                self.aot_pending_blocks
+                    .insert(tid, (0, spec::K_UNKNOWN, cand));
             } else if cand.speculative() {
                 cand.block.spec_state.set(spec::OBSERVING);
                 let n_params = cand.params.len();
@@ -3720,13 +3725,7 @@ impl<'gc> VmState<'gc> {
 
     /// The kind lattice value of a runtime value (spec-AOT observation).
     fn spec_kind(v: Value<'gc>) -> u8 {
-        use crate::codegen::spec;
-        match v {
-            Value::Int(_) => spec::K_INT,
-            Value::Double(_) => spec::K_DOUBLE,
-            Value::Bool(_) => spec::K_BOOL,
-            _ => spec::K_OBJ,
-        }
+        crate::codegen::spec::kind_of(v)
     }
 
     /// Merge a method entry's arg kinds into its speculative profile and
@@ -6011,20 +6010,37 @@ impl<'gc> VmState<'gc> {
                     });
                 }
             },
-            Instruction::BranchIfNotList(offset) => {
+            Instruction::BranchIfNotList(offset, block_tid) => {
                 let offset = *offset;
+                let block_tid = *block_tid;
                 // Peek the `each:` receiver (do not pop): a native List falls through to
                 // the fused index loop (which consumes it); anything else takes the cold
                 // path (the real `each:` send), which needs it on the stack. One downcast
                 // per each: CALL, not per element.
-                let is_list = self
-                    .stack
-                    .last()
-                    .is_some_and(|v| v.with_native_state::<NativeListState, _, _>(|_| ()).is_ok());
-                if is_list {
-                    ip += 1;
-                } else {
-                    ip = (ip as isize + offset) as usize;
+                let list_probe = self.stack.last().and_then(|v| {
+                    v.with_native_state::<NativeListState, _, _>(|l| {
+                        let v = l.get_vec();
+                        (v.len(), v.first().copied())
+                    })
+                    .ok()
+                });
+                match list_probe {
+                    None => ip = (ip as isize + offset) as usize,
+                    Some((len, first)) => {
+                        // A COMPILED argument block flips the choice: the cold path's
+                        // real send reaches it per element (invoke_block), beating the
+                        // interpreted splice ~2x. The guard also feeds the template's
+                        // warmth (by element count) and its argument observation (the
+                        // elements ARE the args), so splice-only programs tier up.
+                        if let Some(tid) = block_tid
+                            && crate::tuning::aot_enabled()
+                            && crate::codegen::fused_site_prefers_send(self, tid, len, first)
+                        {
+                            ip = (ip as isize + offset) as usize;
+                        } else {
+                            ip += 1;
+                        }
+                    }
                 }
             }
             Instruction::BranchIfNotPlainNew(offset) => {

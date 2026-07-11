@@ -826,4 +826,78 @@ EscCatcher <- {
         { i < 5 }.whileDo:{ acc = acc + (t.m); i = i + 1 };
         .is:{ acc } equalTo:'caughtcaughtcaughtcaughtcaught'
     }
+};
+
+"* Block-argument scalar speculation: a hot one-param block whose observed
+"* args are all Integer compiles its param into a register lane, guarded by
+"* an entry precondition. Semantics must be invisible: a mid-stream kind
+"* change Bails to the interpreted body (and tombstones after enough
+"* consecutive misses), a param reassignment stays exact, and results match
+"* the interpreter bit-for-bit in both modes.
+
+(TestSuite.new:{ var name = 'AotParityBlockSpec' }).add:{
+    .test:monomorphicIntBlockStaysExact -> {
+        var data = #();
+        var i = 0;
+        { i < 200 }.whileDo:{ data.add:i; i = i + 1 };
+        var out = data.collect:{ |x| (x * 3) + 1 };
+        .is:{ out.at:0 } equalTo:1;
+        .is:{ out.at:199 } equalTo:598;
+        .is:{ out.count } equalTo:200
+    };
+
+    .test:kindChangeMidStreamBailsExactly -> {
+        "* the same literal block goes hot on Integers, then receives Doubles
+        "* and Strings - the speculated entry must Bail per element, never
+        "* wrong-answer. String + Integer concatenates via +, so a block doing
+        "* `x + x` is meaningful for every kind fed here.
+        var mixed = #();
+        var i = 0;
+        { i < 50 }.whileDo:{ mixed.add:i; i = i + 1 };
+        mixed.add:2.5;
+        mixed.add:'ab';
+        var out = mixed.collect:{ |x| x + x };
+        .is:{ out.at:10 } equalTo:20;
+        .is:{ out.at:50 } equalTo:5.0;
+        .is:{ out.at:51 } equalTo:'abab'
+    };
+
+    .test:paramReassignmentInSpeculatedBlock -> {
+        var data = #();
+        var i = 0;
+        { i < 100 }.whileDo:{ data.add:i; i = i + 1 };
+        var out = data.collect:{ |x| x = x + 1; x * 2 };
+        .is:{ out.at:0 } equalTo:2;
+        .is:{ out.at:99 } equalTo:200
+    };
+
+    .test:routedDirectEachStaysExact -> {
+        "* a hot literal-block each: site routes to the send path once the
+        "* block compiles speculated (S2) - captured-local writes and a
+        "* mid-stream kind change must stay exact through the rerouting.
+        var data = #();
+        var i = 0;
+        { i < 40 }.whileDo:{ data.add:i; i = i + 1 };
+        var sum = 0;
+        var rounds = 0;
+        { rounds < 30 }.whileDo:{ data.each:{ |x| sum = sum + x }; rounds = rounds + 1 };
+        .is:{ sum } equalTo:23400;
+        data.add:2.5;
+        var tail = 0.0;
+        data.each:{ |x| tail = tail + x };
+        .is:{ tail } equalTo:782.5
+    };
+
+    .test:nilAmongIntsStaysExact -> {
+        "* nil observes as Obj: a nil seen during the warmth window prevents
+        "* speculation; one arriving after promotion Bails. Either way the
+        "* answer matches the interpreter.
+        var data = #();
+        var i = 0;
+        { i < 60 }.whileDo:{ data.add:i; i = i + 1 };
+        data.add:nil;
+        var out = data.collect:{ |x| x.defined?.if:{ x + 1 } else:{ -1 } };
+        .is:{ out.at:5 } equalTo:6;
+        .is:{ out.at:60 } equalTo:(-1)
+    }
 }

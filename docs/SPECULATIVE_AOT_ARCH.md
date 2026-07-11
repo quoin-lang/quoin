@@ -1,6 +1,6 @@
 # Speculative AOT: type-feedback compilation for untyped code
 
-*Status: S0-S3 + S5 (cold-arm `^^` + nested-literal materialization) SHIPPED. Remaining: S4 quickening (deferred), S5c template-role `^^` (recorded), btrees profitability heuristic (btrees turned net-positive at S3; deprioritized).*
+*Status: S0-S3 + S5 (cold-arm `^^` + nested-literal materialization) SHIPPED; 2026-07-10: speculation EXTENDED TO BLOCK TEMPLATES and the F1 purity blind spot fixed (see §7). Remaining: S4 quickening (deferred), S5c template-role `^^` (recorded), btrees profitability heuristic (btrees turned net-positive at S3; deprioritized).*
 
 ## 1. Why: the measured shape of the untyped gap
 
@@ -301,3 +301,50 @@ speculative AOT largely obsoletes. Recorded, not scheduled.
   default / `QN_AOT_WARM=1` / `QN_AOT=0` / GC-stress / sched-stress.
 - `bench/CROSS.md` re-measured: fib_untyped flips from 0.15 to >2 vs
   CPython.
+
+## 7. 2026-07-10 addenda: block-template speculation, and the F1 purity blind spot
+
+**Blocks speculate now** (`perf/block-scalar-spec`). Block templates always
+compiled their param as a slot-resident Obj, so scalar sends inside the
+hottest blocks in the language — `(x * 3) + 1` in a `collect:` — paid classic
+outcalls per element (~38ns of a 60ns/element total, `bench/micro/`). The
+B3a warmth window at `codegen::block_entry_for` now doubles as argument
+observation: each pending invocation merges the `valueWithSelfOrArg:` item's
+kind into a lattice riding `aot_pending_blocks`. At the threshold, a
+one-param block with a saturated scalar profile — and at least one
+`IntBinKind`-recognized send in its body, so the lane has something to
+devirt (an identity block speculated for nothing measured +12%) — compiles
+its param into a register lane with an entry precondition. `invoke_block`
+checks the live argument before any stack effect; a mismatch Bails to the
+interpreted body and tombstones after `BAIL_TOMBSTONE` consecutive misses,
+exactly like a speculated method. The trampoline/inner-signature/scalar-op
+machinery was already role-agnostic — the translator needed no changes.
+block-arith 60 → 22ns/element; combinators −21% whole-process. Semantics
+pinned in 50-aot-parity.qn (`AotParityBlockSpec`).
+
+**Interpreted fused `each:` sites route to speculated blocks.** B1's
+interpreter splice never *calls* the block, so a compiled speculated
+template sat unused at direct `each:` sites (identical under `QN_AOT=0`).
+`BranchIfNotList` now carries the argument block's template id; the
+interpreted arm prefers the cold send — which reaches the compiled block per
+element — exactly when the template compiled WITH a speculated param (an
+Obj-param compiled block stays spliced: routing those measured +23% on
+maps). While pending, the guard feeds warmth by element count and samples
+the first element's kind. each-arith 102 → 54ns/element.
+
+**The F1 purity blind spot (fixed).** PR #77's strict-Boolean guard puts a
+`BranchIfNotBool` + materialized arm blocks + an `if:else:` send into every
+not-statically-Bool conditional. The syntactic `scalar_pure_set` scan is
+reachability-blind, so that dynamically-dead cold span evicted untyped fib
+from the pure set → no direct self-recursion → recursive results Dyn → the
+speculated scalar ret failed `emit_return`'s static proof → `RetDemote` →
+Obj ret → **8× unnoticed** (0.016 → 0.077s whole-process). The scan is now
+reachability-aware (`reachable_ips`): it checks only instructions a pure
+translation would visit, with `BranchIfNotBool` following only its
+fall-through edge — in a member with no slot sources the operand is a
+translation constant, so the guard either folds (hot edge only) or pins the
+cold edge, whose slot ops then trip the translation-time purity check and
+demote; the same verdict either way, decided by the authority. Unknown
+instructions default to fall-through: every scan inaccuracy only ADMITS too
+much, and the translation purity check backstops every admission. Pinned by
+`guarded_conditional_cold_span_keeps_untyped_fib_scalar_pure`.

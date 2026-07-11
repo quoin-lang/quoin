@@ -1,0 +1,19 @@
+"Arithmetic inside the block: identical to block-identity except the block
+computes `(x * 3) + 1`. The delta against block-identity is the per-element
+cost of scalar sends INSIDE a compiled block template - the block-scalar-
+speculation target. 20M element visits.
+Run whole-process: `qn bench/micro/block-arith.qn`."
+
+var data = #();
+var i = 0;
+{ i < 1000 }.whileDo:{ data.add:i; i = i + 1 };
+
+var sink = 0;
+var k = 0;
+{ k < 20000 }.whileDo:{
+    var out = data.collect:{ |x| (x * 3) + 1 };
+    sink = sink + (out.at:999);
+    k = k + 1
+};
+
+(sink == 59960000).if:{ 'block-arith: ok'.print } else:{ ('block-arith: FAIL got ' + sink).print }

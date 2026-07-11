@@ -1,0 +1,19 @@
+"Captured-accumulator each: - the idiomatic sum loop. The block writes a
+captured local per element, so this adds closure-env access on top of
+each-arith's path. 20M element visits.
+Run whole-process: `qn bench/micro/each-capture.qn`."
+
+var data = #();
+var i = 0;
+{ i < 1000 }.whileDo:{ data.add:i; i = i + 1 };
+
+var sink = 0;
+var k = 0;
+{ k < 20000 }.whileDo:{
+    data.each:{ |x| sink = sink + x };
+    k = k + 1
+};
+
+(sink == 9990000000)
+    .if:{ 'each-capture: ok'.print }
+     else:{ ('each-capture: FAIL got ' + sink).print }

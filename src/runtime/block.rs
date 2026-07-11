@@ -171,7 +171,7 @@ pub fn build_block_class() -> NativeClassBuilder {
             // or precondition mismatch) falls through to the interpreted body.
             if vm.aot.outcall_nesting < crate::codegen::spec::MAX_OUTCALL_NESTING
                 && let Some(tid) = block.template.template_id
-                && let Some(entry) = crate::codegen::block_entry_for(vm, tid)
+                && let Some(entry) = crate::codegen::block_entry_for(vm, tid, arg_val)
             {
                 let self_val = crate::codegen::self_or_arg_self(&block, arg_val);
                 match crate::codegen::invoke_block(
