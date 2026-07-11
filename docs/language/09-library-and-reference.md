@@ -138,6 +138,16 @@ half of a `.tar.gz` — reads incrementally through the ordinary stream methods
 (`readAll`, `readLine`, `eachLine:`), nothing materialized. Concatenated gzip
 members decode end to end; corrupt input is a catchable `IoError` on read.
 
+**[Archive]Tar** reads tar archives as a *stream* of entries — pure Quoin over
+any ByteStream, so `.tar.gz` is just composition: `[Archive]Tar.over:(handle
+.byteStream.gunzip)`. Entries arrive in order and are consumed once (`each:`
+carries the whole Iterate vocabulary; a passed entry's content is skipped in
+chunks, never materialized); ustar prefixes, GNU long names, and pax `path=`
+headers all resolve, and header checksums are verified. `extractTo:` writes
+files and directories under a target — with member paths normalized and
+**confined**: an absolute or `../`-escaping path throws before anything lands
+outside. Writing archives is a coming slice (it wants streaming gzip *encode*).
+
 ```quoin
 'hello'.asBytes.encodeGz.decodeGz.asString    "* -> hello
 ```

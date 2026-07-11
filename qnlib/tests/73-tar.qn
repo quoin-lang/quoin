@@ -1,0 +1,146 @@
+"* [Archive]Tar (core/15-tar.qn): streaming tar reading, pure Quoin over ByteStream.
+"* Fixtures come from the SYSTEM tar via [OS]Process (real ustar/pax output, long
+"* names and all) — the whole branch dogfooding itself — plus a hand-crafted header
+"* for the traversal attack and the checksum check.
+
+"* Build the fixture tree once and tar it both ways; every test reads fresh.
+var tarFixture = {
+    var src = '/tmp/qn_t_tar_src'
+    [OS]Process.run:#( 'rm' '-rf' src '/tmp/qn_t_tar.tar' '/tmp/qn_t_tar.tgz' )
+    [IO]Folder.create:src
+    [IO]Folder.create:(src + '/sub')
+    [IO]File.write:'hello tar' to:(src + '/a.txt')
+    [IO]File.write:(((1..800).collect:{ |i| i.s }).join:',') to:(src + '/sub/big.txt')
+    var long = ((1..12).collect:{ 'directory-' }).join:''
+    [IO]File.write:'deep' to:(src + '/' + long + '.txt')
+    ([OS]Process.run:#( 'tar' '-cf' '/tmp/qn_t_tar.tar' '-C' src '.' )).check
+    ([OS]Process.run:#( 'tar' '-czf' '/tmp/qn_t_tar.tgz' '-C' src '.' )).check
+    nil
+}
+
+"* A minimal valid-checksum ustar header + content block for `name`, crafted byte
+"* by byte (octal fields, 512 padding) — how we forge a malicious archive.
+var craftTar = { |name content|
+    var header = (0..512).collect:{ 0 }
+    var putString = { |at s|
+        var bytes = s.asBytes
+        (0..bytes.count).each:{ |i| header.at:(at + i) put:(bytes.at:i) }
+    }
+    var putOctal = { |at width n|
+        "* right-aligned octal, NUL-terminated, zero-padded
+        var digits = #()
+        var v = n
+        { v > 0 }.whileDo:{ digits.add:(v % 8); v = v / 8 }
+        (digits.count == 0).if:{ digits.add:0 }
+        var pad = width - 1 - digits.count
+        (0..pad).each:{ |i| header.at:(at + i) put:48 }
+        var j = 0
+        { j < digits.count }.whileDo:{
+            header.at:(at + pad + (digits.count - 1 - j)) put:(48 + (digits.at:j))
+            j = j + 1
+        }
+    }
+    putString.valueWithArgs:#( 0 name )
+    putOctal.valueWithArgs:#( 100 8 420 )  "* mode
+    putOctal.valueWithArgs:#( 108 8 0 )  "* uid
+    putOctal.valueWithArgs:#( 116 8 0 )  "* gid
+    putOctal.valueWithArgs:#( 124 12 content.length )
+    putOctal.valueWithArgs:#( 136 12 0 )  "* mtime
+    header.at:156 put:48  "* type '0' = file
+    putString.valueWithArgs:#( 257 'ustar' )
+    "* checksum: field as spaces, then written in octal
+    (148..156).each:{ |i| header.at:i put:32 }
+    var sum = 0
+    header.each:{ |b| sum = sum + b }
+    putOctal.valueWithArgs:#( 148 8 sum )
+    "* content padded to 512, plus two zero end blocks
+    var out = Bytes.of:header
+    var body = (0..1024).collect:{ 0 }
+    var cb = content.asBytes
+    (0..cb.count).each:{ |i| body.at:i put:(cb.at:i) }
+    out + (Bytes.of:body)
+}
+
+(TestSuite.new:{ var name = 'Tar' }).add:{
+    .test:
+    readsRealArchives -> {
+        tarFixture.value;
+        var entries = #{};
+        var tar = [Archive]Tar.over:(([IO]File.open:'/tmp/qn_t_tar.tar').byteStream);
+        tar.each:{ |e|
+            (e.type == #file).if:{ entries.at:(e.name) put:(e.bytes.count) }
+        };
+        .is:{ entries.at:'./a.txt' } equalTo:9;
+        .isTrue:{ (entries.at:'./sub/big.txt') > 2000 };
+        "* The 124-char name survives (pax path= or GNU longname, per the system tar).
+        var long = './' + (((1..12).collect:{ 'directory-' }).join:'') + '.txt';
+        .is:{ entries.at:long } equalTo:4;
+    };
+
+    .test:
+    tarGzThroughGunzip -> {
+        "* THE point of the streaming-gzip slice: .tar.gz reads by composition.
+        var tar = [Archive]Tar.over:(([IO]File.open:'/tmp/qn_t_tar.tgz').byteStream.gunzip);
+        var seen = #();
+        tar.each:{ |e|
+            ((e.type == #file) && (e.name == './a.txt')).if:{ seen.add:(e.text) }
+        };
+        .is:{ seen } equalTo:#( 'hello tar' );
+    };
+
+    .test:
+    entryMetadataAndGuards -> {
+        var tar = [Archive]Tar.over:(([IO]File.open:'/tmp/qn_t_tar.tar').byteStream);
+        var first = tar.next;
+        .is:{ first.type } equalTo:#directory;
+        .isTrue:{ first.mtime.asUnixSeconds > 0 };
+        "* Entries are consumed once, in order: a passed entry's bytes refuse...
+        var a = tar.next;
+        var b = tar.next;
+        .does:{ a.bytes } throw:ValueError;
+        "* ...and so does a second read of the current one.
+        b.bytes;
+        .does:{ b.bytes } throw:ValueError;
+    };
+
+    .test:
+    extractionIsConfined -> {
+        tarFixture.value;
+        [OS]Process.run:#( 'rm' '-rf' '/tmp/qn_t_tar_out' );
+        var tar = [Archive]Tar.over:(([IO]File.open:'/tmp/qn_t_tar.tgz').byteStream.gunzip);
+        tar.extractTo:'/tmp/qn_t_tar_out';
+        .is:{ [IO]File.read:'/tmp/qn_t_tar_out/a.txt' } equalTo:'hello tar';
+        .isTrue:{ ([IO]File.read:'/tmp/qn_t_tar_out/sub/big.txt').length > 2000 };
+        "* A crafted '../evil' member throws before anything escapes the target.
+        var evilPath = '/tmp/qn_t_tar_evil.tar';
+        var w = [IO]File.create:evilPath;
+        w.writeAll:(craftTar.valueWithArgs:#( '../evil.txt' 'gotcha' ));
+        w.close;
+        var evil = [Archive]Tar.over:(([IO]File.open:evilPath).byteStream);
+        .does:{ evil.extractTo:'/tmp/qn_t_tar_out' } throw:ValueError;
+        .isFalse:{ [IO]File.exists?:'/tmp/qn_t_evil.txt' };
+        .isFalse:{ [IO]File.exists?:'/tmp/evil.txt' };
+    };
+
+    .test:
+    craftedAndCorrupt -> {
+        "* Our crafted archive is honest tar: the reader accepts it whole.
+        var p = '/tmp/qn_t_tar_craft.tar';
+        var w = [IO]File.create:p;
+        w.writeAll:(craftTar.valueWithArgs:#( 'made/by/hand.txt' 'crafted' ));
+        w.close;
+        var tar = [Archive]Tar.over:(([IO]File.open:p).byteStream);
+        var e = tar.next;
+        .is:{ e.name } equalTo:'made/by/hand.txt';
+        .is:{ e.text } equalTo:'crafted';
+        .is:{ tar.next } equalTo:nil;
+        "* Corrupt one header byte -> the checksum catches it.
+        var bytes = craftTar.valueWithArgs:#( 'x.txt' 'data' );
+        var broken = (Bytes.of:#( 90 )) + (bytes.from:1 to:(bytes.count));
+        var w2 = [IO]File.create:p;
+        w2.writeAll:broken;
+        w2.close;
+        var bad = [Archive]Tar.over:(([IO]File.open:p).byteStream);
+        .does:{ bad.next } throw:ParseError;
+    };
+}

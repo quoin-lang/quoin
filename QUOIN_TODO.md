@@ -610,7 +610,17 @@ deferred `Mirror` in `## REPL`.
   path must learn to finish the encoder first, or collected handles write corrupt archives.
 - [x] ⭐ **zstd** — decode via `ruzstd` (pure Rust) as `Bytes.decodeZstd`. Encode deferred (no
   pure-Rust zstd compressor — would need the C `zstd` crate). `src/runtime/compress.rs`.
-- [ ] **tar** (`tar`) and **zip** (`zip`) — archive read/write.
+- [x] **tar READ** — `[Archive]Tar`/`[Archive]TarEntry` (`qnlib/core/15-tar.qn`, PURE QUOIN over
+  ByteStream — tar is 512-byte headers + octal fields, i.e. `readExactly:` work; `.tar.gz` =
+  compose with `gunzip`). Streaming one-pass entries (read `bytes` before advancing; skipped
+  content never materializes), ustar prefix + GNU 'L' + pax `path=`, checksum verification →
+  ParseError, `extractTo:` with normalized+CONFINED paths (traversal attack pinned by a
+  hand-crafted archive in `qnlib/tests/73-tar.qn`; real fixtures come from the system tar via
+  [OS]Process). Book §44.
+- [ ] **tar WRITE** — wants streaming gzip ENCODE first (the trailer-on-close problem recorded
+  under the compression item); plain `.tar` write could ship earlier if needed.
+- [ ] **zip** (`zip`) — archive read/write; needs central-directory (non-streaming) reading, its
+  own design.
 
 **System & process**
 - [x] ⭐ **Environment** — `[OS]Env` read/iterate shipped (`src/runtime/os.rs`, tests
@@ -799,6 +809,17 @@ deferred `Mirror` in `## REPL`.
   inconsistent with the strict-Boolean family (`if:`/`whileDo:` raise on non-Bool since the
   bug-hunt F1/F14 fixes; the comparator result is the remaining truthiness leak in a
   documented-strict position). Minor: raise like `whileDo:` does, or document.
+- [ ] **`var x = x` in a `new:{}` block read nil in one specific context** (2026-07-11,
+  found writing [Archive]Tar). In `[Archive]Tar#next`, `TarEntry.new:{ var name = name; … }`
+  bound @name to nil although a debug print showed `name` = './' immediately before the
+  construction; renaming the enclosing locals (`entryName` etc.) fixed it — the workaround
+  shipped in `qnlib/core/15-tar.qn` (`next`). THREE minimization attempts did NOT reproduce:
+  seven self-shadowed vars at top level; class method + whileDo + 3-deep else + `^^` + mixin +
+  intervening self-sends; multiple self-shadowed vars in a method. The failing shape had, in
+  addition: the outer var initialized from a `@field.defined?.if:else:` chain, the enclosing
+  class carrying same-named state, and 7 block vars. Needs VM-level debugging (env-frame capture
+  in instantiation blocks?) — start by restoring the original names in 15-tar.qn and bisecting
+  the real site.
 - [ ] **Builder-panic parse errors leak the raw Rust panic banner to stderr** before the
   graceful report. The F4/F7 fix converts post-pest AST-builder panics (int literal ≥ 2^63,
   `\uD800` surrogate escape) into catchable `ParseError`s via `catch_unwind`
