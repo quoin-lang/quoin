@@ -1,10 +1,9 @@
 # Cross-language results: Quoin vs Python vs Ruby
 
-*Measured 2026-07-10 on `perf/block-scalar-spec` @ `ed54325` (main
-post #85 plus the block-speculation arc S0-S5), Apple Silicon
-(darwin25); this run adds the `fib_untyped_32` row. The previous table
-(2026-07-06, the ic-direct-calls tip `80a209b`) is preserved below for
-the delta story.*
+*Measured 2026-07-10 on `perf/startup-tax` @ `106644a` (the
+block-speculation arc plus the map/set small-collection tier), Apple
+Silicon (darwin25). The previous table (2026-07-06, the ic-direct-calls
+tip `80a209b`) is preserved below for the delta story.*
 ## Methodology
 
 - **Whole-process wall time** (startup + load + compile + run), median of 5
@@ -32,22 +31,23 @@ the delta story.*
 
 | bench          | quoin | python | ruby  | rb-yjit | py/qn | rb/qn | yjit/qn |
 |----------------|------:|-------:|------:|--------:|------:|------:|--------:|
-| btrees         | 0.287 | 0.193  | 0.121 | 0.061   | 0.67  | 0.42  | 0.21    |
-| combinators    | 0.097 | 0.047  | 0.050 | 0.046   | 0.49  | 0.52  | 0.47    |
-| fib_typed      | 0.035 | 0.191  | 0.119 | 0.041   | **5.52** | **3.44** | **1.18** |
-| fib_untyped    | 0.020 | 0.083  | 0.061 | 0.032   | **4.15** | **3.02** | **1.60** |
-| fib_untyped_32 | 0.035 | 0.191  | 0.119 | 0.041   | **5.51** | **3.44** | **1.18** |
-| json           | 0.288 | 0.220  | 0.119 | 0.119   | 0.76  | 0.41  | 0.41    |
-| maps           | 0.152 | 0.074  | 0.086 | 0.078   | 0.49  | 0.57  | 0.51    |
-| richards       | 0.313 | 0.096  | 0.081 | 0.046   | 0.31  | 0.26  | 0.15    |
-| sieve          | 0.105 | 0.302  | 0.192 | 0.099   | **2.89** | **1.83** | 0.95 |
-| strings        | 0.079 | 0.046  | 0.073 | 0.069   | 0.58  | **0.92** | 0.87 |
-| **geomean**    |       |        |       |         | **1.23** | 0.98  | 0.60 |
+| btrees         | 0.296 | 0.200  | 0.124 | 0.062   | 0.68  | 0.42  | 0.21    |
+| combinators    | 0.097 | 0.048  | 0.050 | 0.046   | 0.50  | 0.52  | 0.47    |
+| fib_typed      | 0.035 | 0.197  | 0.122 | 0.041   | **5.64** | **3.50** | **1.18** |
+| fib_untyped    | 0.021 | 0.086  | 0.062 | 0.031   | **4.12** | **2.98** | **1.47** |
+| fib_untyped_32 | 0.035 | 0.197  | 0.123 | 0.041   | **5.68** | **3.54** | **1.18** |
+| json           | 0.259 | 0.226  | 0.121 | 0.121   | 0.87  | 0.47  | 0.47    |
+| maps           | 0.131 | 0.073  | 0.086 | 0.078   | 0.56  | 0.66  | 0.60    |
+| richards       | 0.317 | 0.098  | 0.082 | 0.046   | 0.31  | 0.26  | 0.14    |
+| sieve          | 0.104 | 0.309  | 0.193 | 0.100   | **2.96** | **1.85** | 0.96 |
+| strings        | 0.080 | 0.045  | 0.074 | 0.069   | 0.57  | **0.93** | 0.87 |
+| **geomean**    |       |        |       |         | **1.27** | **1.01**  | 0.61 |
 
-**Geomeans are not comparable across tables with different row sets**: this
-table adds `fib_untyped_32` (a Quoin-favorable row), which alone moves the
-py/qn geomean 1.04 → 1.23. On the previous nine-bench set this run measures
-**1.04** — that is the number to compare against the 07-06 table's 1.07.
+**Geomeans are not comparable across tables with different row sets**: the
+`fib_untyped_32` row (Quoin-favorable) inflates the 10-row py/qn geomean.
+On the previous nine-bench set this run works out to **~1.08** — the number
+comparable to the 07-06 table's 1.07 — and rb/qn crossed parity (**1.01**;
+Quoin now ties plain Ruby on the suite geomean).
 
 `fib_untyped_32` is `fib_typed`'s exact workload (n = 32) with the
 annotations deleted — the row that makes the **speculation tax** directly
@@ -81,16 +81,31 @@ direct self-recursion and demoted the speculated scalar return to Obj —
 an unnoticed 8x on the headline row. The pure-set scan now masks
 guarded-conditional cold spans.
 
-Two drifts vs the 07-06 table are NOT explained by this branch (every
-row measured flat-or-better under interleaved A/B against main):
+The 07-06 "drift" is now fully accounted (era binaries rebuilt at
+`80a209b` and measured in the same build flavor):
 
-1. **A ~5-9ms across-the-board startup tax** — visible on rows with no
-   arc-relevant code at all (strings +5ms, sieve +5ms, richards +7ms,
-   fib_typed +9ms). Between the tables sit ~25 merges including the
-   embedded/relocatable stdlib and the language-reference-era prelude
-   growth. fib_untyped's floor moved the same way (pre-F1 checkout
-   measures 0.01 profiling where today's repaired build is 0.02).
-2. **json +32%** (0.231 → 0.305) — exceeds the startup tax; untracked.
+1. **json's +21% was real** — bisected to PR #71 (map-any-keys), whose
+   validation checked `maps.qn` steady-state but never ran json. Fixed on
+   this branch: a small-collection linear tier for Map and Set (≤16 entries
+   scan the cached hashes; the index builds on crossing and drops on
+   shrinking), plus `vm.new_map` taking ordered pairs directly instead of a
+   throwaway SipHash IndexMap every native constructor built and tore down.
+   json 0.296 → 0.259, maps 0.131 (now ahead of the 07-06 0.138). The ~4%
+   json residue vs 07-06 is the any-key design's inherent per-key Gc string
+   allocation — a semantic feature. The pre-index reference runs the
+   20k-membership guard workload in 17.6 SECONDS, so the index's purpose is
+   untouched; the tier costs it +2-4% in profiling builds.
+2. **Startup grew +2.2ms** (8.5 → 10.7ms AOT-on, profiling flavor) — and it
+   is organic: each new auto-loaded `qnlib/core` file adds parse + compile
+   + execute to every startup (the bisect's largest single step was
+   11-plan.qn's 216 lines). Composition at 0.1ms sampling: ~26% eager
+   Cranelift compilation of annotated stdlib candidates at load, ~13% pest
+   parse, ~11% bytecode compile, the rest prelude execution. The recorded
+   open: tier annotated stdlib methods lazily like speculative methods and
+   block templates already are — needs a design pass on sibling
+   direct-call GROUP compilation before it can land.
+3. Everything else was **PGO-flavor variance**: in matched profiling-flavor
+   A/B, richards/strings/maps/btrees all improved 80a209b → main.
 
 What remains behind, in measured order: the outcall shell (richards
 3.2x behind CPython; D3's direct-edge tier ships default-off — its gate
