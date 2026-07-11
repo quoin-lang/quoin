@@ -80,7 +80,8 @@ LSP/VSCode tooling, Windows.
   operator is a prefix starting a new element exactly when it is detached from
   its left operand and glued to its right one; every other spacing is infix, so
   `#(5-3)` is still `#(2)`. Done in `parse_literal_elements`, not the grammar
-  (pest has no lookbehind). See BUGS.md Finding 11.
+  (pest has no lookbehind). See BUGS.md Finding 11 (retired 2026-07-10 — in git
+  history at the removal commit; all findings verified fixed).
 
 ## Tier 2 — language reference (`docs/language/`)
 
