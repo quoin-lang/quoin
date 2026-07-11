@@ -1,0 +1,73 @@
+"* Streaming gunzip over registry streams (src/io_codecs.rs table + the generic
+"* IoRequest::WrapStream): `byteStream.gunzip` / `stringStream.gunzip` wrap the
+"* stream IN PLACE, so everything downstream (readAll, readLine, a future tar
+"* reader) sees decompressed bytes without materializing the whole.
+(TestSuite.new:{ var name = 'GzipStream' }).add:{
+    .test:
+    roundTripAcrossChunkBoundaries -> {
+        "* Well past the 16 KiB fill-buffer size, so the decoder spans many chunks.
+        var payload = ((1..5000).collect:{ |i| 'line-%1-%2' % #( i (i * 7) ) }).join:'
+';
+        var p = '/tmp/qn_t_gz_round.gz';
+        var w = [IO]File.create:p;
+        w.writeAll:(payload.asBytes.encodeGz);
+        w.close;
+        .is:{ (([IO]File.open:p).byteStream.gunzip.readAll).asString } equalTo:payload;
+        [IO]File.delete:p;
+    };
+
+    .test:
+    multipleMembersDecodeEndToEnd -> {
+        "* Concatenated gzip members (how some tools produce .gz) decode as one.
+        var p = '/tmp/qn_t_gz_multi.gz';
+        var w = [IO]File.create:p;
+        w.writeAll:('first '.asBytes.encodeGz);
+        w.writeAll:('second'.asBytes.encodeGz);
+        w.close;
+        .is:{ (([IO]File.open:p).byteStream.gunzip.readAll).asString } equalTo:'first second';
+        [IO]File.delete:p;
+    };
+
+    .test:
+    linesOverGunzip -> {
+        "* The point of wrapping in place: the native line machinery just works.
+        var p = '/tmp/qn_t_gz_lines.gz';
+        var w = [IO]File.create:p;
+        w.writeAll:('alpha
+beta
+gamma'.asBytes.encodeGz);
+        w.close;
+        var s = ([IO]File.open:p).stringStream.gunzip;
+        .is:{ s.readLine } equalTo:'alpha';
+        .is:{ s.readLine } equalTo:'beta';
+        .is:{ s.readLine } equalTo:'gamma';
+        .is:{ s.readLine } equalTo:nil;
+        s.close;
+        [IO]File.delete:p;
+    };
+
+    .test:
+    guardsAndErrors -> {
+        var p = '/tmp/qn_t_gz_guard.gz';
+        var w = [IO]File.create:p;
+        w.writeAll:'not gzip at all'.asBytes;
+        w.close;
+        "* An unknown codec errs and leaves the stream usable.
+        var s = ([IO]File.open:p).byteStream;
+        { s.codecWrap:'nope'; !!! }
+            .catch:{ |e:IoError| .is:{ e.message } equalTo:'unknown stream codec \'nope\'' };
+        .is:{ s.readAll.asString } equalTo:'not gzip at all';
+        "* Wrapping after a read refuses (buffered raw bytes would be lost).
+        var r = ([IO]File.open:p).byteStream;
+        r.read:1;
+        .does:{ r.gunzip } throw:IoError;
+        r.close;
+        "* Corrupt input surfaces as a catchable IoError on read.
+        .does:{ ([IO]File.open:p).byteStream.gunzip.readAll } throw:IoError;
+        "* A write stream has no read side to wrap.
+        var ws = [IO]File.create:p;
+        .does:{ ws.codecWrap:'gunzip' } throw:IoError;
+        ws.close;
+        [IO]File.delete:p;
+    };
+}

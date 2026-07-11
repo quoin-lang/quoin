@@ -39,3 +39,23 @@ String <-- {
     "* ```
     toBase64 -> { Base64.encode:self.asBytes }
 }
+
+"* Streaming decompression sugar over the generic `codecWrap:` (whose codec table lives
+"* in src/io_codecs.rs — a new codec is a table entry there plus a one-liner here).
+ByteStream <-- {
+    "* Wrap this (unread) stream so reads yield gunzipped bytes — the streaming twin
+    "* of `Bytes#decodeGz`, for reading `.gz`/`.tar.gz` without materializing the
+    "* decompressed whole. Answers the receiver; concatenated gzip members decode
+    "* end to end.
+    "*
+    "* ```
+    "* ([IO]File.open:'big.tar.gz').byteStream.gunzip    "* a streaming gunzip source
+    "* ```
+    gunzip -> { ^.codecWrap:'gunzip' }
+}
+
+StringStream <-- {
+    "* As `ByteStream#gunzip`, decoding the gunzipped bytes as UTF-8 text — gzipped
+    "* logs read line by line without materializing anything.
+    gunzip -> { ^.codecWrap:'gunzip' }
+}

@@ -600,7 +600,14 @@ deferred `Mirror` in `## REPL`.
 **Compression & archives**
 - [x] ⭐ **gzip / zlib / deflate** — one-shot (de)compression as `Bytes` methods
   (`decodeGz`/`encodeGz`, `decodeDeflate`/`encodeDeflate`) via flate2's miniz_oxide backend
-  (pure Rust). `src/runtime/compress.rs`. Remaining: streaming (incremental) over a `ByteStream`.
+  (pure Rust). `src/runtime/compress.rs`. **Streaming READ shipped** (2026-07-11):
+  `ByteStream/StringStream#gunzip` wraps the registry stream IN PLACE via the generic
+  `IoRequest::WrapStream` + the codec factory table in `src/io_codecs.rs` — adding a codec is a
+  table entry + a qnlib sugar one-liner; the async machinery never changes again (parameterized
+  wraps like TLS stay bespoke). Multi-member gz decodes end to end; unread-stream precondition
+  enforced. Tests `qnlib/tests/72-gzip-stream.qn`. **Streaming WRITE deferred to tar-write**: the
+  gzip trailer is written by the encoder's close, but the reap path only DROPS fds — the close
+  path must learn to finish the encoder first, or collected handles write corrupt archives.
 - [x] ⭐ **zstd** — decode via `ruzstd` (pure Rust) as `Bytes.decodeZstd`. Encode deferred (no
   pure-Rust zstd compressor — would need the C `zstd` crate). `src/runtime/compress.rs`.
 - [ ] **tar** (`tar`) and **zip** (`zip`) — archive read/write.

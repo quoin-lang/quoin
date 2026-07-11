@@ -132,7 +132,11 @@ JSON.generate:#{ 'a':1 }    "* -> {"a":1}
 question of which encoding applied. Compression is built in as Bytes codecs:
 gzip and deflate both ways (`encodeGz`/`decodeGz`, `encodeDeflate`/
 `decodeDeflate`), zstandard decode (`decodeZstd`); malformed input raises a
-catchable `ParseError`.
+catchable `ParseError`. Decompression also *streams*: `gunzip` on an unread
+`ByteStream`/`StringStream` wraps it in place, so a `.gz` file — or the `.gz`
+half of a `.tar.gz` — reads incrementally through the ordinary stream methods
+(`readAll`, `readLine`, `eachLine:`), nothing materialized. Concatenated gzip
+members decode end to end; corrupt input is a catchable `IoError` on read.
 
 ```quoin
 'hello'.asBytes.encodeGz.decodeGz.asString    "* -> hello

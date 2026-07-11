@@ -107,6 +107,9 @@ httparse = "1"
 # gzip + deflate via flate2's miniz_oxide backend (`rust_backend`); zstd *decode* via
 # ruzstd. Both pure Rust — no C toolchain dependency, matching the ring/jiff choices.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Streaming (de)compression over registry streams (io_codecs.rs): drives flate2
+# through futures::io::AsyncRead — the trait the stream registry stores.
+async-compression = { version = "0.4", default-features = false, features = ["futures-io", "gzip"] }
 ruzstd = "0.8"
 console = "0.15"
 mimalloc = { version = "0.1", optional = true }

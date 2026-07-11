@@ -20,6 +20,7 @@ pub mod highlighter;
 pub mod instruction;
 pub mod introspect;
 pub mod io_backend;
+pub mod io_codecs;
 pub mod packages;
 pub mod parser;
 pub mod repl_complete;

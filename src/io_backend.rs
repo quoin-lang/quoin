@@ -262,6 +262,12 @@ pub enum IoRequest {
     /// on the same child errs rather than panicking (kill goes by pid and never
     /// borrows, so killing a waited-on child works and resolves the wait).
     ChildWait { id: u64 },
+    /// Wrap the stream at `id` in a named codec IN PLACE (same id — the TlsWrap
+    /// mechanics, made generic): take it out of the registry, pass it through the
+    /// `io_codecs` factory table, put the transformed stream back. The codec table
+    /// is the extension point — this op never grows another variant per codec.
+    /// An unknown codec errs and leaves the original stream untouched.
+    WrapStream { id: StreamId, codec: String },
 }
 
 /// The plain-data outcome of an [`IoRequest`].
@@ -360,6 +366,7 @@ impl IoRequest {
                 format!("proc: spawn {}", program.to_string_lossy())
             }
             IoRequest::ChildWait { .. } => "proc: wait".to_string(),
+            IoRequest::WrapStream { codec, .. } => format!("io: wrap {codec}"),
         }
     }
 }
@@ -963,6 +970,20 @@ impl IoBackend for SmolBackend {
                 }
             }),
 
+            IoRequest::WrapStream { id, codec } => Box::pin(async move {
+                // Resolve the codec BEFORE taking the stream, so an unknown name
+                // errs with the stream (and its fd) untouched in the registry.
+                let wrap = match crate::io_codecs::lookup(&codec) {
+                    Ok(f) => f,
+                    Err(e) => return IoResult::Err(e),
+                };
+                let stream = match take_stream(&inner, id) {
+                    Ok(s) => s,
+                    Err(e) => return IoResult::Err(e),
+                };
+                IoResult::Connected(inner.insert_at(id, wrap(stream)))
+            }),
+
             IoRequest::OpenFile { path } => Box::pin(async move {
                 // `async-fs` opens on the blocking pool (regular files aren't pollable),
                 // same trick as `async-net`'s DNS. The `File` is `AsyncRead + AsyncWrite +
@@ -1344,6 +1365,10 @@ impl IoBackend for MockBackend {
             | IoRequest::ChildWait { .. } => IoResult::Err(IoError {
                 kind: std::io::ErrorKind::Unsupported,
                 message: "the mock backend has no subprocess support".to_string(),
+            }),
+            IoRequest::WrapStream { .. } => IoResult::Err(IoError {
+                kind: std::io::ErrorKind::Unsupported,
+                message: "the mock backend has no stream codecs".to_string(),
             }),
             IoRequest::Write { bytes, .. } => {
                 let n = bytes.len();
