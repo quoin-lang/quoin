@@ -171,9 +171,24 @@ filesystem, which is exactly what makes it safe on a path you are about to
 create. Filesystem truth (existence, deletion, renames) lives on `[IO]File` and
 `[IO]Folder`.
 
+**[OS]Process** runs subprocesses *on the scheduler*: `run:` parks the calling
+task for the child's whole lifecycle — other tasks keep running — and answers a
+**ProcessResult** (`stdout`/`stderr`, `exitCode`, `ok?`, and `check`, which
+turns failure into a typed `ProcessError` carrying the result). The command is
+a List (program + arguments): there is **no shell**, so nothing splits, globs,
+or injects — and `run:env:` sets variables for the *child*, which is why
+`[OS]Env` itself can stay read-only. `start:` spawns for streaming: the handle's
+`stdout`/`stderrText` read like sockets, `writeStdin:`/`closeStdin` feed it,
+`wait`/`kill`/`terminate` manage it. Lifecycle is owned, not leaked: a
+cancelled `run:` (an `Async.timeout:` firing) kills its child, an undetached
+handle's child dies with it, and `detach` is the explicit opt-out.
+
 ```quoin
 [OS]Path.join:#('etc' 'app' 'conf.toml')                "* -> etc/app/conf.toml
 [OS]Env.at:'QN_SURELY_UNSET' ifAbsent:{ 'fallback' }    "* -> fallback
+([OS]Process.run:#( 'echo' 'hi' )).stdout               "* -> 'hi\n'
+([OS]Process.run:#( 'cat' ) input:'meow').stdout        "* -> 'meow'
+([OS]Process.run:#( 'false' )).ok?                      "* -> false
 ```
 
 ### Terminal & logging

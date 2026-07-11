@@ -198,6 +198,16 @@ Error <- NotImplementedError <- {}
 "* ```
 Error <- UnreachableError <- {}
 
+"* A subprocess failed its `check`: nonzero exit (or death by signal) where success was
+"* required. The payload is the full ProcessResult, so a handler can read the exit code
+"* and stderr.
+"*
+"* ```
+"* { ([OS]Process.run:#( 'false' )).check }.catch:{ |e:ProcessError| e.payload.exitCode }
+"* "* -> 1
+"* ```
+Error <- ProcessError <- {}
+
 "* A recursion the VM refused before it could overflow the machine stack: a block that
 "* re-enters itself (an `each:` body re-iterating its own receiver, a self-nesting
 "* `catch:`), or a custom `==:`/`hash`/comparator hook re-entering a native operation.

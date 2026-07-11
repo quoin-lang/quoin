@@ -34,6 +34,7 @@ pub mod nil;
 pub mod object;
 pub mod os;
 pub mod pretty;
+pub mod process;
 pub mod regex;
 pub mod runtime;
 pub mod set;

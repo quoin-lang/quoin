@@ -606,8 +606,18 @@ deferred `Mirror` in `## REPL`.
   threads, and the real use case (configuring a child) belongs to the subprocess item below.
 - [x] ⭐ **Path** — `[OS]Path` shipped (`src/runtime/os.rs`, tests `57-os-path.qn`). *(Box was
   stale — verified 2026-07-11.)*
-- [ ] **Process / subprocess** — spawn a command, capture stdout/stderr/exit; async-aware (parks on
-  the scheduler like socket I/O).
+- [x] **Process / subprocess** — `[OS]Process` (`src/runtime/process.rs` + `core/12-os.qn`,
+  `async-process` on the same smol reactor). `run:`/`run:input:env:dir:` parks the task for the
+  whole lifecycle → ProcessResult (`ok?`, `check` → typed ProcessError w/ the result as payload);
+  `start:` → streaming handle (pipes are registry streams — `stdout(Text)`/`stderr(Text)` read
+  like sockets, `writeStdin:`/`closeStdin`; `wait`/`kill`/`terminate`/`running?`/`detach`).
+  Command = List, NO shell by design; `env:` sets vars for the CHILD (resolving the [OS]Env
+  set question above). Lifecycle owned: cancelled `run:` kills its child (`kill_on_drop`),
+  undetached handle collected → child-reap queue kills it, VM teardown kills undetached
+  survivors, `detach` opts out. Kill goes by PID (never borrows the Child — a parked `ChildWait`
+  holds its only `&mut`); one wait at a time by construction. Tests `qnlib/tests/70-process.qn`;
+  book §44. Deferred: `runShell:` convenience, PTY allocation, a pipeline DSL (compose via
+  streams meanwhile).
 - [x] ⭐ **`[IO]Stdin`** — shipped (`src/runtime/io.rs` + `qnlib/core/06-io.qn`, tests
   `59-io-stdin.qn`). *(Box was stale — verified 2026-07-11.)*
 - [ ] **CLI argument parsing** — options/flags/positionals/subcommands on top of
