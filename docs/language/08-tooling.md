@@ -164,6 +164,12 @@ Sort in place, ascending by the elements' `>:`, and answer the receiver; nils so
 >   `does:notMatch:` (the `~` pattern protocol, §14); `does:resultIn:`
 >   (effects); `does:throw:`; `elementsOf:areEqualTo:`. `.skip:'reason'` in an
 >   `add:` block skips the suite without failing the run.
+> - **Lifecycle hooks**, declared in the `add:` block like tests:
+>   `.setup:{ … }` / `.teardown:{ … }` run around **each** test;
+>   `.setupAll:{ … }` / `.teardownAll:{ … }` run once per suite. Share fixture
+>   state by capturing a `var`. Several of the same hook accumulate: setups
+>   run in declaration order, teardowns in reverse (they unwind). A skipped
+>   suite runs no hooks.
 > - **Exit code**: `0` when everything passes, `1` on any failure — the CI gate.
 > - `--coverage[=lcov|cobertura]` collects Quoin-level coverage: the report
 >   goes to stdout (or `--coverage-out PATH`), a one-line summary to stderr.
@@ -207,6 +213,24 @@ flips the exit code:
 All suites finished in 8µs (15.6ms) : 0 passes / 1 failures / 0 skipped
 $ echo $?
 1
+```
+
+A fixture every test reads belongs in `setupAll:`, its removal in
+`teardownAll:` — built once, cleaned up even when tests fail; use `setup:` /
+`teardown:` instead when a test *mutates* the fixture and the next one needs
+it fresh:
+
+```quoin
+(TestSuite.new:{ var name = 'Config' }).add:{
+    var path = '/tmp/hooks_example.json';
+    .setupAll:{ [IO]File.write:'{"port": 8080}' to:path };
+    .teardownAll:{ [IO]File.delete:path };
+
+    .test:
+    readsPort -> {
+        .is:{ (JSON.parse:([IO]File.read:path)).at:'port' } equalTo:8080;
+    };
+}
 ```
 
 The framework itself is ordinary, documented Quoin — for the full assertion

@@ -380,7 +380,7 @@ TestResult <- { |@test @name @assertions @elapsed @wallElapsed|
 "*     }
 "* }
 "* ```
-TestSuite <- { |@name @tests @skipped? @reason|
+TestSuite <- { |@name @tests @skipped? @reason @setups @teardowns @setupAlls @teardownAlls|
     "* Register the new suite under `name` in [Test]Suites — registration IS
     "* construction; there is no separate register call.
     init: -> { |name:String|
@@ -388,6 +388,10 @@ TestSuite <- { |@name @tests @skipped? @reason|
 
         @tests = #()
         @skipped? = false
+        @setups = #()
+        @teardowns = #()
+        @setupAlls = #()
+        @teardownAlls = #()
         [Test]Suites.add:self
     }
 
@@ -411,6 +415,47 @@ TestSuite <- { |@name @tests @skipped? @reason|
     skipped? -> { @skipped? }
     "* The reason passed to skip:, or nil when the suite runs.
     reason -> { @reason }
+
+    "* Declare a block to run before EACH test — per-test fixture
+    "* construction. Share state with the tests the ordinary way: capture a
+    "* `var` from the enclosing scope. Multiple setup: blocks run in
+    "* declaration order. Answers self.
+    setup: -> { |b:Block|
+        @setups.add:b
+        ^self
+    }
+    "* Declare a block to run after EACH test — the setup:'s undo, run
+    "* whether or not the test's assertions passed. Multiple teardown:
+    "* blocks run in REVERSE declaration order (last declared, first run —
+    "* teardowns unwind). Answers self.
+    teardown: -> { |b:Block|
+        @teardowns.add:b
+        ^self
+    }
+    "* Declare a block to run ONCE, before the suite's first test — for a
+    "* fixture every test shares read-only (build files, start a server).
+    "* Multiple setupAll: blocks run in declaration order. Answers self.
+    setupAll: -> { |b:Block|
+        @setupAlls.add:b
+        ^self
+    }
+    "* Declare a block to run ONCE, after the suite's last test — remove
+    "* what setupAll: built. Multiple teardownAll: blocks run in REVERSE
+    "* declaration order. Answers self.
+    teardownAll: -> { |b:Block|
+        @teardownAlls.add:b
+        ^self
+    }
+
+    "* Internal: run the setup: blocks, in declaration order. TestRunner
+    "* calls this before each test; a skipped suite's hooks never run.
+    runSetup -> { @setups.each:{ .value } }
+    "* Internal: run the teardown: blocks, in reverse declaration order.
+    runTeardown -> { @teardowns.reverse.each:{ .value } }
+    "* Internal: run the setupAll: blocks, in declaration order.
+    runSetupAll -> { @setupAlls.each:{ .value } }
+    "* Internal: run the teardownAll: blocks, in reverse declaration order.
+    runTeardownAll -> { @teardownAlls.reverse.each:{ .value } }
 
     "* Declare the suite's contents: the block runs with the suite as `self`,
     "* so bare `.test:` (and `.skip:`) sends inside it land here. Answers
@@ -600,8 +645,10 @@ TestRunner <- { |@suites|
     suites -> { @suites }
 
     "* Run every enrolled suite in order against `reporter`; a skipped suite
-    "* fires its reporter hooks but runs no tests. Answers the flattened List
-    "* of TestResults.
+    "* fires its reporter hooks but runs no tests and no lifecycle hooks.
+    "* setupAll:/teardownAll: blocks bracket the suite's tests; setup:/
+    "* teardown: blocks bracket each test. Answers the flattened List of
+    "* TestResults.
     run: -> { |reporter|
         var results = #()
         reporter.startRun:@suites
@@ -614,15 +661,23 @@ TestRunner <- { |@suites|
                 var elapsed = Timer.time:{
                     tr = s.skipped?.if:{ #() }
                     else:{
-                        s.tests.collect:{ #collectTests |t|
+                        s.runSetupAll
+                        var rs = s.tests.collect:{ #collectTests |t|
+                            "* Hooks bracket the reported run, outside the test's own
+                            "* clock: fixture time lands in the suite's wall time, not
+                            "* the test's.
+                            s.runSetup
                             reporter.startTest:t
 
                             var r = t.run:reporter
 
                             reporter.endTest:r
+                            s.runTeardown
 
                             ^r
                         }
+                        s.runTeardownAll
+                        rs
                     }
                 }
 

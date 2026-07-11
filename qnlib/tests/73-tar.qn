@@ -1,22 +1,8 @@
 "* [Archive]Tar (core/15-tar.qn): streaming tar reading, pure Quoin over ByteStream.
 "* Fixtures come from the SYSTEM tar via [OS]Process (real ustar/pax output, long
 "* names and all) — the whole branch dogfooding itself — plus a hand-crafted header
-"* for the traversal attack and the checksum check.
-
-"* Build the fixture tree once and tar it both ways; every test reads fresh.
-var tarFixture = {
-    var src = '/tmp/qn_t_tar_src'
-    [OS]Process.run:#( 'rm' '-rf' src '/tmp/qn_t_tar.tar' '/tmp/qn_t_tar.tgz' )
-    [IO]Folder.create:src
-    [IO]Folder.create:(src + '/sub')
-    [IO]File.write:'hello tar' to:(src + '/a.txt')
-    [IO]File.write:(((1..800).collect:{ |i| i.s }).join:',') to:(src + '/sub/big.txt')
-    var long = ((1..12).collect:{ 'directory-' }).join:''
-    [IO]File.write:'deep' to:(src + '/' + long + '.txt')
-    ([OS]Process.run:#( 'tar' '-cf' '/tmp/qn_t_tar.tar' '-C' src '.' )).check
-    ([OS]Process.run:#( 'tar' '-czf' '/tmp/qn_t_tar.tgz' '-C' src '.' )).check
-    nil
-}
+"* for the traversal attack and the checksum check. The fixture tree is built once
+"* in setupAll: (every test reads it fresh) and teardownAll: removes the litter.
 
 "* A minimal valid-checksum ustar header + content block for `name`, crafted byte
 "* by byte (octal fields, 512 padding) — how we forge a malicious archive.
@@ -62,9 +48,31 @@ var craftTar = { |name content|
 }
 
 (TestSuite.new:{ var name = 'Tar' }).add:{
+    "* Build the fixture tree once and tar it both ways. The pre-clean guards
+    "* against litter from an interrupted earlier run (teardownAll: never ran).
+    .setupAll:{
+        var src = '/tmp/qn_t_tar_src';
+        [OS]Process.run:#( 'rm' '-rf' src '/tmp/qn_t_tar.tar' '/tmp/qn_t_tar.tgz' );
+        [IO]Folder.create:src;
+        [IO]Folder.create:(src + '/sub');
+        [IO]File.write:'hello tar' to:(src + '/a.txt');
+        [IO]File.write:(((1..800).collect:{ |i| i.s }).join:',') to:(src + '/sub/big.txt');
+        var long = ((1..12).collect:{ 'directory-' }).join:'';
+        [IO]File.write:'deep' to:(src + '/' + long + '.txt');
+        ([OS]Process.run:#( 'tar' '-cf' '/tmp/qn_t_tar.tar' '-C' src '.' )).check;
+        ([OS]Process.run:#( 'tar' '-czf' '/tmp/qn_t_tar.tgz' '-C' src '.' )).check;
+    };
+
+    .teardownAll:{
+        ([OS]Process.run:#(
+            'rm' '-rf'
+            '/tmp/qn_t_tar_src' '/tmp/qn_t_tar.tar' '/tmp/qn_t_tar.tgz'
+            '/tmp/qn_t_tar_out' '/tmp/qn_t_tar_evil.tar' '/tmp/qn_t_tar_craft.tar'
+        )).check;
+    };
+
     .test:
     readsRealArchives -> {
-        tarFixture.value;
         var entries = #{};
         var tar = [Archive]Tar.over:(([IO]File.open:'/tmp/qn_t_tar.tar').byteStream);
         tar.each:{ |e|
@@ -105,7 +113,6 @@ var craftTar = { |name content|
 
     .test:
     extractionIsConfined -> {
-        tarFixture.value;
         [OS]Process.run:#( 'rm' '-rf' '/tmp/qn_t_tar_out' );
         var tar = [Archive]Tar.over:(([IO]File.open:'/tmp/qn_t_tar.tgz').byteStream.gunzip);
         tar.extractTo:'/tmp/qn_t_tar_out';
