@@ -19,10 +19,12 @@ fn coverage_distinguishes_called_and_uncalled_methods() {
     )
     .unwrap();
 
+    // qn's own flags go BEFORE the file — everything after it belongs to the
+    // program (the file-run pass-through).
     let status = Command::new(env!("CARGO_BIN_EXE_qn"))
-        .arg(&src)
         .arg("--coverage")
         .arg(format!("--coverage-out={}", out.display()))
+        .arg(&src)
         .status()
         .expect("run qn");
     assert!(status.success(), "qn exited with failure");

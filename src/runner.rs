@@ -534,13 +534,57 @@ enum UnitOutcome {
     ExitRequested(i32),
 }
 
+/// The index of the program FILE in raw argv for a plain file run, or `None`
+/// when this invocation is clap's whole business (a subcommand, `-e`, bare
+/// `qn`, `--help`/`--version` with no file). Walks qn's own pre-file flags:
+/// `--coverage-out` takes a separate value; everything else is either
+/// self-contained (`--coverage[=FMT]`, glued short values) or a bare flag.
+fn file_run_split(args: &[String]) -> Option<usize> {
+    use clap::CommandFactory;
+    let first = args.get(1)?;
+    if !first.starts_with('-') {
+        // A subcommand invocation (including aliases) is entirely clap's.
+        let cmd = Cli::command();
+        let is_sub = cmd.get_subcommands().any(|c| {
+            c.get_name() == first.as_str() || c.get_all_aliases().any(|a| a == first.as_str())
+        });
+        return if is_sub { None } else { Some(1) };
+    }
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "-e" {
+            // Expression mode has no FILE; clap owns the rest.
+            return None;
+        }
+        if a == "--coverage-out" {
+            i += 2;
+            continue;
+        }
+        if !a.starts_with('-') {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 impl VmRunnerOptions {
     /// Parse `argv`. `--help` / `--version` and any usage error are answered by the
     /// parser itself (printing, then exiting 0 or 2); everything that returns here is a
     /// runnable command.
     pub fn parse(args: &[String]) -> Self {
         use clap::Parser;
-        let cli = match Cli::try_parse_from(args) {
+        // File-run pass-through: locate the program FILE in raw argv and keep
+        // everything after it AWAY from clap entirely — `trailing_var_arg` alone
+        // still lets clap intercept `--help`/`--version` mid-capture, and a
+        // script's `--help` must be the SCRIPT's (`qn tool.qn --help`, or
+        // `./tool.qn --help` through a shebang). qn's own flags go before FILE.
+        let (clap_args, passthrough) = match file_run_split(args) {
+            Some(i) => (args[..=i].to_vec(), args[i + 1..].to_vec()),
+            None => (args.to_vec(), Vec::new()),
+        };
+        let cli = match Cli::try_parse_from(&clap_args) {
             Ok(cli) => cli,
             Err(e) => e.exit(),
         };
@@ -639,7 +683,10 @@ impl VmRunnerOptions {
                 }
                 (None, Some(file)) => {
                     target_path = Some(file);
+                    // With a pre-split, cli.args is empty and the program's
+                    // arguments arrive verbatim from raw argv.
                     vm_args = cli.args;
+                    vm_args.extend(passthrough);
                     coverage = cli.coverage.config();
                     VmRunnerMode::Run
                 }

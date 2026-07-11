@@ -208,6 +208,12 @@ Error <- UnreachableError <- {}
 "* ```
 Error <- ProcessError <- {}
 
+"* A command line that doesn't fit its [CLI]Spec — unknown option, missing value,
+"* missing required argument, a value outside `values:`. `[CLI]Spec.parseFrom:` throws
+"* it (testable); the production `parse` catches it, prints the message + usage to
+"* stderr, and exits 2.
+Error <- UsageError <- {}
+
 "* A recursion the VM refused before it could overflow the machine stack: a block that
 "* re-enters itself (an `each:` body re-iterating its own receiver, a self-nesting
 "* `catch:`), or a custom `==:`/`hash`/comparator hook re-entering a native operation.

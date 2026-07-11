@@ -1,0 +1,387 @@
+"* Declarative command-line parsing over `Runtime.arguments`. Build a [CLI]Spec (flags,
+"* options, positionals, a rest-splat, or subcommands), then `parse` — which handles
+"* `-h`/`--help` and turns misuse into usage + exit 2 — or `parseFrom:` (throws a typed
+"* UsageError; the testable seam `parse` wraps). GNU conventions: `--name value`,
+"* `--name=value`, short `-x`, and `--` ends option parsing. Values stay Strings —
+"* convert with `to_integer` and friends. Deliberately absent in v1: short-option
+"* clustering (`-vf`), repeatable options, and negative-number positionals (they read
+"* as unknown short options — put them after `--`).
+
+"* The parse result: `at:` reads any declared name (option, positional, rest — a name
+"* the spec never declared is a ValueError, so a typo can't read as nil), `flag?:` a
+"* boolean, `command` the chosen subcommand name (nil without one).
+[CLI]Parsed <- { |@values @command @help @known|
+    "* The value under a declared name: an option's String (default applied), a
+    "* positional's String, the rest-splat's List, a flag's Boolean.
+    at: -> { |name|
+        (@known.contains?:name).else:{
+            ValueError.throw:('no argument named \'%\' in the spec' % name)
+        }
+        ^@values.at:name
+    }
+
+    "* The flag as a Boolean (sugar over `at:`).
+    flag?: -> { |name ^Boolean| ^(.at:name) == true }
+
+    "* The chosen subcommand's name, or nil when the spec has no commands.
+    command -> { @command }
+
+    "* Whether `-h`/`--help` was given (the production `parse` answers it before
+    "* this is ever seen; `parseFrom:` callers check it themselves).
+    help? -> { @help == true }
+}
+
+"* The declarative spec. Builder methods return self, so a whole tool declares in one
+"* chain; `parse` / `parseFrom:` do the work.
+"*
+"* ```
+"* var cli = [CLI]Spec.new:'greet' about:'says hello'
+"* cli.flag:'shout' short:'s' help:'LOUDLY'
+"* cli.positional:'name' help:'whom to greet'
+"* var args = cli.parseFrom:#( '-s' 'quoin' )
+"* #( (args.at:'name') (args.flag?:'shout') )    "* -> #(quoin true)
+"* ```
+[CLI]Spec <- { |@name @about @options @positionals @rest @commands|
+    .meta <-- {
+        "* A spec for the tool `name` (the usage line's first word).
+        new: -> { |name:String| ^.new:{ var name = name } }
+
+        "* A spec with a one-line description for the help text.
+        new:about: -> { |name:String about:String|
+            ^.new:{
+                var name = name;
+                var about = about
+            }
+        }
+    }
+
+    "* Internal: the collections default empty (`new:{}` populated the scalars).
+    init -> {
+        @options.defined?.else:{ @options = #() };
+        @positionals.defined?.else:{ @positionals = #() };
+        @commands.defined?.else:{ @commands = #{} }
+    }
+
+    "* -- declaring ----------------------------------------------------------
+
+    "* A boolean flag: absent -> false, `--name` (or its short) -> true.
+    flag: -> { |long| ^.flag:long short:nil help:nil }
+    "* See `flag:`.
+    flag:help: -> { |long help| ^.flag:long short:nil help:help }
+    "* See `flag:`.
+    flag:short:help: -> { |long short help|
+        @options.add:#{ 'long': long 'short': short 'kind': 'flag' 'help': help };
+        self
+    }
+
+    "* An option taking a value: `--name value` or `--name=value`. Absent -> its
+    "* `default:` (nil without one), unless `required:true`.
+    option: -> { |long| ^.option:long short:nil default:nil required:false values:nil help:nil }
+    "* See `option:`.
+    option:help: -> { |long help|
+        ^.option:long short:nil default:nil required:false values:nil help:help
+    }
+    "* See `option:`.
+    option:short:help: -> { |long short help|
+        ^.option:long short:short default:nil required:false values:nil help:help
+    }
+    "* See `option:`.
+    option:default:help: -> { |long default help|
+        ^.option:long short:nil default:default required:false values:nil help:help
+    }
+    "* See `option:`.
+    option:short:default:help: -> { |long short default help|
+        ^.option:long short:short default:default required:false values:nil help:help
+    }
+    "* An option whose value must be one of `values:` (anything else is a UsageError
+    "* naming the choices).
+    option:values:help: -> { |long values help|
+        ^.option:long short:nil default:nil required:false values:values help:help
+    }
+    "* An option that must be given (absence is a UsageError).
+    option:required:help: -> { |long required help|
+        ^.option:long short:nil default:nil required:required values:nil help:help
+    }
+    "* See `option:required:help:`.
+    option:short:required:help: -> { |long short required help|
+        ^.option:long short:short default:nil required:required values:nil help:help
+    }
+    "* See `option:values:help:`.
+    option:short:values:help: -> { |long short values help|
+        ^.option:long short:short default:nil required:false values:values help:help
+    }
+    "* The kitchen sink — every option property, nil where unused.
+    option:short:default:required:values:help: -> { |long short default required values help|
+        @options.add:#{
+            'long': long 'short': short 'kind': 'option' 'default': default
+            'required': required 'values': values 'help': help
+        };
+        self
+    }
+
+    "* A required positional argument (assigned in declaration order).
+    positional: -> { |name| ^.positional:name help:nil }
+    "* See `positional:`.
+    positional:help: -> { |name help|
+        (@commands.count > 0).if:{
+            ValueError.throw:'a spec takes commands OR positionals, not both'
+        };
+        @positionals.add:#{ 'name': name 'help': help };
+        self
+    }
+
+    "* The trailing splat: every positional after the declared ones, as a List
+    "* (possibly empty). Without one, extras are a UsageError.
+    rest: -> { |name|
+        (@commands.count > 0).if:{
+            ValueError.throw:'a spec takes commands OR positionals, not both'
+        };
+        @rest = name;
+        self
+    }
+
+    "* A subcommand: the block configures its own sub-spec (options, positionals,
+    "* rest — not further commands). The first positional token picks the command;
+    "* after it, option lookups try the sub-spec first, then this one.
+    command:spec: -> { |name block| ^.command:name spec:block help:nil }
+    "* See `command:spec:`.
+    command:spec:help: -> { |name block help|
+        ((@positionals.count > 0) || @rest.defined?).if:{
+            ValueError.throw:'a spec takes commands OR positionals, not both'
+        };
+        var sub = [CLI]Spec.new:(@name + ' ' + name);
+        block.value:sub;
+        @commands.at:name put:#{ 'spec': sub 'help': help };
+        self
+    }
+
+    "* -- parsing ------------------------------------------------------------
+
+    "* Parse `Runtime.arguments` — the production entry: `-h`/`--help` prints the
+    "* help and exits 0; misuse prints the message + usage to stderr and exits 2.
+    parse -> {
+        var parsed = nil;
+        { parsed = .parseFrom:(Runtime.arguments) }
+            .catch:{ |e:UsageError|
+                [IO]Stderr.writeln:(e.message);
+                [IO]Stderr.writeln:'';
+                [IO]Stderr.writeln:(.helpText);
+                Runtime.exit:2
+            };
+        parsed.help?.if:{
+            [IO]Stdout.writeln:(.helpText);
+            Runtime.exit:0
+        };
+        ^parsed
+    }
+
+    "* Parse an explicit token List, throwing UsageError on misuse — the testable
+    "* seam. `-h`/`--help` short-circuits: the result answers `help?` and nothing
+    "* else is validated.
+    parseFrom: -> { |tokens ^[CLI]Parsed|
+        var values = #{};
+        var extras = #();
+        var commandName = nil;
+        var activeSub = nil;
+        var afterDashDash = false;
+        var i = 0;
+        { i < tokens.count }.whileDo:{
+            var t = tokens.at:i;
+            (!afterDashDash && (t == '--')).if:{
+                afterDashDash = true
+            } else:{ (!afterDashDash && ((t == '-h') || (t == '--help'))).if:{
+                ^^[CLI]Parsed.new:{
+                    var values = #{};
+                    var help = true;
+                    var known = #()
+                }
+            } else:{ (!afterDashDash && (t.starts?:'--')).if:{
+                var body = t.sliceFrom:2 to:(t.length);
+                var eq = body.index:'=';
+                var name = eq.defined?.if:{ body.sliceFrom:0 to:eq } else:{ body };
+                var inline = eq.defined?
+                    .if:{ body.sliceFrom:(eq + 1) to:(body.length) }
+                     else:{ nil };
+                var opt = .findLong:name sub:activeSub;
+                opt.defined?.else:{ UsageError.throw:('unknown option --%' % name) };
+                i = .take:opt inline:inline from:tokens at:i into:values
+            } else:{ (!afterDashDash && (t.starts?:'-') && (t != '-')).if:{
+                var short = t.sliceFrom:1 to:(t.length);
+                (short.length > 1).if:{
+                    UsageError.throw:('unknown option % (short options don\'t cluster)' % t)
+                };
+                var opt = .findShort:short sub:activeSub;
+                opt.defined?.else:{ UsageError.throw:('unknown option -%' % short) };
+                i = .take:opt inline:nil from:tokens at:i into:values
+            } else:{
+                ((@commands.count > 0) && (commandName == nil)).if:{
+                    var entry = @commands.at:t;
+                    entry.defined?.else:{
+                        UsageError.throw:('unknown command \'%1\' (expected one of: %2)'
+                            % #( t (@commands.keys.join:', ') ))
+                    };
+                    commandName = t;
+                    activeSub = entry.at:'spec'
+                } else:{
+                    extras.add:t
+                }
+            } } } };
+            i = i + 1
+        };
+        ((@commands.count > 0) && (commandName == nil)).if:{
+            UsageError.throw:('expected a command (one of: %)' % (@commands.keys.join:', '))
+        };
+        "* Positionals belong to the chosen sub-spec when there is one.
+        var owner = activeSub.defined?.if:{ activeSub } else:{ self };
+        var pi = 0;
+        owner.positionals.each:{ |p|
+            (pi < extras.count)
+                .if:{
+                    values.at:(p.at:'name') put:(extras.at:pi);
+                    pi = pi + 1
+                }
+                 else:{ UsageError.throw:('missing required argument <%>' % (p.at:'name')) }
+        };
+        owner.restName.defined?
+            .if:{ values.at:(owner.restName) put:(extras.sliceFrom:pi to:(extras.count)) }
+             else:{
+                (pi < extras.count).if:{
+                    UsageError.throw:('unexpected argument \'%\'' % (extras.at:pi))
+                }
+            };
+        .applyDefaults:values;
+        activeSub.defined?.if:{ activeSub.applyDefaults:values };
+        var known = .knownNames;
+        activeSub.defined?.if:{ activeSub.knownNames.each:{ |n| known.add:n } };
+        ^[CLI]Parsed.new:{
+            var values = values;
+            var command = commandName;
+            var known = known
+        }
+    }
+
+    "* -- internals ----------------------------------------------------------
+
+    "* Record one option token; answers the index after any consumed value.
+    take:inline:from:at:into: -> { |opt inline tokens i values|
+        var long = opt.at:'long';
+        ((opt.at:'kind') == 'flag').if:{
+            inline.defined?.if:{ UsageError.throw:('--% is a flag and takes no value' % long) };
+            values.at:long put:true;
+            ^^i
+        };
+        var value = inline;
+        value.defined?.else:{
+            ((i + 1) < tokens.count).else:{
+                UsageError.throw:('option --% expects a value' % long)
+            };
+            value = tokens.at:(i + 1)
+        };
+        var allowed = opt.at:'values';
+        allowed.defined?.if:{
+            (allowed.contains?:value).else:{
+                UsageError.throw:('option --%1 expects one of %2, got \'%3\''
+                    % #( long (allowed.join:'|') value ))
+            }
+        };
+        values.at:long put:value;
+        ^inline.defined?.if:{ i } else:{ i + 1 }
+    }
+
+    "* Flags default false, options to their default; a missing `required:` option
+    "* is a UsageError.
+    applyDefaults: -> { |values|
+        @options.each:{ |o|
+            var long = o.at:'long';
+            (values.containsKey?:long).else:{
+                ((o.at:'kind') == 'flag')
+                    .if:{ values.at:long put:false }
+                     else:{
+                        ((o.at:'required') == true).if:{
+                            UsageError.throw:('missing required option --%' % long)
+                        };
+                        values.at:long put:(o.at:'default')
+                    }
+            }
+        }
+    }
+
+    findLong:sub: -> { |name sub|
+        sub.defined?.if:{
+            var hit = sub.longOpt:name;
+            hit.defined?.if:{ ^^hit }
+        };
+        ^.longOpt:name
+    }
+
+    findShort:sub: -> { |name sub|
+        sub.defined?.if:{
+            var hit = sub.shortOpt:name;
+            hit.defined?.if:{ ^^hit }
+        };
+        ^.shortOpt:name
+    }
+
+    longOpt: -> { |name| ^@options.detect:{ |o| (o.at:'long') == name } }
+    shortOpt: -> { |name| ^@options.detect:{ |o| (o.at:'short') == name } }
+    positionals -> { @positionals }
+    restName -> { @rest }
+
+    "* Every name `at:` may read on a result from this spec.
+    knownNames -> {
+        var names = #();
+        @options.each:{ |o| names.add:(o.at:'long') };
+        @positionals.each:{ |p| names.add:(p.at:'name') };
+        @rest.defined?.if:{ names.add:@rest };
+        ^names
+    }
+
+    "* -- help ---------------------------------------------------------------
+
+    "* The generated help: a usage line, the about text, and aligned tables of
+    "* commands, options, and positionals (from their `help:` strings). What
+    "* `-h`/`--help` prints.
+    helpText -> {
+        var lines = #();
+        "* `-h` always exists, so there are always options.
+        var usage = 'usage: ' + @name + ' [options]';
+        (@commands.count > 0).if:{ usage = usage + ' <command>' };
+        @positionals.each:{ |p| usage = usage + (' <%>' % (p.at:'name')) };
+        @rest.defined?.if:{ usage = usage + (' [%…]' % @rest) };
+        lines.add:usage;
+        @about.defined?.if:{
+            lines.add:'';
+            lines.add:@about
+        };
+        (@commands.count > 0).if:{
+            lines.add:'';
+            lines.add:'commands:';
+            @commands.each:{ |kv|
+                var help = (kv.value.at:'help').defined?.if:{ kv.value.at:'help' } else:{ '' };
+                lines.add:('  %1 %2' % #( (kv.key.padRight:22) help ))
+            }
+        };
+        lines.add:'';
+        lines.add:'options:';
+        @options.each:{ |o|
+            var head = (o.at:'short').defined?
+                .if:{ '-%1, --%2' % #( (o.at:'short') (o.at:'long') ) }
+                 else:{ '    --%' % (o.at:'long') };
+            ((o.at:'kind') == 'option').if:{ head = head + ' VALUE' };
+            var help = (o.at:'help').defined?.if:{ o.at:'help' } else:{ '' };
+            (o.at:'default').defined?.if:{ help = help + (' (default: %)' % (o.at:'default')) };
+            ((o.at:'required') == true).if:{ help = help + ' (required)' };
+            lines.add:('  %1 %2' % #( (head.padRight:22) help ))
+        };
+        lines.add:('  %1 %2' % #( ('-h, --help'.padRight:22) 'print this help' ));
+        (@positionals.count > 0).if:{
+            lines.add:'';
+            lines.add:'arguments:';
+            @positionals.each:{ |p|
+                var help = (p.at:'help').defined?.if:{ p.at:'help' } else:{ '' };
+                lines.add:('  %1 %2' % #( (('<' + (p.at:'name') + '>').padRight:22) help ))
+            }
+        };
+        ^lines.join:'\n'
+    }
+}

@@ -219,6 +219,28 @@ Term.strip:'[red]hot[/]'                     "* -> 'hot'
 Log.level:#error in:{ Log.info:{ !!! } }    "* -> nil
 ```
 
+### Command-line tools
+
+**[CLI]Spec** turns `Runtime.arguments` into a declared interface: flags,
+value-taking options (defaults, `required:`, `values:` enums), positionals, a
+trailing `rest:` splat, or subcommands (each with its own sub-spec). `parse` is
+the production entry — `-h`/`--help` prints the *generated* help and exits 0,
+misuse prints the message plus usage to stderr and exits 2 — while `parseFrom:`
+throws a typed **UsageError** instead, which is how you test a tool in-process.
+GNU conventions: `--name value`, `--name=value`, short `-x`, `--` ends option
+parsing; values stay Strings (convert with `to_integer` and friends). Reading a
+name the spec never declared is a ValueError — a typo can't masquerade as an
+absent option. With a shebang and the execute bit (§36), the result is a real
+command: `./greet --help` is your tool's help, not qn's.
+
+```quoin
+var cli = [CLI]Spec.new:'greet' about:'says hello'
+cli.flag:'shout' short:'s' help:'LOUDLY'
+cli.positional:'name' help:'whom to greet'
+var args = cli.parseFrom:#( '-s' 'quoin' )
+#( (args.at:'name') (args.flag?:'shout') )    "* -> #(quoin true)
+```
+
 ### Unique identifiers
 
 **UUID** generates the standard 128-bit identifiers — `generateV4` (random) or

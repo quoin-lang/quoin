@@ -626,8 +626,18 @@ deferred `Mirror` in `## REPL`.
   streams meanwhile).
 - [x] ⭐ **`[IO]Stdin`** — shipped (`src/runtime/io.rs` + `qnlib/core/06-io.qn`, tests
   `59-io-stdin.qn`). *(Box was stale — verified 2026-07-11.)*
-- [ ] **CLI argument parsing** — options/flags/positionals/subcommands on top of
-  `VmOptions.arguments`.
+- [x] **CLI argument parsing** — `[CLI]Spec`/`[CLI]Parsed` (`qnlib/core/14-cli.qn`, pure Quoin):
+  flags, options (defaults/`required:`/`values:` enums), positionals, `rest:` splat, subcommands
+  (sub-spec per command; parent flags work before or after the command name). `parse` = production
+  (auto `-h`/`--help` from the generated helpText; misuse → message + usage on stderr, exit 2);
+  `parseFrom:` = the testable seam (throws typed UsageError). GNU forms (`--x v`, `--x=v`, `-x`,
+  `--`); values stay Strings. Undeclared `at:` name → ValueError. Enablers shipped with it:
+  `String#sliceFrom:to:` (char-indexed substring — String had NO slicing) and the file-run
+  pass-through in `VmRunnerOptions::parse` (pre-clap argv split, `file_run_split` — clap's
+  trailing_var_arg still intercepted `--help`/`--version` mid-capture, so everything after FILE
+  now bypasses clap; **qn's own flags go BEFORE the file**). Tests `qnlib/tests/71-cli.qn` +
+  `tests/cli.rs`; book §44 + §36. Deferred: short clustering (`-vf`), repeatable options,
+  negative-number positionals (use `--`), shell completions.
 
 **Networking** (built on the async arc — see `## Networking & Async I/O`)
 - [x] **HTTP client (high-level)** — `[HTTP]Client.get:`/`post:`/`request:` builder over
