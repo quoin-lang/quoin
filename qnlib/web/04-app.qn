@@ -23,34 +23,34 @@
 "* by reopening — extension by <-- is the Quoin way to layer without wrappers.
 [HTTP]ServerRequest <-- {
     "* Route bindings as a Map (set by the app's router before the handler runs).
-    params -> { @params.defined?.if:{ @params } else:{ #{} } };
+    params -> { @params.defined?.if:{ @params } else:{ #{} } }
     "* Internal: bind the route params (the router calls this before the handler).
-    params: -> { |m| @params = m; self };
+    params: -> { |m| @params = m; self }
     "* One route binding by name ('/users/:id' -> req.param:'id'), or nil.
-    param: -> { |name| .params.at:name };
+    param: -> { |name| .params.at:name }
 
     "* The request path: the raw target with any query string stripped. Segments
     "* stay percent-encoded — the router decodes per segment, so an encoded %2F
     "* can't split the path; params/query values arrive decoded.
-    path -> { (@target.splitString:'?').at:0 };
+    path -> { (@target.splitString:'?').at:0 }
     "* The raw request-target exactly as sent, query string included, undecoded.
-    rawTarget -> { @target };
+    rawTarget -> { @target }
 
     "* The query string as a decoded Map ('+' stays literal), parsed on demand.
     query -> {
-        var parts = @target.splitString:'?';
+        var parts = @target.splitString:'?'
         ^(parts.count > 1).if:{ [Web]Url.queryParse:((parts.drop:1).join:'?') } else:{ #{} }
-    };
+    }
     "* One decoded query value by name, or nil.
-    query: -> { |name| .query.at:name };
+    query: -> { |name| .query.at:name }
 
     "* The body parsed as JSON; bad input throws a catchable ParseError.
-    json -> { ^.body.json };
+    json -> { ^.body.json }
     "* The body parsed as application/x-www-form-urlencoded ('+' means space).
-    form -> { ^[Web]Url.formDecode:(.body.text) };
+    form -> { ^[Web]Url.formDecode:(.body.text) }
     "* The body's lowercased media type ('application/json'), or nil.
     mediaType -> { .body.mediaType }
-};
+}
 
 "* The framework core: routing DSL, middleware onion, render conventions, and error
 "* mapping over a pure handler pipeline — the [HTTP]Server is merely the transport.

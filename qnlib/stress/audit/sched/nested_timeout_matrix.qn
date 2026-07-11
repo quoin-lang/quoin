@@ -6,19 +6,19 @@
 Wrap <- {
     .meta <-- {
         outers:around: -> { |n blk|
-            (n == 0).if:{ ^^blk.value };
+            (n == 0).if:{ ^^blk.value }
             Wrap.outers:(n - 1) around:{ Async.timeout:(10000 + n) do:{ blk.value } }
         }
     }
-};
+}
 
 (0..8).each:{ |n|
     var rBare = { Wrap.outers:n around:{ Async.timeout:2 do:{ Async.sleep:100000; 'no' } } }.catch:{ |ex|
         (TimeoutError ~ ex).if:{ 'threw-ms:' + ex.ms.s } else:{ 'weird:' + ex.s }
-    };
-    var okB = (rBare == 'threw-ms:2').if:{ 'ok' } else:{ 'BUG' };
+    }
+    var okB = (rBare == 'threw-ms:2').if:{ 'ok' } else:{ 'BUG' }
     ('bare    n=' + n.s + ' -> ' + rBare + '   ' + okB).print
-};
+}
 
 (0..8).each:{ |n|
     var rOC = { Wrap.outers:n around:{
@@ -26,6 +26,6 @@ Wrap <- {
         .catch:{ |ex| (TimeoutError ~ ex).if:{ 'threw-ms:' + ex.ms.s } else:{ 'weird:' + ex.s } };
     var okC = (rOC == 'fired').if:{ 'ok' } else:{ 'BUG' };
     ('onCancel n=' + n.s + ' -> ' + rOC + '   ' + okC).print
-};
+}
 
 'MATRIX DONE'.print

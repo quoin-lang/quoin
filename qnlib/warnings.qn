@@ -12,198 +12,198 @@ Warnings <- {
     "* --- diagnostics (each should warn) ---
 
     "* unknown type: `Wibble` is not a defined class.
-    unknownType -> { var a: Wibble = nil; a };
+    unknownType -> { var a: Wibble = nil; a }
 
     "* type mismatch (declaration): a String where an Integer is declared.
-    declMismatch -> { var n: Integer = 'hello'; n };
+    declMismatch -> { var n: Integer = 'hello'; n }
 
     "* type mismatch (reassignment): assigning nil to a non-nullable Integer.
-    reassignMismatch -> { var m: Integer = 5; m = nil; m };
+    reassignMismatch -> { var m: Integer = 5; m = nil; m }
 
     "* type mismatch (return): declared `^Integer`, returns a String.
-    returnMismatch -> { |^Integer| 'nope' };
+    returnMismatch -> { |^Integer| 'nope' }
 
     "* compile-time MNU: a sealed stdlib class can't answer `nopeMethod`.
-    methodNotUnderstood -> { var r: NumberRange = (1..5); r.nopeMethod };
+    methodNotUnderstood -> { var r: NumberRange = (1..5); r.nopeMethod }
 
     "* nil-misuse (method send): `abs` sent to a possibly-nil receiver.
-    nilSend -> { |x: Integer?| x.abs };
+    nilSend -> { |x: Integer?| x.abs }
 
     "* nil-misuse (binary op): `+` dereferences a possibly-nil left operand.
-    nilBinop -> { |x: Integer?| x + 1 };
+    nilBinop -> { |x: Integer?| x + 1 }
 
     "* --- these are CORRECT and must emit NO warning ---
 
     "* numeric promotion: the Integer literal 1 becomes the Double 1.0 (no warning).
-    promotes -> { var d: Double = 1; d };
+    promotes -> { var d: Double = 1; d }
 
     "* narrowing: the `.defined?` guard proves `x` non-nil, so the use is fine.
-    narrowsWithGuard -> { |x: Integer?| x.defined?.if:{ x + 1 } else:{ 0 } };
+    narrowsWithGuard -> { |x: Integer?| x.defined?.if:{ x + 1 } else:{ 0 } }
 
     "* narrowing: an early-return guard leaves `x` non-nil for the rest of the body.
-    narrowsWithDivergence -> { |x: Integer?| x.defined?.else:{ ^^0 }; x + 1 };
+    narrowsWithDivergence -> { |x: Integer?| x.defined?.else:{ ^^0 }; x + 1 }
 
     "* narrowing: `!= nil` and `&&` short-circuit narrow too.
-    narrowsWithComparison -> { |x: Integer?| (x != nil).if:{ x + 1 } else:{ 0 } };
-    narrowsWithAnd -> { |x: Integer?| x.defined? && (x + 1) };
+    narrowsWithComparison -> { |x: Integer?| (x != nil).if:{ x + 1 } else:{ 0 } }
+    narrowsWithAnd -> { |x: Integer?| x.defined? && (x + 1) }
 
     "* join/merge: both arms leave x non-nil (the guard proves it in the if-arm, the
     "* else-arm reassigns it), so x is Integer at the join — `x + 1` after is fine.
     joinNarrows -> { var x: Integer? = nil; x.defined?.if:{ } else:{ x = 0 }; x + 1 }
-};
+}
 
 "* return-type covariance (Phase 3c·4): an override must return a subtype of the
 "* method it overrides. `defined?` is `Boolean` on `Object`, so a `String` override
 "* breaks the contract — which is also what makes `x.defined?` soundly `Boolean`.
 BadOverride <- {
     defined? -> { |^String| 'nope' }
-};
+}
 
 "* --- builtin argument checks (the sealed builtins are authoritative post-seal) ---
 ArgGallery <- {
     "* single-variant arg mismatch: List#at: takes an Integer.
-    badBuiltinArg -> { #(1 2).at:'x' };
+    badBuiltinArg -> { #(1 2).at:'x' }
 
     "* multimethod arg mismatch: no pow: variant on Integer accepts a String —
     "* dispatch provably raises MessageNotUnderstood.
-    badVariantArgs -> { 5.pow:'x' };
+    badVariantArgs -> { 5.pow:'x' }
 
     "* a collection literal's statically-visible bad element — the compile-time
     "* face of the runtime tag enforcement.
-    badLiteralElem -> { var xs: List(Integer) = #( 1 'two' ); xs };
+    badLiteralElem -> { var xs: List(Integer) = #( 1 'two' ); xs }
 
     "* --- these are CORRECT and must emit NO warning ---
 
     "* args that match a variant, on both sides of the multimethod.
-    goodVariants -> { (5.pow:2).s + (5.pow:2.5).s };
+    goodVariants -> { (5.pow:2).s + (5.pow:2.5).s }
 
     "* an untyped local's type is an inferred devirt HINT, allowed to go stale across
     "* reassignment — so it is never trusted as a receiver claim: no MNU, no arg check.
     staleHintStaysSilent -> { var x = 5; x = 'now a string'; x.upper }
-};
+}
 
 "* --- generic annotations (G0, checker-only: docs/GENERICS_ARCH.md) ---
 "* Malformed generic shapes each get a targeted diagnostic; a declared
 "* class-header type variable (T) is silently in scope for that body.
 GenericGallery(T) <- {
     "* Map keys are pinned String for now — `Map(Integer …)` warns.
-    badMapKey: -> { |m: Map(Integer Integer)| m };
+    badMapKey: -> { |m: Map(Integer Integer)| m }
 
     "* Only List/Map/Set take type arguments today.
-    notGeneric: -> { |x: Point(Integer)| x };
+    notGeneric: -> { |x: Point(Integer)| x }
 
     "* Arity: List/Set take exactly 1 argument, Map exactly 2.
-    badListArity: -> { |l: List(Integer Integer)| l };
-    badMapArity: -> { |m: Map(String)| m };
+    badListArity: -> { |l: List(Integer Integer)| l }
+    badMapArity: -> { |m: Map(String)| m }
 
     "* An unknown name inside the arguments still warns (nested resolution).
-    unknownElem: -> { |l: List(Wibble)| l };
+    unknownElem: -> { |l: List(Wibble)| l }
 
     "* Nested element types degrade to their enforceable base, with a warning
     "* (a `Map(String List(Integer))` param enforces values-are-Lists only).
-    nestedDegrades: -> { |m: Map(String List(Integer))| m };
+    nestedDegrades: -> { |m: Map(String List(Integer))| m }
 
     "* --- these are CORRECT and must emit NO warning ---
     "* A declared type variable, and well-formed flat generics.
-    usesVar: -> { |x: T ^T| x };
+    usesVar: -> { |x: T ^T| x }
     wellFormed: -> { |m: Map(String Integer) ^List(Integer)| #( m.at:'k' ) }
-};
+}
 
 "* --- G4: Block types (`Block(args ^Ret)`, GENERICS_ARCH §11) ---
 BlockTypeGallery <- {
     "* The `^`-marked return tail is block-type syntax only.
-    retOnList: -> { |l: List(Integer ^Boolean)| l };
+    retOnList: -> { |l: List(Integer ^Boolean)| l }
 
     "* Empty parens are `Block()` syntax only (List/Set/Map have fixed arity).
-    emptyParens: -> { |l: List()| l };
+    emptyParens: -> { |l: List()| l }
 
     "* --- these are CORRECT and must emit NO warning ---
     "* Every block-type arity: args + return, return-only, zero-arg, bare, nested.
-    predicate: -> { |b: Block(Integer ^Boolean)| b };
-    thunk: -> { |b: Block() ^Block(^Boolean)| b };
-    unconstrained: -> { |b: Block| b };
+    predicate: -> { |b: Block(Integer ^Boolean)| b }
+    thunk: -> { |b: Block() ^Block(^Boolean)| b }
+    unconstrained: -> { |b: Block| b }
     higherOrder: -> { |b: Block(List(Integer) ^Block(Integer ^Boolean))| b }
-};
+}
 
 "* --- G4b: block-literal inference (collect:'s U, each:'s param) ---
 BlockFlowGallery <- {
     "* An each: block's unannotated param is believed T (Integer here) - a bad
     "* insert through it warns exactly like a directly-typed value would.
     badEachParam -> { |l: List(Integer)|
-        var strs: List(String) = #();
+        var strs: List(String) = #()
         l.each:{ |x| strs.add:x }
-    };
+    }
 
     "* collect:'s element type is INFERRED from the block's return - the result
     "* is List(Integer), so a String insert warns (runtime tag stays absent;
     "* ensure: is the bridge when a real tag is needed).
     badCollectFlow -> { |l: List(Integer)|
-        var doubled = l.collect:{ |x| x * 2 };
+        var doubled = l.collect:{ |x| x * 2 }
         doubled.add:'nope'
-    };
+    }
 
     "* An annotated literal carries its shape - a declared block var with an
     "* incompatible return warns, naming both shapes.
     badLiteralShape -> {
-        var f: Block(^Boolean) = { |x: Integer| x * 2 };
+        var f: Block(^Boolean) = { |x: Integer| x * 2 }
         f
-    };
+    }
 
     "* --- these are CORRECT and must emit NO warning ---
     "* collect:+ensure:, reduce:into:'s U from the seed, select: flow, zero-arg
     "* iteration blocks (arity is gradual), reassignment dissolving the belief.
     goodFlow -> { |l: List(Integer)|
-        var names = l.collect:{ |x| x.s };
-        var total: Integer = l.reduce:{ |a b| a + b } into:0;
-        var evens: List(Integer) = l.select:{ |x| x > 1 };
-        l.each:{ 'zeroArgIsFine' };
-        l.each:{ |x| x = 'reassigned'; x };
+        var names = l.collect:{ |x| x.s }
+        var total: Integer = l.reduce:{ |a b| a + b } into:0
+        var evens: List(Integer) = l.select:{ |x| x > 1 }
+        l.each:{ 'zeroArgIsFine' }
+        l.each:{ |x| x = 'reassigned'; x }
         (names.ensure:String).count + total + evens.count
     }
-};
+}
 
 "* --- G2: element types flow through the checker ---
 GenericFlow <- {
     "* An element read is honestly `T?` — dereferencing without a narrow warns…
-    badRead: -> { |l: List(Integer)| var z: Integer = l.at:0; z };
+    badRead: -> { |l: List(Integer)| var z: Integer = l.at:0; z }
 
     "* …and a statically-visible bad insertion warns (it would raise at runtime).
-    badInsert: -> { |l: List(Integer)| l.add:'nope' };
+    badInsert: -> { |l: List(Integer)| l.add:'nope' }
 
     "* --- these are CORRECT and must emit NO warning ---
     "* narrowed element read; select: flows List(Integer); nil is always insertable.
-    goodRead: -> { |l: List(Integer)| var v = l.at:0; v.defined?.if:{ v + 1 } else:{ 0 } };
-    goodFlow: -> { |l: List(Integer)| var evens: List(Integer) = l.select:{ |x| x > 1 }; evens };
-    goodNil: -> { |l: List(Integer)| l.add:nil };
+    goodRead: -> { |l: List(Integer)| var v = l.at:0; v.defined?.if:{ v + 1 } else:{ 0 } }
+    goodFlow: -> { |l: List(Integer)| var evens: List(Integer) = l.select:{ |x| x > 1 }; evens }
+    goodNil: -> { |l: List(Integer)| l.add:nil }
 
     "* --- the `^`-in-discarded-if-arm lint ---
 
     "* `^` ending an `if:` arm whose value is discarded returns from the
     "* BLOCK (control falls through) — a method return is `^^`.
     caretFallsThrough: -> { |cond|
-        cond.if:{ ^'early' };
+        cond.if:{ ^'early' }
         'late'
-    };
+    }
 
     "* --- these are CORRECT and must emit NO warning ---
     "* value-position if-arms and iteration-block early exits use `^` legitimately.
-    goodCaretValue: -> { |cond| ^cond.if:{ 'a' } else:{ 'b' } };
+    goodCaretValue: -> { |cond| ^cond.if:{ 'a' } else:{ 'b' } }
     goodCaretBreak: -> { |l: List(Integer)| l.each:{ |x| ^x }; nil }
-};
+}
 
 "* --- the `allow:` suppression pragma ---
 AllowGallery <- {
     "* --- this is CORRECT and must emit NO warning ---
     "* a trailing `"* allow: <kind>` comment suppresses exactly that kind on its line;
     "* a parenthesized rationale is encouraged.
-    allowedNilReceiver: -> { |x: Integer?| x.abs };  "* allow: nil-receiver (gallery: deliberate)
+    allowedNilReceiver: -> { |x: Integer?| x.abs }  "* allow: nil-receiver (gallery: deliberate)
 
     "* a typo'd kind is itself flagged — and suppresses nothing, so both warnings fire.
-    badAllowKind: -> { |x: Integer?| x.abs };  "* allow: nil-reciever
+    badAllowKind: -> { |x: Integer?| x.abs }  "* allow: nil-reciever
 
     "* a pragma on its own line would read as a doc block, so it must trail: two warnings.
     "* allow: nil-receiver
     badAllowPlacement: -> { |x: Integer?| x.abs }
-};
+}
 
 'Defined Warnings — see the diagnostics printed above.'.print

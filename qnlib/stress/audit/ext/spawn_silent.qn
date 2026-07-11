@@ -1,2 +1,2 @@
-var e = Extension.spawn:'qnlib/stress/audit/ext/silent_ext.py';
+var e = Extension.spawn:'qnlib/stress/audit/ext/silent_ext.py'
 'SPAWNED'.print

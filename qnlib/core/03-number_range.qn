@@ -11,23 +11,23 @@
 "* (3..0).list    "* -> #(3 2 1)
 "* ```
 NumberRange <- { | @start @end @n |
-    .mix:Iterate;
+    .mix:Iterate
 
     "* Bind the bounds and choose the step: +1 upward, -1 when start > end.
     "* Ranges are normally created with `start..end` rather than new:.
     init: -> { |start end|
-        @start = start;
-        @end = end;
+        @start = start
+        @end = end
 
         @n = (@start > @end).if:{ -1 } else:{ 1 }
-    };
+    }
 
     "* The readable form of the range.
     "*
     "* ```
     "* (1..5).s    "* -> NumberRange(1..5)
     "* ```
-    s --> { 'NumberRange(' + @start + '..' + @end + ')' };
+    s --> { 'NumberRange(' + @start + '..' + @end + ')' }
 
     "* Containment test for the match operator: true when n lies inside the
     "* end-exclusive interval (this is what a range condition in a Case
@@ -39,7 +39,7 @@ NumberRange <- { | @start @end @n |
     "* ```
     #'~:' --> { |n|
         (@start > @end).if:{ (n <= @start) && (n > @end) } else:{ (n >= @start) && (n < @end) }
-    };
+    }
 
     "* Call the block with each number from start toward end (end excluded),
     "* stepping by 1 in the range's direction.
@@ -48,15 +48,15 @@ NumberRange <- { | @start @end @n |
     "* var t = 0; (1..5).each:{ |i| t = t + i }; t    "* -> 10
     "* ```
     each: -> { |b|
-        var i = @start;
+        var i = @start
         { (@n > 0).if:{ i < @end } else:{ i > @end } }.whileDo:{
-            b.valueWithSelfOrArg:i;
+            b.valueWithSelfOrArg:i
             i = i + @n
         }
     };
 
     .sealed!
-};
+}
 
 "* Integers gain the `..` range constructor.
 Integer <-- {
@@ -67,7 +67,7 @@ Integer <-- {
     "* (2..5).list    "* -> #(2 3 4)
     "* ```
     #'..:' -> { |e| NumberRange.new:{ var start=self; var end=e } }
-};
+}
 
 "* Doubles gain the `..` range constructor.
 Double <-- {

@@ -1,84 +1,84 @@
 "* Quoin syntax gallery -- exercises every highlight type. compare.py diffs the
 "* vim syntax file against `qn highlight` (the ANSI renderer) over this file.
 
-use std:io/file;
-use core/*;
+use std:io/file
+use core/*
 
 "a block comment
 spanning two lines"
 
-var count: Integer = 42;
-let ratio = 3.14;
-var half = .5;
-var (a b) = #( 1 2 );
-var *rest = #( 3 4 5 );
-total = count + ratio - 1;
-flag = true && false || nil;
-range = 1..10;
+var count: Integer = 42
+let ratio = 3.14
+var half = .5
+var (a b) = #( 1 2 )
+var *rest = #( 3 4 5 )
+total = count + ratio - 1
+flag = true && false || nil
+range = 1..10
 
-list = #( 1 2 #(3 4) );
-bag = #< 7 8 9 >;
-dict = #{ 'name': 'Alice' 'age': 30 };
-opts = #{ key: 1 Mode: 2 };
-re = #/^[a-z]+\s*$/;
-msg = 'escaped\ttext\n';
-sym = #at:put:;
-quoted = #'quoted symbol';
-banner = #ANSI'bold red';
-vec = #V( 1 2 3 );
-file = [IO]File;
-thing = [foo/bar]baz;
+list = #( 1 2 #(3 4) )
+bag = #< 7 8 9 >
+dict = #{ 'name': 'Alice' 'age': 30 }
+opts = #{ key: 1 Mode: 2 }
+re = #/^[a-z]+\s*$/
+msg = 'escaped\ttext\n'
+sym = #at:put:
+quoted = #'quoted symbol'
+banner = #ANSI'bold red'
+vec = #V( 1 2 3 )
+file = [IO]File
+thing = [foo/bar]baz
 
 Point <- {
-    at:put: -> { |@x @y| };
+    at:put: -> { |@x @y| }
 
-    sum -> { ^@x + @y };
+    sum -> { ^@x + @y }
 
     scaled: -> { |factor: Integer ^Integer|
-        var acc: Integer = 0;
-        #(1 2 3).each:{ |i| acc = acc + (i * factor) };
+        var acc: Integer = 0
+        #(1 2 3).each:{ |i| acc = acc + (i * factor) }
         ^^acc
-    };
+    }
 
-    boom! -> { !!! };
-    todo -> { ... };
-    #'+' -> { |other| Point.at:(@x + other) put:@y };
-    swap: -> { |_ y| y };
-    guarded: -> { |x:Integer { x > 0 }| x };
-    guarded: --> { |x:Integer| 0 - x };
+    boom! -> { !!! }
+    todo -> { ... }
+    #'+' -> { |other| Point.at:(@x + other) put:@y }
+    swap: -> { |_ y| y }
+    guarded: -> { |x:Integer { x > 0 }| x }
+    guarded: --> { |x:Integer| 0 - x }
     gather+: -> { |items| items }
-};
+}
 
 Point3 <- Point <- {
     describe -> { ^'a point' }
-};
+}
 
 [Geo]Shape <- {
-    area -> { ??? };
+    area -> { ??? }
     halt: -> { |e:[Web]Halt| e.status }
-};
+}
 
 counter: -> { |n|
-    #(1 2).each:{ |i| n = n + i };
+    #(1 2).each:{ |i| n = n + i }
     ^n
-};
+}
 
-gen: -> { |n| ^^Generator.from:{ (n > 0).if:{ ^>n } } };
+gen: -> { |n| ^^Generator.from:{ (n > 0).if:{ ^>n } } }
 
 yields: -> { |x|
-    var a = ^> (x + 1);
+    var a = ^> (x + 1)
     ^a
-};
+}
 
 "* multibyte text — µ and é shift byte columns; the harness must stay aligned
-greeting = 'café';
-var first *_ = #( 1 2 3 );
+greeting = 'café'
+var first *_ = #( 1 2 3 )
 
-p = Point.at:1 put:2;
-p.moveBy:3 and:4;
-q = p.sum!;
-tagged = { #gen |x| x };
+p = Point.at:1 put:2
+p.moveBy:3 and:4
+q = p.sum!
+tagged = { #gen |x| x }
 Pair(T U) <- {
     first -> { ^@a }
-};
+}
 deep = { { { { { { 'six' } } } } } }

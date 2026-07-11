@@ -9,7 +9,7 @@
     "* Defaults for the bare-.new construction the builders use (guarded, so a
     "* config-block construction that already set them wins).
     init -> {
-        @status.defined?.else:{ @status = 200 };
+        @status.defined?.else:{ @status = 200 }
         @headers.defined?.else:{ @headers = #() }
     };
 
@@ -19,36 +19,36 @@
         "* ([Web]Response.text:'hi').headers
         "* "* -> #(#(Content-Type text/plain; charset=utf-8))
         "* ```
-        text: -> { |s| ^([Web]Response.new.contentType:'text/plain; charset=utf-8').body:s };
+        text: -> { |s| ^([Web]Response.new.contentType:'text/plain; charset=utf-8').body:s }
         "* A 200 text/html (UTF-8) response with body `s`.
-        html: -> { |s| ^([Web]Response.new.contentType:'text/html; charset=utf-8').body:s };
+        html: -> { |s| ^([Web]Response.new.contentType:'text/html; charset=utf-8').body:s }
         "* A 200 application/json response: `v` is JSON-generated into the body.
         "* ```
         "* ([Web]Response.json:#{'ok':true}).body.asString   "* -> {"ok":true}
         "* ```
-        json: -> { |v| ^[Web]Response.json:v status:200 };
+        json: -> { |v| ^[Web]Response.json:v status:200 }
         "* A JSON response with an explicit status (e.g. 201 for a create).
         json:status: -> { |v code|
             ^(([Web]Response.new.status:code).contentType:'application/json').body:(JSON.generate:v)
-        };
+        }
         "* A 200 application/octet-stream response with raw Bytes `b`.
-        bytes: -> { |b| ^([Web]Response.new.contentType:'application/octet-stream').body:b };
+        bytes: -> { |b| ^([Web]Response.new.contentType:'application/octet-stream').body:b }
         "* A bare response carrying just a status, no body.
-        status: -> { |code| ^[Web]Response.new.status:code };
+        status: -> { |code| ^[Web]Response.new.status:code }
         "* A 204 No Content response.
-        noContent -> { ^[Web]Response.new.status:204 };
+        noContent -> { ^[Web]Response.new.status:204 }
         "* A 302 Found redirect to `loc`.
         "* ```
         "* ([Web]Response.redirect:'/login').headers   "* -> #(#(Location /login))
         "* ```
-        redirect: -> { |loc| ^[Web]Response.redirect:loc status:302 };
+        redirect: -> { |loc| ^[Web]Response.redirect:loc status:302 }
         "* A redirect with an explicit 3xx status (301 / 303 / 307 / 308).
         redirect:status: -> { |loc code|
             ^([Web]Response.new.status:code).header:'Location' value:loc
-        };
+        }
         "* A streaming (chunked) response; each Generator yield is one chunk on
         "* the wire. The default content type fits server-sent events.
-        stream: -> { |gen| ^[Web]Response.stream:gen contentType:'text/event-stream' };
+        stream: -> { |gen| ^[Web]Response.stream:gen contentType:'text/event-stream' }
         "* A streaming (chunked) response with an explicit content type; each Generator
         "* yield is one chunk on the wire.
         stream:contentType: -> { |gen ct| ^([Web]Response.new.contentType:ct).body:gen }

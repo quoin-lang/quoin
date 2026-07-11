@@ -11,7 +11,7 @@
 "* Rust-side twins (entry ret shapes, block speculation preconditions,
 "* fused-site routing) live in src/codegen/tests.rs and src/vm_tests.rs.
 
-var aotOn = (VM.stats.at:'aot').at:'enabled';
+var aotOn = (VM.stats.at:'aot').at:'enabled'
 
 (TestSuite.new:{ var name = 'AotTierGallery' }).add:{
     aotOn.else:{ .skip:'AOT disabled (QN_AOT=0) — no tiers to pin' };
@@ -43,8 +43,8 @@ var aotOn = (VM.stats.at:'aot').at:'enabled';
             'at:put:'
             'add:'
             'contains?:'
-        >;
-        var offenders = #();
+        >
+        var offenders = #()
         VM.aotRefusals.each:{ |r|
             ((pinned.contains?:(r.at:'selector')) && (((r.at:'kind').index:'precheck') == 0)).if:{
                 offenders.add:((r.at:'selector') + ' [' + (r.at:'kind') + ': ' + (r.at:'reason') + ']')
@@ -58,22 +58,22 @@ var aotOn = (VM.stats.at:'aot').at:'enabled';
     "* (and this test warms them again), so absence here means promotion or
     "* eager compilation regressed, not that they are cold.
     .test:hotIterateFamilyIsCompiled -> {
-        var data = #();
-        var i = 0;
-        { i < 100 }.whileDo:{ data.add:i; i = i + 1 };
-        var r = 0;
+        var data = #()
+        var i = 0
+        { i < 100 }.whileDo:{ data.add:i; i = i + 1 }
+        var r = 0
         { r < 80 }.whileDo:{
-            var doubled = data.collect:{ |x| x * 2 };
-            var evens = data.select:{ |x| (x % 2) == 0 };
-            r = r + doubled.count + evens.count - 150;
-            r = r + (data.sum) - 4950;
-            r = r + (data.count:{ |x| x > 50 }) - 49;
+            var doubled = data.collect:{ |x| x * 2 }
+            var evens = data.select:{ |x| (x % 2) == 0 }
+            r = r + doubled.count + evens.count - 150
+            r = r + (data.sum) - 4950
+            r = r + (data.count:{ |x| x > 50 }) - 49
             (data.any?:{ |x| x > 98 }).if:{ r = r + 1 }
         };
-        .is:{ r } equalTo:80;
+        .is:{ r } equalTo:80
 
-        var compiled = #<>;
-        VM.aotCompiled.each:{ |e| compiled.add:(e.at:'selector') };
+        var compiled = #<>
+        VM.aotCompiled.each:{ |e| compiled.add:(e.at:'selector') }
         #('each:' 'collect:' 'select:' 'sum' 'sum:' 'count:' 'any?:').each:{ |sel|
             (compiled.contains?:sel).else:{ ('not compiled: ' + sel).throw }
         };
@@ -84,7 +84,7 @@ var aotOn = (VM.stats.at:'aot').at:'enabled';
     "* above, at least one block entry is registered (the literals fed to
     "* collect:/select: warm within their first elements).
     .test:hotBlockTemplatesAreCompiled -> {
-        var blocks = 0;
+        var blocks = 0
         VM.aotCompiled.each:{ |e| ((e.at:'role') == 'block').if:{ blocks = blocks + 1 } };
         .isTrue:{ blocks > 0 }
     }

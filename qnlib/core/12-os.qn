@@ -10,14 +10,14 @@
         "* [OS]Env.at:'QN_SURELY_UNSET' ifAbsent:{ 'fallback' }    "* -> fallback
         "* ```
         at:ifAbsent: -> { |name: String fallback: Block ^String|
-            var value = .at:name;
+            var value = .at:name
             ^value.defined?.if:{ value } else:{ fallback.value }
-        };
+        }
 
         "* Iterate the environment as KeyValuePairs, sorted by name. `.asMap` is the general
         "* door — it carries the whole Iterate mixin (`select:`, `collect:`, `detect:`, …), which
         "* a namespace class cannot mix in for itself.
-        each: -> { |block: Block| .asMap.each:block };
+        each: -> { |block: Block| .asMap.each:block }
 
         "* How many environment variables are set.
         count -> { .keys.count }

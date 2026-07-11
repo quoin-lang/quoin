@@ -1,8 +1,8 @@
-{ Error.throw }.catch:{ |e:Error| e == Error  "(Class)" };
-{ 42.throw    }.catch:{ |n| n == 42 };
+{ Error.throw }.catch:{ |e:Error| e == Error  "(Class)" }
+{ 42.throw    }.catch:{ |n| n == 42 }
 
-Error <- CustomError <- {};
-{ CustomError.new.throw }.catch:{ |ex:CustomError| CustomError ~ ex };
+Error <- CustomError <- {}
+{ CustomError.new.throw }.catch:{ |ex:CustomError| CustomError ~ ex }
 
 { CustomError.new.throw }
     .catch:  { |ex:CustomError| "Logic for CustomError"     }

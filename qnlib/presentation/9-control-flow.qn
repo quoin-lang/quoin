@@ -11,12 +11,12 @@
 
 Block <-- {
     whileDo: -> { |block|
-        var s = self;
+        var s = self
         s.value.if:{
-            block.value;
+            block.value
             ^^s.whileDo:block
         }
     }
-};
+}
 
 {}.class <-- {}  "* Same

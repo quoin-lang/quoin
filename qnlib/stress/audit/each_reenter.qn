@@ -16,8 +16,8 @@
 "* This script now prints the caught error and exits 0. Regression tests:
 "* qnlib/tests/56-stack-reentry.qn.
 
-var l = #( 1 2 3 );
-var body = nil;
-body = { |x| l.each:body };
-{ l.each:body }.catch:{ |e:StackError| ('caught: ' + e.message).print };
+var l = #( 1 2 3 )
+var body = nil
+body = { |x| l.each:body }
+{ l.each:body }.catch:{ |e:StackError| ('caught: ' + e.message).print }
 'reached — the process survived'.print

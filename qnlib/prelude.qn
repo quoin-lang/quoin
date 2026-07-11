@@ -1,23 +1,23 @@
 "* The core standard library. `use core/*` loads qnlib/core/*.qn in UTF-8 sorted
 "* order (00-bootstrap … 06-io — zero-padded, so lexicographic == numeric). Every
 "* runner mode loads this first; user scripts get it automatically.
-use core/*;
+use core/*
 
 "* Seal the immediate value types now that the core stdlib has finished extending
 "* them (ranges, bignum, self-casts). Their method tables — the arithmetic
 "* operators in particular — are frozen from here on, which is what makes
 "* compile-time devirtualization of numeric arithmetic sound. User code can no
 "* longer reopen them.
-Integer.sealed!;
-Double.sealed!;
-Boolean.sealed!;
-Nil.sealed!;
+Integer.sealed!
+Double.sealed!
+Boolean.sealed!
+Nil.sealed!
 
 "* Seal the built-in collections too (after core mixes in Iterate and defines their
 "* primitives), so `at:`/`at:put:`/`add:` are frozen and compile-time devirtualization
 "* of typed collection access is sound. This freezes only List/Map/Set themselves — the
 "* Iterate mixin (where the shared combinators live) is a separate class and stays open,
 "* so `Iterate <-- { … }` still extends every collection.
-List.sealed!;
-Map.sealed!;
+List.sealed!
+Map.sealed!
 Set.sealed!

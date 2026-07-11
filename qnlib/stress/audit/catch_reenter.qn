@@ -8,7 +8,7 @@
 "* This script now prints the caught error and exits 0. Regression tests:
 "* qnlib/tests/56-stack-reentry.qn.
 
-var f = nil;
-f = { { f.value }.catch:{ |e| e.throw } };
-{ f.value }.catch:{ |e:StackError| ('caught: ' + e.message).print };
+var f = nil
+f = { { f.value }.catch:{ |e| e.throw } }
+{ f.value }.catch:{ |e:StackError| ('caught: ' + e.message).print }
 'reached — the process survived'.print

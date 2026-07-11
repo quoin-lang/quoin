@@ -9,7 +9,7 @@ Fib <- {
         }
     };
     .sealed!
-};
+}
 
-var r = Fib.value:32;
+var r = Fib.value:32
 (r == 2178309).if:{ 'fib_typed: ok'.print } else:{ ('fib_typed: FAIL got ' + r).print }

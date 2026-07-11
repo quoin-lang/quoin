@@ -25,11 +25,11 @@
 "*   headTimeoutMs (30 s)    -> 408, close
 "*   idleTimeoutMs (60 s)    -> close quietly (keep-alive gap)
 "*   maxConnections (nil)    -> 503, close (nil = unlimited)
-use std:net/http;
+use std:net/http
 
 "* Thrown while reading a request head that exceeds maxHeadBytes; the connection
 "* loop maps it to 431 Request Header Fields Too Large.
-Error <- [HTTP]HeadTooLarge <- {};
+Error <- [HTTP]HeadTooLarge <- {}
 
 "* An inbound request: the parsed head plus the body as an [HTTP]Body —
 "* stream-backed while undrained, empty bytes-backed when the request has none,
@@ -42,31 +42,31 @@ Error <- [HTTP]HeadTooLarge <- {};
     "* Internal: normalize the head fields — nil headers become #(), a nil body an
     "* empty bytes-backed one.
     init: -> { |method target version headers body|
-        @method = method;
-        @target = target;
-        @version = version;
-        @headers = headers.defined?.if:{ headers } else:{ #() };
+        @method = method
+        @target = target
+        @version = version
+        @headers = headers.defined?.if:{ headers } else:{ #() }
         @body = body.defined?.if:{ body } else:{ [HTTP]Body.of:(Bytes.empty) }
-    };
+    }
 
     "* The request verb as sent (e.g. 'GET').
-    method -> { @method };
+    method -> { @method }
     "* The raw request-target as sent, query included, still percent-encoded (decoding
     "* is the [Web] layer's job — see path / query / params there).
-    target -> { @target };
+    target -> { @target }
     "* The HTTP/1.x minor version: 0 or 1.
-    version -> { @version };
+    version -> { @version }
     "* Headers as a #(name value) pair list, order- and duplicate-preserving.
-    headers -> { @headers };
+    headers -> { @headers }
     "* Case-insensitive lookup of the first header named `name`, or nil.
-    header: -> { |name| [HTTP]Response.find:@headers named:name };
+    header: -> { |name| [HTTP]Response.find:@headers named:name }
     "* The body as an [HTTP]Body — stream-backed until read; a request without one
     "* answers an empty body, never nil.
-    body -> { @body };
+    body -> { @body }
 
     "* Human rendering: verb and target.
     s -> { '[HTTP]ServerRequest(' + @method + ' ' + @target + ')' }
-};
+}
 
 "* An outbound response under construction: status, #(name value) header pairs,
 "* and a body — nil, Bytes (a String converts for convenience), or a Generator
@@ -76,8 +76,8 @@ Error <- [HTTP]HeadTooLarge <- {};
 [HTTP]ServerResponse <- { | @status @headers @body |
     "* Internal: defaults — status 200, empty headers, nil body.
     init: -> { |status headers body|
-        @status = status.defined?.if:{ status } else:{ 200 };
-        @headers = headers.defined?.if:{ headers } else:{ #() };
+        @status = status.defined?.if:{ status } else:{ 200 }
+        @headers = headers.defined?.if:{ headers } else:{ #() }
         @body = body
     };
 
@@ -120,36 +120,36 @@ Error <- [HTTP]HeadTooLarge <- {};
                 '502':'Bad Gateway'
                 '503':'Service Unavailable'
                 '504':'Gateway Timeout'
-            };
-            var p = phrases.at:(status.s);
+            }
+            var p = phrases.at:(status.s)
             ^p.defined?.if:{ p } else:{ '' }
         }
-    };
+    }
 
     "* The status code to be sent.
-    status -> { @status };
+    status -> { @status }
     "* The header #(name value) pairs added so far.
-    headers -> { @headers };
+    headers -> { @headers }
     "* The body as set: nil, Bytes, or a Generator (streamed as chunked output).
-    body -> { @body };
+    body -> { @body }
 
     "* Set the status code; returns self.
-    status: -> { |code| @status = code; self };
+    status: -> { |code| @status = code; self }
     "* Append one header pair; returns self.
-    header:value: -> { |name val| @headers.add:#( name val ); self };
+    header:value: -> { |name val| @headers.add:#( name val ); self }
     "* Append a Content-Type header; returns self.
-    contentType: -> { |ct| .header:'Content-Type' value:ct };
+    contentType: -> { |ct| .header:'Content-Type' value:ct }
     "* Set the body — a String converts to its UTF-8 Bytes; Bytes or a Generator pass
     "* through; returns self.
     body: -> { |b|
-        (String ~ b).if:{ @body = b.asBytes; ^^self };
-        @body = b;
+        (String ~ b).if:{ @body = b.asBytes; ^^self }
+        @body = b
         self
-    };
+    }
 
     "* Human rendering: the status code.
     s -> { '[HTTP]ServerResponse(' + @status.s + ')' }
-};
+}
 
 "* The server: bind in init (so `port` works before `start`, including after an
 "* ephemeral ':0'), accept in a background Task, one Task per connection running

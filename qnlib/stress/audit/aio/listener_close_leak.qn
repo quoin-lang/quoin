@@ -1,14 +1,14 @@
 "* TcpListener.close never closes the listening fd (the sync reap path only
 "* removes from the streams map, not the listeners map).
-var l = TcpListener.listen:'127.0.0.1:0';
-var port = l.port;
-l.close;
-Async.sleep:100;  "* several scheduler turns: the reap queue has definitely drained
-('listener closed? ' + l.closed?.s).print;
+var l = TcpListener.listen:'127.0.0.1:0'
+var port = l.port
+l.close
+Async.sleep:100  "* several scheduler turns: the reap queue has definitely drained
+('listener closed? ' + l.closed?.s).print
 
 { var l2 = TcpListener.listen:('127.0.0.1:' + port); 'rebind: OK (correct)'.print; l2.close }.catch:{ |e|
     ('BUG: rebind of closed port FAILED (fd leaked): ' + e.s).print
-};
+}
 
 { var c = TcpSocket.connect:('127.0.0.1:' + port);
   'BUG: connect to closed listener SUCCEEDED (backlog still open)'.print;

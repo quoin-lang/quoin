@@ -1,12 +1,12 @@
 "* priming variant: a 2-outer fired nest, then the 3-outer nest
 Async
     .timeout:9998
-     do:{ Async.timeout:9997 do:{ Async.timeout:1 do:{ Async.sleep:100000 } onCancel:{ 'x' } } };
+     do:{ Async.timeout:9997 do:{ Async.timeout:1 do:{ Async.sleep:100000 } onCancel:{ 'x' } } }
 var r = { Async.timeout:11111 do:{
     Async.timeout:22222 do:{
         Async.timeout:33333 do:{
             Async.timeout:2 do:{ Async.sleep:100000; 'no' }
         }
     }
-} }.catch:{ |ex| 'ms=' + ex.ms.s };
+} }.catch:{ |ex| 'ms=' + ex.ms.s }
 ('prime(2-outer-nest): ' + r.s).print

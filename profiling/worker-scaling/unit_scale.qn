@@ -1,12 +1,12 @@
 "* N unit-file workers each computing 20000/N heavy items (see notes.md).
-var args = Runtime.arguments;
-var w = (args.at:0).to_integer;
-var per = 20000 / w;
-var workers = #();
-(0..w).each:{ |i| workers.add:(Worker.spawn:'profiling/worker-scaling/unit_worker.qn') };
+var args = Runtime.arguments
+var w = (args.at:0).to_integer
+var per = 20000 / w
+var workers = #()
+(0..w).each:{ |i| workers.add:(Worker.spawn:'profiling/worker-scaling/unit_worker.qn') }
 var t = Timer.time:{
-    workers.each:{ |wk| wk.send:#{ 'n': per } };
+    workers.each:{ |wk| wk.send:#{ 'n': per } }
     Async.gather:(workers.collect:{ |wk| { wk.receive } })
-};
-workers.each:{ |wk| wk.join };
-('unitWorkers=% wallMs=%' % #( w (t / 1000) )).print;
+}
+workers.each:{ |wk| wk.join }
+('unitWorkers=% wallMs=%' % #( w (t / 1000) )).print

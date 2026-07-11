@@ -2,17 +2,17 @@
 
 MarkerBase <- {
     greet -> { 'base' }
-};
-MarkerBase.abstract!;  "* abstract base — not instantiable, but subclassable
+}
+MarkerBase.abstract!  "* abstract base — not instantiable, but subclassable
 
 MarkerBase <- MarkerSub <- {
     greet --> { 'sub' }
-};  "* concrete subclass — instantiable
+}  "* concrete subclass — instantiable
 
 MarkerSealed <- {
     val -> { 42 }
-};
-MarkerSealed.sealed!;  "* frozen — no extension or subclassing
+}
+MarkerSealed.sealed!  "* frozen — no extension or subclassing
 
 (TestSuite.new:{ var name = 'Markers' }).add:{
     .test:abstractClassCannotBeInstantiated -> {
@@ -44,7 +44,7 @@ MarkerSealed.sealed!;  "* frozen — no extension or subclassing
     };
 
     .test:sealedInstanceCannotBeExtended -> {
-        var inst = MarkerSub.new;
+        var inst = MarkerSub.new
         inst.sealed!;
         .does:{
             inst <-- {

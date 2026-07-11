@@ -1,7 +1,7 @@
 "* [Web]Route / [Web]Router: pattern matching, the ~ protocol, most-specific-wins
 "* dispatch, 405 Allow data, and registration-time duplicate rejection. All pure —
 "* no sockets anywhere.
-use std:web/*;
+use std:web/*
 
 (TestSuite.new:{ var name = 'WebRoute' }).add:{
     .test:

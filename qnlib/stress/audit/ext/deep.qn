@@ -1,5 +1,5 @@
-var e = Extension.spawn:'qnlib/stress/audit/ext/deep_ext.py';
-'SPAWNED'.print;
-var r = { e.call:'deep' with:'' }.catch:{ |ex| 'CAUGHT' };
-'GOT RESULT'.print;
+var e = Extension.spawn:'qnlib/stress/audit/ext/deep_ext.py'
+'SPAWNED'.print
+var r = { e.call:'deep' with:'' }.catch:{ |ex| 'CAUGHT' }
+'GOT RESULT'.print
 r.class.name.print

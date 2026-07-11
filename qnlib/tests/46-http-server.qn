@@ -2,8 +2,8 @@
 "* reason-phrase table, plus live close-mode round trips driven by the [HTTP]Client
 "* and a raw socket — client and server on the same scheduler, so the tests are
 "* self-contained (ephemeral 127.0.0.1:0 binds; Async.timeout: guards hangs).
-use std:net/http;
-use std:net/http_server;
+use std:net/http
+use std:net/http_server
 
 (TestSuite.new:{ var name = 'HTTPServer' }).add:{
     .test:

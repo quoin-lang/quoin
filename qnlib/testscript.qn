@@ -1,135 +1,135 @@
 Point <- { | @x @y |
     .meta <-- {
         newX:y: -> { |x y| .new:{ x = x; y = y } }
-    };
+    }
 
-    x -> { @x };
-    y -> { @y };
-    name -> { 'Point' };
+    x -> { @x }
+    y -> { @y }
+    name -> { 'Point' }
 
     dist: -> { |other|
-        var dx = @x - other.x;
-        var dy = @y - other.y;
+        var dx = @x - other.x
+        var dy = @y - other.y
         ((dx * dx) + (dy * dy)).sqrt
     }
-};
+}
 
 Point <- Point3D <- { | @z |
     z -> { @z }
-};
+}
 
-PType <- { .mix:Point };
+PType <- { .mix:Point }
 
-('PType.name = ' + PType.new.name).print;
+('PType.name = ' + PType.new.name).print
 
-var p1 = Point.newX:3 y:4;
-var p2 = Point.newX:0 y:0;
-('p1.x = ' + p1.x).print;
-('p1.y = ' + p1.y).print;
-var d = p1.dist:p2;
-('distance = ' + d).print;
-p1.print;
+var p1 = Point.newX:3 y:4
+var p2 = Point.newX:0 y:0
+('p1.x = ' + p1.x).print
+('p1.y = ' + p1.y).print
+var d = p1.dist:p2
+('distance = ' + d).print
+p1.print
 
-var p3 = Point3D.new:{ |x y z| x = 10; y = 20; z = 30 };
-p3.print;
-p3.class.print;
-p3.class.s.print;
-p3.class.name.print;
-p3.class.class.print;
-p3.class.class.name.print;
-p3.class.parent.print;
-p3.class.parent.name.print;
-p3.class.parent.parent.print;
-p3.class.parent.parent.name.print;
-(p3.class == p3.class).print;
-(p3.class != p1.class).print;
-('p3.x = ' + p3.x).print;
-('p3.y = ' + p3.y).print;
-('p3.z = ' + p3.z).print;
+var p3 = Point3D.new:{ |x y z| x = 10; y = 20; z = 30 }
+p3.print
+p3.class.print
+p3.class.s.print
+p3.class.name.print
+p3.class.class.print
+p3.class.class.name.print
+p3.class.parent.print
+p3.class.parent.name.print
+p3.class.parent.parent.print
+p3.class.parent.parent.name.print
+(p3.class == p3.class).print
+(p3.class != p1.class).print
+('p3.x = ' + p3.x).print
+('p3.y = ' + p3.y).print
+('p3.z = ' + p3.z).print
 
 "* Test 1: Simple assignments, variables, and operators
-var x = 10;
-var y = 20;
-var z = x + y;
-('z = x + y = ' + z).print;
+var x = 10
+var y = 20
+var z = x + y
+('z = x + y = ' + z).print
 
 "* Test 2: List destructuring
-var a b * rest = #( 100 200 300 400 500 );
-('a = ' + a).print;
-('b = ' + b).print;
-('rest = ' + rest).print;
+var a b * rest = #( 100 200 300 400 500 )
+('a = ' + a).print
+('b = ' + b).print
+('rest = ' + rest).print
 
 "* Test 3: Lexical scopes and blocks/closures
 var make_counter = { |initial|
-    var count = initial;
+    var count = initial
     {
-        count = count + 1;
+        count = count + 1
         count
     }
-};
+}
 
-var counter = make_counter.value:10;
-var c1 = counter.value;
-var c2 = counter.value;
-('c1 = ' + c1).print;
-('c2 = ' + c2).print;
+var counter = make_counter.value:10
+var c1 = counter.value
+var c2 = counter.value
+('c1 = ' + c1).print
+('c2 = ' + c2).print
 
-{ |x| x.print }.value:42;
+{ |x| x.print }.value:42
 
 "* Test 4: Unary operators
-var flag = true;
-var inv_flag = !flag;
-('flag = ' + flag + ' inv_flag = ' + inv_flag).print;
+var flag = true
+var inv_flag = !flag
+('flag = ' + flag + ' inv_flag = ' + inv_flag).print
 
-var num = 50;
-var neg_num = -num;
-('num = ' + num + ' neg_num = ' + neg_num).print;
+var num = 50
+var neg_num = -num
+('num = ' + num + ' neg_num = ' + neg_num).print
 
 "* Test 5: Maps & Regex
-var my_map = #{ 'foo': 100 'bar': 200 };
-('map = ' + my_map).print;
+var my_map = #{ 'foo': 100 'bar': 200 }
+('map = ' + my_map).print
 
-var list = #( 1 2 3 4 5 );
-('Top half = ' + (list.select:{|n| n > 3})).print;
+var list = #( 1 2 3 4 5 )
+('Top half = ' + (list.select:{|n| n > 3})).print
 
-var re = #/^[a-z]+$/;
-var is_match = re ~ 'gemini';
-('regex match = ' + is_match).print;
+var re = #/^[a-z]+$/
+var is_match = re ~ 'gemini'
+('regex match = ' + is_match).print
 
 "* Test 6: Non-local return (^^)
 Point <-- {
     test_nlr -> {
         var bar_func = { |blk|
-            blk.value;
-            'Inside bar: should NOT reach here!'.print;
+            blk.value
+            'Inside bar: should NOT reach here!'.print
             111
-        };
+        }
 
-        var nested_block = { ^^ 777 };
-        bar_func.value:nested_block;
-        'Inside foo: should NOT reach here!'.print;
+        var nested_block = { ^^ 777 }
+        bar_func.value:nested_block
+        'Inside foo: should NOT reach here!'.print
         222
     }
-};
+}
 
-('New Point= ' + Point.new).print;
+('New Point= ' + Point.new).print
 
-var result = p1.test_nlr;
-('Result of non-local return = ' + result).print;
+var result = p1.test_nlr
+('Result of non-local return = ' + result).print
 
 "* Test 7: Namespaces
 
-var file = [IO]File.open:'/etc/zshrc';
-('file path = ' + file.fullpath).print;
-('file class = ' + file.class).print;
-('file class name = ' + file.class.name).print;
-('[/]Object = ' + [/]Object).print;
-('Object == [/]Object = ' + (Object == [/]Object)).print;
+var file = [IO]File.open:'/etc/zshrc'
+('file path = ' + file.fullpath).print
+('file class = ' + file.class).print
+('file class name = ' + file.class.name).print
+('[/]Object = ' + [/]Object).print
+('Object == [/]Object = ' + (Object == [/]Object)).print
 
-var folder = [IO]Folder.open:'qnlib/tests/';
-('Test files = ' + folder.list).print;
+var folder = [IO]Folder.open:'qnlib/tests/'
+('Test files = ' + folder.list).print
 
-var name = 'Damon';
+var name = 'Damon'
 name.case:{
     .when:'Damon' do:{ 'Hi Damon'.print };
     .when:'Bagel' do:{ 'Hello delicious'.print };
@@ -137,31 +137,31 @@ name.case:{
     .when:{ |x| x.length > 20 } do:{ 'YOUR NAME IS LONG'.print };
 
     .default:{ 'Who are you and what did you do with my bagel'.print }
-};
+}
 
 ('Low = ' + ('Low' == 5.case:{
     .when:1..10  do:'Low';
     .when:11..20 do:'High';
-})).print;
+})).print
 
 false.if:{
-    var server = TcpServer.new:{ var address = '127.0.0.1:0' };
+    var server = TcpServer.new:{ var address = '127.0.0.1:0' }
 
-    var i = 0;
-    #( 'Listening on' server.port ).print;
+    var i = 0
+    #( 'Listening on' server.port ).print
     server.start:{ |conn|
-        #( 'Received connection' conn ).print;
+        #( 'Received connection' conn ).print
 
-        conn.writeAll:'Hi\n'.asBytes;
+        conn.writeAll:'Hi\n'.asBytes
 
-        i = i + 1;
+        i = i + 1
         (i > 3).if:{ server.stop }
-    };
+    }
 
     "* join is a drain barrier (no per-connection results); the handler talks over its socket.
-    server.join;
+    server.join
     #( 'Server drained; connections still tracked:' server.connections ).print
-};
+}
 
 "*
 "* Test 8: Ambiguous method dispatch. Two variants are equally specific for `pick:10`
@@ -170,7 +170,7 @@ false.if:{
 "* script and prints the ambiguity report (each tied candidate, with its guard
 "* source, listed below the error and above the stack trace).
 Ambiguous <- {
-    pick: -> { |n:Integer {n > 0}| 'positive' };
+    pick: -> { |n:Integer {n > 0}| 'positive' }
     pick: --> { |n:Integer {n > 5}| 'big' }
-};
+}
 Ambiguous.new.pick:10

@@ -2,22 +2,22 @@
 containsKey?:/at:/at:put: churn plus a keys walk.
 Run whole-process: `qn bench/qn/maps.qn` from the repo root."
 
-var base = 'the quick brown fox jumps over the lazy dog and the cat';
-var text = base;
-var r = 0;
-{ r < 5 }.whileDo:{ text = text + ' ' + base; r = r + 1 };
-var words = text.splitString:' ';
+var base = 'the quick brown fox jumps over the lazy dog and the cat'
+var text = base
+var r = 0
+{ r < 5 }.whileDo:{ text = text + ' ' + base; r = r + 1 }
+var words = text.splitString:' '
 
-var checksum = 0;
-var k = 0;
+var checksum = 0
+var k = 0
 { k < 10000 }.whileDo:{
-    var freq = #{};
+    var freq = #{}
     words.each:{ |w|
         (freq.containsKey?:w).if:{ freq.at:w put:((freq.at:w) + 1) } else:{ freq.at:w put:1 }
-    };
-    checksum = checksum + freq.count + (freq.at:'the');
-    freq.keys.each:{ |key| checksum = checksum + (freq.at:key) };
+    }
+    checksum = checksum + freq.count + (freq.at:'the')
+    freq.keys.each:{ |key| checksum = checksum + (freq.at:key) }
     k = k + 1
-};
+}
 
 (checksum == 1000000).if:{ 'maps: ok'.print } else:{ ('maps: FAIL got ' + checksum).print }

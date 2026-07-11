@@ -1,8 +1,8 @@
-'foo%baz' % 'bar';  "* 'foobarbaz'
-'foo%1%2' % #('bar' 'baz');  "* 'foobarbaz'
-'foo%c%b' % #{ 'b':'bar' 'c':'baz' };  "* 'foobazbar'
+'foo%baz' % 'bar'  "* 'foobarbaz'
+'foo%1%2' % #('bar' 'baz')  "* 'foobarbaz'
+'foo%c%b' % #{ 'b':'bar' 'c':'baz' }  "* 'foobazbar'
 
-var a = 'b';
-var b = 'a';
+var a = 'b'
+var b = 'a'
 var c = 'r';
 %'foo%{a+b+c}baz'  "* 'foobarbaz'

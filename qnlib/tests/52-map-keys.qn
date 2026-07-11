@@ -5,17 +5,17 @@
 "* stay String-keyed and refuse loudly.
 
 Point <- { |@x @y|
-    init: -> { |x y| @x = x; @y = y };
+    init: -> { |x y| @x = x; @y = y }
     x -> { @x }
-};
+}
 
 VPoint <- { |@x @y|
-    init: -> { |x y| @x = x; @y = y };
-    hash -> { @x * 31 + @y };
-    #'==:' -> { |o| (o.class.name == 'VPoint') && ((o.hx == @x) && (o.hy == @y)) };
-    hx -> { @x };
+    init: -> { |x y| @x = x; @y = y }
+    hash -> { @x * 31 + @y }
+    #'==:' -> { |o| (o.class.name == 'VPoint') && ((o.hx == @x) && (o.hy == @y)) }
+    hx -> { @x }
     hy -> { @y }
-};
+}
 
 (TestSuite.new:{ var name = 'MapKeys' }).add:{
     .test:scalarKeysOfEveryKind -> {

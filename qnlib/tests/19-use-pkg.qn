@@ -1,9 +1,9 @@
 "* `use` packages: directory globs, the self: package, bare==std normalization,
 "* and cyclic loads. Fixtures live in non-globbed subdirs of qnlib/ (so the startup
 "* qnlib/*.qn glob doesn't auto-load them) and are pulled in only via `use`.
-use usetest/*;  "* glob: loads usetest/lib + usetest/lib2 (UTF-8 sorted)
-use self:qnlib/useself/marker;  "* the self: package (self_root = CWD in dev mode)
-use cyc/a;  "* a<->b cycle, terminated by the in-progress marker
+use usetest/*  "* glob: loads usetest/lib + usetest/lib2 (UTF-8 sorted)
+use self:qnlib/useself/marker  "* the self: package (self_root = CWD in dev mode)
+use cyc/a  "* a<->b cycle, terminated by the in-progress marker
 
 (TestSuite.new:{ var name = 'UsePackages' }).add:{
     .test:

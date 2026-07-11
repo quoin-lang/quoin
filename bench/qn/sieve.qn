@@ -4,45 +4,45 @@ Run whole-process: `qn bench/qn/sieve.qn` from the repo root."
 Sieve <- {
     .meta <-- {
         primesUpTo: -> { |limit: Integer ^List|
-            var isPrime: List(Boolean) = #();
-            var i = 0;
+            var isPrime: List(Boolean) = #()
+            var i = 0
             { i <= limit }.whileDo:{
-                isPrime.add:true;
+                isPrime.add:true
                 i = i + 1
-            };
+            }
 
-            isPrime.at:0 put:false;
-            isPrime.at:1 put:false;
+            isPrime.at:0 put:false
+            isPrime.at:1 put:false
 
-            var p = 2;
+            var p = 2
             { p * p <= limit }.whileDo:{
                 (isPrime.at:p).if:{
-                    i = p * p;
+                    i = p * p
                     { i <= limit }.whileDo:{
-                        isPrime.at:i put:false;
+                        isPrime.at:i put:false
                         i = i + p
                     }
-                };
+                }
                 p = p + 1
-            };
+            }
 
-            var primes: List(Integer) = #();
-            i = 2;
+            var primes: List(Integer) = #()
+            i = 2
             { i <= limit }.whileDo:{
-                (isPrime.at:i).if:{ primes.add:i };
+                (isPrime.at:i).if:{ primes.add:i }
                 i = i + 1
-            };
+            }
             ^primes
         }
     };
     .sealed!
-};
+}
 
-var total = 0;
-var k = 0;
+var total = 0
+var k = 0
 { k < 400 }.whileDo:{
-    var primes = Sieve.primesUpTo:10000;
-    total = total + primes.count + (primes.at:(primes.count - 1));
+    var primes = Sieve.primesUpTo:10000
+    total = total + primes.count + (primes.at:(primes.count - 1))
     k = k + 1
-};
+}
 (total == 4480800).if:{ 'sieve: ok'.print } else:{ ('sieve: FAIL got ' + total).print }

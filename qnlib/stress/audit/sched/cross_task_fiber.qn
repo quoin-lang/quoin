@@ -1,11 +1,11 @@
 "* A fiber parked on async I/O inside task t, resumed again from the main task.
-var f = Fiber.new:{ Async.sleep:300; 'fiber-done' };
-var pre = #();
-var t = Task.spawn:{ pre.add:1; f.resume };
-{ pre.count == 0 }.whileDo:{ Async.sleep:1 };
-Async.sleep:50;
-'main: resuming f while it is parked inside t'.print;
-var r = { f.resume }.catch:{ |e| 'caught: ' + e.s };
-('main resume result: ' + r.s).print;
-t.join;
+var f = Fiber.new:{ Async.sleep:300; 'fiber-done' }
+var pre = #()
+var t = Task.spawn:{ pre.add:1; f.resume }
+{ pre.count == 0 }.whileDo:{ Async.sleep:1 }
+Async.sleep:50
+'main: resuming f while it is parked inside t'.print
+var r = { f.resume }.catch:{ |e| 'caught: ' + e.s }
+('main resume result: ' + r.s).print
+t.join
 'joined'.print

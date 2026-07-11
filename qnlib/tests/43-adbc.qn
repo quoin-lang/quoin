@@ -15,7 +15,7 @@ var adbcReady = {
     Extension.loadPackage: 'quoin_packages/adbc';
     (([ADBC]Database.sqliteMemory.connect).query: 'select 1').toList;
     true
-}.catch:{ false };
+}.catch:{ false }
 
 (TestSuite.new:{ var name = 'ADBC' }).add:{
     adbcReady.if:{

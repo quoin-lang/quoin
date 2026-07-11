@@ -1,18 +1,18 @@
 "* Binary operators: + - * / == != > >= < <= .. % ~
 "* Unary operators: + - ! %
 
-1.abs;  "* Call(1, 'abs')
-3 * 4;  "* Call(3, '*:', 4)
+1.abs  "* Call(1, 'abs')
+3 * 4  "* Call(3, '*:', 4)
 
 FakeNumber <- {
-    #'+:' -> { |n:Object| 42 };
-    #'+:' --> { |n:FakeNumber| 99 };
-    #'-:' -> { |n:Object| 42 };
+    #'+:' -> { |n:Object| 42 }
+    #'+:' --> { |n:FakeNumber| 99 }
+    #'-:' -> { |n:Object| 42 }
     #'-:' --> { |n:FakeNumber| -99 }
-};
+}
 
-var fn = FakeNumber.new;
+var fn = FakeNumber.new
 
-fn + 100;  "* 42
-fn + fn;  "* 84
+fn + 100  "* 42
+fn + fn  "* 84
 fn - fn  "* 0

@@ -27,10 +27,10 @@ Case <- { |@subject|
         for:with: -> { |obj block:Block|
             { block.value:obj withSelf:.new:{ var subject = obj } }.catch:{ |r| ^^r }
         }
-    };
+    }
 
     "* Bind the subject the arms will be matched against.
-    init: -> { |subject| @subject = subject };
+    init: -> { |subject| @subject = subject }
 
     "* A match arm: when `cond ~ subject`, the block's value becomes the
     "* case result (the block receives the subject).
@@ -43,7 +43,7 @@ Case <- { |@subject|
     "* ```
     when:do: -> { |cond block:Block|
         (cond ~ @subject).if:{ (block.value:@subject withSelf:@subject).throw }
-    };
+    }
 
     "* A match arm in value form: when `cond ~ subject`, the plain value
     "* becomes the case result.
@@ -55,16 +55,16 @@ Case <- { |@subject|
     "* ```
     "* 2.case:{ .when:1 do:'one'; .when:2 do:'two'; .default:'many' }    "* -> two
     "* ```
-    when:do: --> { |cond value:Object| (cond ~ @subject).if:{ value.throw } };
+    when:do: --> { |cond value:Object| (cond ~ @subject).if:{ value.throw } }
 
     "* The catch-all arm: unconditionally answer the block's value. Must be
     "* the last arm - it always matches, so no arm after it is tried.
-    default: -> { |block:Block| block.value.throw };
+    default: -> { |block:Block| block.value.throw }
 
     "* The catch-all arm in value form: the plain value becomes the case
     "* result.
     default: --> { |value:Object| value.throw }
-};
+}
 
 "* Every object can open a case expression on itself.
 Object <-- {

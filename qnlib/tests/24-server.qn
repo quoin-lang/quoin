@@ -8,16 +8,16 @@
 [Test]EchoServer <- {
     .meta <-- {
         serve:on: -> { |n listener|
-            var count = 0;
+            var count = 0
             listener.acceptLoop:{ |conn|
-                conn.writeAll:(conn.read:4);
-                count = count + 1;
+                conn.writeAll:(conn.read:4)
+                count = count + 1
                 (count >= n).if:{ ^^count }
-            };
+            }
             ^-1  "* unreachable: acceptLoop only exits via the ^^ above
         }
     }
-};
+}
 
 (TestSuite.new:{ var name = 'Server' }).add:{
     "* acceptOnce: accept a single connection, echo it, close; the client gets it back.
