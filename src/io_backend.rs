@@ -268,6 +268,14 @@ pub enum IoRequest {
     /// is the extension point — this op never grows another variant per codec.
     /// An unknown codec errs and leaves the original stream untouched.
     WrapStream { id: StreamId, codec: String },
+    /// Close the stream at `id` COMPLETELY: take it out of the registry and drive
+    /// its `poll_close` chain before dropping. The write-codec twin of the reap
+    /// path's drop-close — a gzip encoder writes its final deflate block and
+    /// trailer in `poll_close`, so dropping the fd instead truncates the output.
+    /// Every stream the backend flagged at wrap time (`needs_finish`) is closed
+    /// through here: explicitly (`close` parks on this op), by the reap drain, or
+    /// by backend teardown.
+    FinishStream { id: StreamId },
 }
 
 /// The plain-data outcome of an [`IoRequest`].
@@ -367,6 +375,7 @@ impl IoRequest {
             }
             IoRequest::ChildWait { .. } => "proc: wait".to_string(),
             IoRequest::WrapStream { codec, .. } => format!("io: wrap {codec}"),
+            IoRequest::FinishStream { .. } => "io: finish".to_string(),
         }
     }
 }
@@ -379,6 +388,13 @@ pub trait IoBackend {
     /// `StreamId` onto a non-GC queue the scheduler drains here — no `await`, no task
     /// context. Missing ids are a no-op, so double-close is harmless.
     fn close(&self, id: StreamId);
+
+    /// Whether the stream at `id` was wrapped in a write-side codec and so must be
+    /// closed through `FinishStream` (which drives its `poll_close`) rather than
+    /// dropped — the reap drain asks this before choosing. Default: nothing does.
+    fn needs_finish(&self, _id: StreamId) -> bool {
+        false
+    }
 
     /// Synchronously kill (if still running) and deregister a spawned child — the
     /// child twin of `close`, drained from the child-reap queue when an undetached
@@ -441,6 +457,23 @@ impl Drop for SmolInner {
                 }
             }
         }
+        // Finish (don't just drop) any write-codec stream still open: its encoder
+        // writes the trailer in `poll_close`. This is the once-per-session end —
+        // the driver's per-run exit flush already wrote the buffered bytes, and a
+        // REPL keeps such a stream writable across lines, so only true teardown
+        // may finish it. Blocking is fine here: the scheduler is gone, and the
+        // close bottoms out in local file I/O on the blocking pool. Best-effort,
+        // like the exit flush (there is no one left to raise to).
+        let pending: Vec<StreamId> = self.finish_pending.borrow_mut().drain().collect();
+        for id in pending {
+            let stream = self.streams.borrow_mut().remove(&id);
+            if let Some(mut stream) = stream {
+                use futures_lite::AsyncWriteExt;
+                if let Err(e) = futures_lite::future::block_on(stream.close()) {
+                    eprintln!("qn: could not finish a compressed stream on exit: {e:?}");
+                }
+            }
+        }
     }
 }
 
@@ -490,6 +523,12 @@ struct SmolInner {
     // read/write/accept promptly (the op resolves to a catchable "closed" error)
     // instead of leaving the task waiting on a handle that no longer exists.
     op_aborts: RefCell<HashMap<StreamId, AbortHandle>>,
+    // Streams wrapped in a write-side codec (recorded by `WrapStream`), whose
+    // close must drive `poll_close` (the encoder's finish) rather than drop the
+    // fd. `FinishStream` and the sync `close` both clear an id; whatever is
+    // still here at teardown gets finished by `Drop` — the backstop that makes
+    // "wrote a .gz and fell off the end of the program" produce a valid file.
+    finish_pending: RefCell<HashSet<StreamId>>,
 }
 
 impl SmolInner {
@@ -640,6 +679,7 @@ impl SmolBackend {
                 tls_insecure: OnceCell::new(),
                 leased: RefCell::new(HashSet::new()),
                 closed_while_leased: RefCell::new(HashSet::new()),
+                finish_pending: RefCell::new(HashSet::new()),
                 op_aborts: RefCell::new(HashMap::new()),
             }),
         }
@@ -973,7 +1013,7 @@ impl IoBackend for SmolBackend {
             IoRequest::WrapStream { id, codec } => Box::pin(async move {
                 // Resolve the codec BEFORE taking the stream, so an unknown name
                 // errs with the stream (and its fd) untouched in the registry.
-                let wrap = match crate::io_codecs::lookup(&codec) {
+                let (side, wrap) = match crate::io_codecs::lookup(&codec) {
                     Ok(f) => f,
                     Err(e) => return IoResult::Err(e),
                 };
@@ -981,7 +1021,29 @@ impl IoBackend for SmolBackend {
                     Ok(s) => s,
                     Err(e) => return IoResult::Err(e),
                 };
+                if side == crate::io_codecs::Side::Write {
+                    // From here on this id must be FINISHED, never dropped — the
+                    // encoder's trailer is written by its `poll_close`.
+                    inner.finish_pending.borrow_mut().insert(id);
+                }
                 IoResult::Connected(inner.insert_at(id, wrap(stream)))
+            }),
+
+            IoRequest::FinishStream { id } => Box::pin(async move {
+                // A complete close: drive the `poll_close` chain (encoder finish →
+                // trailer → inner close), then drop. The id leaves `finish_pending`
+                // either way — on error the stream is dropped with the fd closed,
+                // and the failure is reported exactly once, here.
+                inner.finish_pending.borrow_mut().remove(&id);
+                let mut stream = match take_stream(&inner, id) {
+                    Ok(s) => s,
+                    Err(e) => return IoResult::Err(e),
+                };
+                use futures_lite::AsyncWriteExt;
+                match stream.close().await {
+                    Ok(()) => IoResult::Closed,
+                    Err(e) => IoResult::Err(e.into()),
+                }
             }),
 
             IoRequest::OpenFile { path } => Box::pin(async move {
@@ -1210,6 +1272,8 @@ impl IoBackend for SmolBackend {
         // most code reaches (the async `IoRequest::Close` is test-only).
         let _ = self.inner.streams.borrow_mut().remove(&id);
         let _ = self.inner.listeners.borrow_mut().remove(&id);
+        // A drop-close is a complete close: nothing left to finish at teardown.
+        let _ = self.inner.finish_pending.borrow_mut().remove(&id);
         // If the resource is leased out to an in-flight op, it is in neither map:
         // tombstone it (the lease's drop will close the fd instead of re-inserting)
         // and abort the op so the parked task wakes with a "closed" error now,
@@ -1220,6 +1284,10 @@ impl IoBackend for SmolBackend {
                 h.abort();
             }
         }
+    }
+
+    fn needs_finish(&self, id: StreamId) -> bool {
+        self.inner.finish_pending.borrow().contains(&id)
     }
 
     fn reap_child(&self, id: u64) {
@@ -1375,7 +1443,7 @@ impl IoBackend for MockBackend {
                 self.writes.borrow_mut().push(bytes);
                 IoResult::Wrote(n)
             }
-            IoRequest::Close { .. } => IoResult::Closed,
+            IoRequest::Close { .. } | IoRequest::FinishStream { .. } => IoResult::Closed,
             // No real handshake in the mock — the conduit keeps its id, as in the
             // native backend's in-place swap.
             IoRequest::TlsWrap { id, .. } => IoResult::Connected(id),

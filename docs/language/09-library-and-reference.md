@@ -152,21 +152,31 @@ JSON.generate:#{ 'a':1 }    "* -> {"a":1}
 question of which encoding applied. Compression is built in as Bytes codecs:
 gzip and deflate both ways (`encodeGz`/`decodeGz`, `encodeDeflate`/
 `decodeDeflate`), zstandard decode (`decodeZstd`); malformed input raises a
-catchable `ParseError`. Decompression also *streams*: `gunzip` on an unread
-`ByteStream`/`StringStream` wraps it in place, so a `.gz` file — or the `.gz`
-half of a `.tar.gz` — reads incrementally through the ordinary stream methods
-(`readAll`, `readLine`, `eachLine:`), nothing materialized. Concatenated gzip
-members decode end to end; corrupt input is a catchable `IoError` on read.
+catchable `ParseError`. Compression also *streams*, both ways: `gunzip` on an
+unread `ByteStream`/`StringStream` wraps it in place, so a `.gz` file — or the
+`.gz` half of a `.tar.gz` — reads incrementally through the ordinary stream
+methods (`readAll`, `readLine`, `eachLine:`), nothing materialized; `gzip` on
+an unwritten file write stream is the encoder twin, so a `.log.gz` writes line
+by line. Concatenated gzip members decode end to end; corrupt input is a
+catchable `IoError` on read. One discipline on the write side: **`close`
+finishes the encoder** — the trailer that makes the file valid is written
+there. Close deliberately; a stream the program leaks or leaves open at exit
+is still finished for it, best-effort, on the way out.
 
-**[Archive]Tar** reads tar archives as a *stream* of entries — pure Quoin over
+**[Archive]Tar** treats tar as a *stream* in both directions — pure Quoin over
 any ByteStream, so `.tar.gz` is just composition: `[Archive]Tar.over:(handle
-.byteStream.gunzip)`. Entries arrive in order and are consumed once (`each:`
-carries the whole Iterate vocabulary; a passed entry's content is skipped in
-chunks, never materialized); ustar prefixes, GNU long names, and pax `path=`
-headers all resolve, and header checksums are verified. `extractTo:` writes
-files and directories under a target — with member paths normalized and
-**confined**: an absolute or `../`-escaping path throws before anything lands
-outside. Writing archives is a coming slice (it wants streaming gzip *encode*).
+.byteStream.gunzip)` to read, `[Archive]Tar.writeTo:(([IO]File.create:'x.tar.gz')
+.gzip)` to write. Reading: entries arrive in order and are consumed once
+(`each:` carries the whole Iterate vocabulary; a passed entry's content is
+skipped in chunks, never materialized); ustar prefixes, GNU long names, and
+pax `path=` headers all resolve, and header checksums are verified.
+`extractTo:` writes files and directories under a target — with member paths
+normalized and **confined**: an absolute or `../`-escaping path throws before
+anything lands outside. Writing: the `writeTo:` writer takes `add:text:` /
+`add:bytes:`, `addFile:as:` (streamed from disk, size and mtime from the
+metadata snapshot), and `addFolder:`; names over 100 bytes ride a pax `path=`
+header, and `close` writes the end blocks and closes the stream through the
+codec — system tar reads the result directly.
 
 ```quoin
 'hello'.asBytes.encodeGz.decodeGz.asString    "* -> hello
@@ -185,6 +195,9 @@ stream as a **StringStream**, the UTF-8 text view (`readLine`, `eachLine:`,
 `writeln:`). These two stream classes are the *single* reading/writing surface
 over every conduit — files, sockets, and standard input all hand you the same
 streams, so code written against a stream doesn't care what's underneath.
+An `[IO]File` value from `open:` also carries a metadata snapshot: `size` in
+bytes and `modified` as a Timestamp — what a tar header or a Content-Length
+needs before any content is read.
 `[IO]Stdout` / `[IO]Stderr` are writable handles, `[IO]Stdin` reads without
 blocking other tasks, and **[IO]Folder** is an Iterate-able directory listing.
 

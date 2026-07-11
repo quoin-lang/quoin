@@ -750,7 +750,15 @@ fn drive_to_completion<F: DriverFrontend>(
                             vm.io.socket_reap.borrow_mut().drain(..).collect()
                         });
                         for id in reaped {
-                            backend.close(id);
+                            if backend.needs_finish(id) {
+                                // A write-codec stream is FINISHED (its poll_close
+                                // writes the encoder trailer), never dropped; the
+                                // drain runs inside the driver's block_on, so the
+                                // op can simply be awaited here.
+                                let _ = backend.perform(IoRequest::FinishStream { id }).await;
+                            } else {
+                                backend.close(id);
+                            }
                         }
                         let reaped_children: Vec<u64> = arena.mutate_root(|_mc, vm| {
                             vm.io.child_reap.borrow_mut().drain(..).collect()
@@ -917,7 +925,12 @@ fn drive_to_completion<F: DriverFrontend>(
                 let reaped: Vec<StreamId> =
                     arena.mutate_root(|_mc, vm| vm.io.socket_reap.borrow_mut().drain(..).collect());
                 for id in reaped {
-                    backend.close(id);
+                    if backend.needs_finish(id) {
+                        // Finish, don't drop — see the idle-drain twin above.
+                        let _ = backend.perform(IoRequest::FinishStream { id }).await;
+                    } else {
+                        backend.close(id);
+                    }
                 }
                 // Kill+deregister children whose undetached handle was collected.
                 let reaped_children: Vec<u64> =

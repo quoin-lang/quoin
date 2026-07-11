@@ -607,9 +607,16 @@ deferred `Mirror` in `## REPL`.
   `IoRequest::WrapStream` + the codec factory table in `src/io_codecs.rs` — adding a codec is a
   table entry + a qnlib sugar one-liner; the async machinery never changes again (parameterized
   wraps like TLS stay bespoke). Multi-member gz decodes end to end; unread-stream precondition
-  enforced. Tests `qnlib/tests/72-gzip-stream.qn`. **Streaming WRITE deferred to tar-write**: the
-  gzip trailer is written by the encoder's close, but the reap path only DROPS fds — the close
-  path must learn to finish the encoder first, or collected handles write corrupt archives.
+  enforced. Tests `qnlib/tests/72-gzip-stream.qn`. **Streaming WRITE shipped** (2026-07-11):
+  the codec table grew a `Side` (read/write); `gzip` wraps an unwritten FILE write stream
+  (`ByteStream/StringStream#gzip`). The trailer-on-close problem is solved by one generic
+  `IoRequest::FinishStream` op driving the wrapped stream's `poll_close`, wired on every path:
+  explicit `close` parks on it (a failed finish throws there), the reap drain finishes flagged
+  ids instead of dropping (the backend records them at wrap time), and backend teardown
+  (`SmolInner::drop`) finishes whatever remains — so even "wrote a .gz and fell off the end"
+  (or `Runtime.exit:`) yields a valid file (pinned by `tests/gzip_write.rs` child-qn runs).
+  Write codecs on SOCKETS are deliberately refused: sockets are bidirectional and the encoder's
+  write-only adapter would sever reads — revisit if streaming-compressed responses ever want it.
 - [x] ⭐ **zstd** — decode via `ruzstd` (pure Rust) as `Bytes.decodeZstd`. Encode deferred (no
   pure-Rust zstd compressor — would need the C `zstd` crate). `src/runtime/compress.rs`.
 - [x] **tar READ** — `[Archive]Tar`/`[Archive]TarEntry` (`qnlib/core/15-tar.qn`, PURE QUOIN over
@@ -619,8 +626,14 @@ deferred `Mirror` in `## REPL`.
   ParseError, `extractTo:` with normalized+CONFINED paths (traversal attack pinned by a
   hand-crafted archive in `qnlib/tests/73-tar.qn`; real fixtures come from the system tar via
   [OS]Process). Book §44.
-- [ ] **tar WRITE** — wants streaming gzip ENCODE first (the trailer-on-close problem recorded
-  under the compression item); plain `.tar` write could ship earlier if needed.
+- [x] **tar WRITE** — `[Archive]Tar.writeTo:stream` → `[Archive]TarWriter` (pure Quoin, in
+  `core/15-tar.qn`): `add:text:`/`add:bytes:`, `addFile:as:` (streamed in chunks; size + mtime
+  from the `[IO]File` metadata snapshot — `size`/`modified` were added natively for it),
+  `addFolder:`, `close` (zero end blocks + close through a `gzip` wrap, so `.tar.gz` is pure
+  composition). POSIX ustar headers; names > 100 bytes ride a pax `path=` extended header.
+  Verified against our own reader AND the system tar (`qnlib/tests/73-tar.qn` TarWrite suite).
+  Defaults deliberate (0644/0755, uid/gid 0, mtime now); per-member mode/mtime overrides are
+  future sugar if wanted.
 - [ ] **zip** (`zip`) — archive read/write; needs central-directory (non-streaming) reading, its
   own design.
 

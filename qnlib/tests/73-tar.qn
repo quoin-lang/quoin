@@ -151,3 +151,82 @@ var craftTar = { |name content|
         .does:{ bad.next } throw:ParseError;
     };
 }
+
+"* [Archive]TarWriter: the write half, verified three ways — our own reader, our
+"* reader's extractTo:, and the SYSTEM tar (the dogfood mirror of the read
+"* tests). The shared archive is built once in setupAll:.
+(TestSuite.new:{ var name = 'TarWrite' }).add:{
+    var long = (((1..12).collect:{ 'directory-' }).join:'') + '.txt';
+
+    .setupAll:{
+        [IO]File.write:'from disk, streamed' to:'/tmp/qn_t_tw_src.txt'
+        var tar = [Archive]Tar.writeTo:(([IO]File.create:'/tmp/qn_t_tw.tar.gz').gzip)
+        tar.addFolder:'sub'
+        tar.add:'a.txt' text:'written by TarWriter'
+        tar.add:('sub/' + long) text:'deep'
+        tar.addFile:'/tmp/qn_t_tw_src.txt' as:'sub/disk.txt'
+        tar.close
+    };
+
+    .teardownAll:{
+        ([OS]Process.run:#(
+            'rm' '-rf' '/tmp/qn_t_tw.tar.gz' '/tmp/qn_t_tw_src.txt' '/tmp/qn_t_tw_out'
+        )).check;
+    };
+
+    .test:
+    ourReaderReadsItBack -> {
+        var entries = #{};
+        var mtimes = #{};
+        var rd = [Archive]Tar.over:(([IO]File.open:'/tmp/qn_t_tw.tar.gz').byteStream.gunzip);
+        rd.each:{ |e|
+            entries.at:(e.name) put:((e.type == #file).if:{ e.text } else:{ '<dir>' })
+            mtimes.at:(e.name) put:(e.mtime)
+        };
+        .is:{ entries.at:'a.txt' } equalTo:'written by TarWriter';
+        "* The 168-byte name rode a pax path= header our reader honors.
+        .is:{ entries.at:('sub/' + long) } equalTo:'deep';
+        "* addFile:as: streamed the disk file in whole.
+        .is:{ entries.at:'sub/disk.txt' } equalTo:'from disk, streamed';
+        .is:{ entries.at:'sub/' } equalTo:'<dir>';
+        "* mtimes are real (now, not zero).
+        .isTrue:{ (mtimes.at:'a.txt').asUnixSeconds > 1500000000 };
+    };
+
+    .test:
+    systemTarAcceptsOurOutput -> {
+        var listing = (([OS]Process.run:#( 'tar' '-tzf' '/tmp/qn_t_tw.tar.gz' )).check.stdout);
+        "* bsdtar shows the FULL pax name, not the truncated in-header one.
+        .isTrue:{ listing.contains?:('sub/' + long) };
+        [OS]Process.run:#( 'rm' '-rf' '/tmp/qn_t_tw_out' );
+        [IO]Folder.create:'/tmp/qn_t_tw_out';
+        ([OS]Process.run:#( 'tar' '-xzf' '/tmp/qn_t_tw.tar.gz' '-C' '/tmp/qn_t_tw_out' )).check;
+        .is:{ [IO]File.read:'/tmp/qn_t_tw_out/a.txt' } equalTo:'written by TarWriter';
+        .is:{ [IO]File.read:('/tmp/qn_t_tw_out/sub/' + long) } equalTo:'deep';
+        .is:{ [IO]File.read:'/tmp/qn_t_tw_out/sub/disk.txt' } equalTo:'from disk, streamed';
+    };
+
+    .test:
+    extractToRoundTrip -> {
+        [OS]Process.run:#( 'rm' '-rf' '/tmp/qn_t_tw_out' );
+        var rd = [Archive]Tar.over:(([IO]File.open:'/tmp/qn_t_tw.tar.gz').byteStream.gunzip);
+        rd.extractTo:'/tmp/qn_t_tw_out';
+        .is:{ [IO]File.read:'/tmp/qn_t_tw_out/sub/disk.txt' } equalTo:'from disk, streamed';
+        .is:{ [IO]File.read:('/tmp/qn_t_tw_out/sub/' + long) } equalTo:'deep';
+    };
+
+    .test:
+    writerGuards -> {
+        var p = '/tmp/qn_t_tw_guard.tar';
+        var w = [Archive]Tar.writeTo:([IO]File.create:p);
+        w.add:'x.txt' text:'x';
+        w.close;
+        "* Adding after close throws; a second close is a no-op.
+        .does:{ w.add:'y.txt' text:'y' } throw:ValueError;
+        w.close;
+        var rd = [Archive]Tar.over:(([IO]File.open:p).byteStream);
+        .is:{ rd.next.text } equalTo:'x';
+        .is:{ rd.next } equalTo:nil;
+        [IO]File.delete:p;
+    };
+}
