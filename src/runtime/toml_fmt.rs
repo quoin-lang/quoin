@@ -34,8 +34,8 @@ pub fn build_toml_class() -> NativeClassBuilder {
              ```",
         )
         // TOML.generate:aMap -> a TOML document.
-        .sdk_class_method("generate:", |host, _r, args| {
-            let data = value_to_data(args[0])?;
+        .class_method("generate:", |vm, mc, _r, args| {
+            let data = value_to_data(vm, mc, args[0])?;
             if !matches!(data, DataValue::Object(_)) {
                 return Err(QuoinError::ValueError(
                     "TOML.generate:: the top-level value must be a Map (a TOML table)".to_string(),
@@ -48,7 +48,7 @@ pub fn build_toml_class() -> NativeClassBuilder {
             }
             let s = toml::to_string(&data)
                 .map_err(|e| QuoinError::ValueError(format!("TOML.generate:: {e}")))?;
-            Ok(host.new_string(s))
+            Ok(vm.new_string(mc, s))
         })
         .doc(
             "Generate the TOML document for a Map (nested Maps become tables). The top-level \

@@ -129,3 +129,30 @@ helper methods; Phase 1 (base64/hex + JSON) first.
 1. `Base64`/`Hex` + helpers → 2. `DataValue` bridge → 3. `JSON` parse/generate (+ number rules) →
    4. tests. `cargo build` / `cargo test` + `qn qnlib/main.qn`. New deps: `serde`, `serde_json`,
    `base64`, `hex`.
+
+
+## Custom serialization — the `asData` protocol (shipped 2026-07-11)
+
+The Phase-1 "error on anything outside the core tree" behavior grew the planned hook: a
+method protocol, not a registry (classes are open — `DateTime <-- { asData -> {…} }`
+covers "a class you don't own", so a registry would duplicate class extension with worse
+discoverability).
+
+- **Seam**: `data_value.rs::as_data_of` — if the value's class understands `asData`
+  (`lookup_in_class_hierarchy`), call it and recurse on the answer, spending the same
+  `MAX_SERIALIZE_DEPTH` budget (a self-referential `asData` errors catchably). Fires from
+  both walks (`value_to_json`, `value_to_data`) at every no-representation point: the
+  Instance/Symbol/Block/Bytes(JSON) arms and the unknown-native fallthrough. Both walks
+  now take `vm, mc` (their five call sites are native class methods).
+- **The extension wire and worker frames keep their strict walkers deliberately** — that
+  boundary's contract is explicit core data; an extension silently receiving a
+  stringified DateTime would be a trap.
+- **Stdlib defaults** in `qnlib/core/16-serialize.qn`, each chosen to round-trip via the
+  type's own `parse:`: DateTime → RFC 9557 (zone kept; serialize `.timestamp` for bare
+  RFC 3339), Timestamp → RFC 3339, Date/Time → ISO, Span/Duration → iso8601, UUID/ULID →
+  canonical strings, Set → List (insertion order), KeyValuePair → `#{'key':… 'value':…}`.
+  Symbol/Block/Regex stay errors by default; the error message names the protocol.
+- **One-way, untagged** by design. The reverse convention is class-side `fromData:`
+  (documented, not enforced); auto-tagging could layer on later without breaking this.
+
+Tests: `qnlib/tests/74-serialize.qn`.

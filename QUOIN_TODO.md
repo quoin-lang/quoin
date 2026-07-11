@@ -536,13 +536,15 @@ deferred `Mirror` in `## REPL`.
 - [x] **CSV** — read/write with quoting/escaping.
 - [x] **TOML**/**YAML** (config)
 - [x] **MessagePack** (binary, pairs with `Bytes`).
-- [ ] **Custom serialization** — a configurable way for users to serialize non-trivial types
-  (`DateTime`, `BigDecimal`, custom classes, …) into the structured formats, rather than the
-  Phase-1 behavior of erroring on anything outside the core value tree. Design a serialization
-  protocol/hook — e.g. an opt-in `toData`/`asJson`-style method, or a registry mapping a class to
-  a `DataValue` shape — so a `DateTime` serializes as an RFC 3339 string, a user class as a chosen
-  Map, etc., with control over the round-trip. (Cross-ref `docs/STDLIB_DATA_FORMATS.md` — the
-  `DataValue` bridge is the natural seam for this.)
+- [x] **Custom serialization** — the **`asData` method protocol** (a registry would duplicate
+  open-class extension): when `value_to_json`/`value_to_data` reach a no-representation value,
+  they call the class's `asData` and recurse on the answer (same depth budget → self-referential
+  asData errors catchably). Stdlib defaults in `qnlib/core/16-serialize.qn` (DateTime RFC 9557,
+  Timestamp RFC 3339, Date/Time ISO, Span/Duration iso8601, UUID/ULID, Set → List,
+  KeyValuePair), each round-tripping via the type's own `parse:`; Symbol/Block/Regex stay
+  errors by default (opt in per class). One-way/untagged; reverse convention = class-side
+  `fromData:`. The extension wire + worker frames keep strict walkers DELIBERATELY. As-built
+  in `docs/STDLIB_DATA_FORMATS.md`; tests `qnlib/tests/74-serialize.qn`; book §44.
 
 **Text & presentation**
 - [x] **Pretty-printer** — structural, width-aware rendering of nested collections/objects

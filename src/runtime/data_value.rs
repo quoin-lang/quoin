@@ -1,10 +1,13 @@
 use crate::error::QuoinError;
+use crate::vm::VmState;
+
 use crate::ext_sdk::Host;
 use crate::runtime::big_decimal::{NativeBigDecimal, make_decimal};
 use crate::runtime::big_integer::{NativeBigInteger, make_bigint};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::value::{ObjectPayload, Value};
+use gc_arena::Mutation;
 
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -39,7 +42,9 @@ fn unrepresentable(type_name: &str) -> QuoinError {
     QuoinError::TypeError {
         expected: "a serializable value".to_string(),
         got: type_name.to_string(),
-        msg: format!("cannot serialize a {type_name} (no data representation)"),
+        msg: format!(
+            "cannot serialize a {type_name} (no data representation — define asData to give it one)"
+        ),
     }
 }
 
@@ -66,18 +71,45 @@ pub fn too_deep() -> QuoinError {
     ))
 }
 
-/// Walk a Quoin value into a `DataValue` (the generate side). Errors on values with no data
-/// representation (Block, Symbol, a user instance, another native type like Duration/DateTime),
-/// and on a value nested past [`MAX_SERIALIZE_DEPTH`].
-///
-/// Backs `MessagePack.pack:`, `TOML.generate:`, `YAML.generate:`, extension `call:…data:` and the
-/// process-worker frames — so the depth check here is also what keeps `pack_dv`/`write_dv`
-/// (infallible, recursive) from ever seeing a value deeper than the cap.
-pub fn value_to_data(v: Value) -> Result<DataValue, QuoinError> {
-    value_to_data_at(v, 0)
+/// The `asData` hook: if `v`'s class understands `asData`, call it and answer the
+/// result for the walk to recurse on; `None` means no protocol — the caller keeps its
+/// typed error. This is THE custom-serialization seam: a class (stdlib or user, native
+/// or not — classes are open) defines `asData` answering a core-tree value, and every
+/// structured format serializes it. One-way by design; the reverse convention is a
+/// class-side `fromData:` (stdlib types already parse their own forms).
+pub fn as_data_of<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    v: Value<'gc>,
+) -> Option<Result<Value<'gc>, QuoinError>> {
+    let class = vm.get_class_for_lookup(v)?;
+    vm.lookup_in_class_hierarchy(class, "asData", false)?;
+    Some(vm.call_method(mc, v, "asData", vec![]))
 }
 
-fn value_to_data_at(v: Value, depth: usize) -> Result<DataValue, QuoinError> {
+/// Walk a Quoin value into a `DataValue` (the generate side). A value with no data
+/// representation (Block, Symbol, a user instance, another native type) is asked for
+/// `asData` first ([`as_data_of`]); only protocol-less values error. Depth past
+/// [`MAX_SERIALIZE_DEPTH`] errors — and the `asData` recursion spends the same budget,
+/// so a self-referential `asData` is a catchable error, not a hang.
+///
+/// Backs `MessagePack.pack:`, `TOML.generate:`, `YAML.generate:`. The extension wire and
+/// worker frames use their own STRICT walkers deliberately: that boundary's contract is
+/// explicit core data.
+pub fn value_to_data<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    v: Value<'gc>,
+) -> Result<DataValue, QuoinError> {
+    value_to_data_at(vm, mc, v, 0)
+}
+
+fn value_to_data_at<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    v: Value<'gc>,
+    depth: usize,
+) -> Result<DataValue, QuoinError> {
     if depth > MAX_SERIALIZE_DEPTH {
         return Err(too_deep());
     }
@@ -87,23 +119,31 @@ fn value_to_data_at(v: Value, depth: usize) -> Result<DataValue, QuoinError> {
         Value::Int(i) => Ok(DataValue::Int(i)),
         Value::Double(f) => Ok(DataValue::Float(f)),
         Value::Object(obj) => {
-            {
+            // Classify inside the borrow; the asData hook runs AFTER it drops (the
+            // hook re-enters the interpreter, which may borrow the object again).
+            let blocked: Option<String> = {
                 let borrowed = obj.borrow();
                 match &borrowed.payload {
                     ObjectPayload::String(s) => return Ok(DataValue::Str((**s).clone())),
                     ObjectPayload::Bytes(b) => return Ok(DataValue::Bytes((**b).clone())),
-                    ObjectPayload::Symbol(_) => return Err(unrepresentable("Symbol")),
-                    ObjectPayload::Block(_) => return Err(unrepresentable("Block")),
-                    ObjectPayload::Instance => return Err(unrepresentable(&borrowed.class_name())),
-                    ObjectPayload::NativeState(_) => {} // dispatched below, after dropping the borrow
+                    ObjectPayload::Symbol(_) => Some("Symbol".to_string()),
+                    ObjectPayload::Block(_) => Some("Block".to_string()),
+                    ObjectPayload::Instance => Some(borrowed.class_name()),
+                    ObjectPayload::NativeState(_) => None, // dispatched below
                 }
+            };
+            if let Some(kind) = blocked {
+                return match as_data_of(vm, mc, v) {
+                    Some(res) => value_to_data_at(vm, mc, res?, depth + 1),
+                    None => Err(unrepresentable(&kind)),
+                };
             }
             if let Ok(items) =
                 v.with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
             {
                 let arr = items
                     .iter()
-                    .map(|e| value_to_data_at(*e, depth + 1))
+                    .map(|e| value_to_data_at(vm, mc, *e, depth + 1))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(DataValue::Array(arr));
             }
@@ -116,7 +156,7 @@ fn value_to_data_at(v: Value, depth: usize) -> Result<DataValue, QuoinError> {
                     let crate::value::ObjectPayload::String(ks) = &kobj.borrow().payload else {
                         return Err(unrepresentable("Map with non-String keys"));
                     };
-                    pairs.push(((**ks).clone(), value_to_data_at(val, depth + 1)?));
+                    pairs.push(((**ks).clone(), value_to_data_at(vm, mc, val, depth + 1)?));
                 }
                 return Ok(DataValue::Object(pairs));
             }
@@ -126,7 +166,12 @@ fn value_to_data_at(v: Value, depth: usize) -> Result<DataValue, QuoinError> {
             if let Ok(dec) = v.with_native_state::<NativeBigDecimal, _, _>(|d| d.0) {
                 return Ok(DataValue::Decimal(dec));
             }
-            Err(unrepresentable(v.type_name()))
+            // An unlisted native type (Duration, DateTime, a Process handle, …):
+            // the asData protocol is its one way in.
+            match as_data_of(vm, mc, v) {
+                Some(res) => value_to_data_at(vm, mc, res?, depth + 1),
+                None => Err(unrepresentable(&v.class_name())),
+            }
         }
         _ => Err(unrepresentable(v.type_name())),
     }

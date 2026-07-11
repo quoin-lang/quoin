@@ -21,11 +21,11 @@ pub fn build_message_pack_class() -> NativeClassBuilder {
              ```",
         )
         // MessagePack.pack:value -> Bytes.
-        .sdk_class_method("pack:", |host, _r, args| {
-            let data = value_to_data(args[0])?;
+        .class_method("pack:", |vm, mc, _r, args| {
+            let data = value_to_data(vm, mc, args[0])?;
             let bytes = rmp_serde::to_vec(&data)
                 .map_err(|e| QuoinError::Other(format!("MessagePack.pack:: {e}")))?;
-            Ok(host.new_bytes(bytes))
+            Ok(vm.new_bytes(mc, bytes))
         })
         .doc(
             "Serialize a value (Maps, Lists, Strings, numbers, Booleans, Bytes, nil) to \

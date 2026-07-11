@@ -119,6 +119,26 @@ the binary equivalent (`pack:` to Bytes, `unpack:` back), and **Base64** /
 **Hex** encode between Bytes and text — with conveniences hung directly on the
 values (`'hi'.asBytes.toBase64`, `aString.fromBase64`).
 
+Anything beyond the core value tree serializes through the **`asData`
+protocol**: when a generator's walk reaches a value it has no representation
+for, it calls the class's `asData` — which answers a core-tree value — and
+recurses on the result. One method opts any class into *every* format, and
+because classes are open, that includes classes you don't own. The stdlib
+defaults are already wired: `DateTime` (RFC 9557), `Timestamp` (RFC 3339),
+`Date`/`Time` (ISO), `Span`/`Duration` (ISO durations), `UUID`/`ULID`, `Set`
+(→ List), `KeyValuePair` — each chosen to parse back via the type's own
+`parse:`. Deliberately one-way and untagged (interop over magic); the reverse
+convention is a class-side `fromData:`. `Symbol`, `Block`, and `Regex` stay
+unserializable unless you opt them in — silently stringifying identifiers or
+code is a trap. A self-referential `asData` spends the same 128-level depth
+budget as any value, so it errors catchably instead of hanging.
+
+```quoin
+JSON.generate:(Date.parse:'2026-07-11')     "* -> '"2026-07-11"'
+Point <- { |@x @y| asData -> { #{ 'x': @x 'y': @y } } };
+JSON.generate:(Point.new:{ var x = 1; var y = 2 })    "* -> '{"x":1,"y":2}'
+```
+
 ```quoin
 JSON.parse:'[1, 2, 3]'      "* -> #(1 2 3)
 JSON.generate:#{ 'a':1 }    "* -> {"a":1}

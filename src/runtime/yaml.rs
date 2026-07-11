@@ -35,11 +35,11 @@ pub fn build_yaml_class() -> NativeClassBuilder {
              ```",
         )
         // YAML.generate:value -> a YAML document.
-        .sdk_class_method("generate:", |host, _r, args| {
-            let data = value_to_data(args[0])?;
+        .class_method("generate:", |vm, mc, _r, args| {
+            let data = value_to_data(vm, mc, args[0])?;
             let s = serde_yaml_ng::to_string(&data)
                 .map_err(|e| QuoinError::ValueError(format!("YAML.generate:: {e}")))?;
-            Ok(host.new_string(s))
+            Ok(vm.new_string(mc, s))
         })
         .doc(
             "Generate the YAML document for a value (any top-level value is allowed, unlike \
