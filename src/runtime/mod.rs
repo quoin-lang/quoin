@@ -9,6 +9,7 @@ pub mod channel;
 pub mod class;
 pub mod codecs;
 pub mod compress;
+pub mod crypto;
 pub mod csv_fmt;
 pub mod data_value;
 pub mod date_time;

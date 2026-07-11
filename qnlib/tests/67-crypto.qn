@@ -1,0 +1,58 @@
+"* The [Crypto] namespace (src/runtime/crypto.rs): one-shot digests, HMAC, and
+"* CSPRNG bytes. Digest values are pinned to PUBLISHED test vectors — NIST for the
+"* SHA family, RFC 1321 for MD5, the BLAKE3 reference, RFC 4231/2202 for HMAC —
+"* never self-computed answers.
+(TestSuite.new:{ var name = 'Crypto' }).add:{
+    .test:
+    digestVectors -> {
+        .is:{ ([Crypto]Digest.sha256:'abc').toHex }
+            equalTo:'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
+        .is:{ ([Crypto]Digest.sha256:'').toHex }
+            equalTo:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+        .is:{ ([Crypto]Digest.sha512:'abc').count } equalTo:64;
+        .is:{ ([Crypto]Digest.sha512:'abc').toHex.starts?:'ddaf35a193617aba' } equalTo:true;
+        .is:{ ([Crypto]Digest.sha1:'abc').toHex }
+            equalTo:'a9993e364706816aba3e25717850c26c9cd0d89d';
+        .is:{ ([Crypto]Digest.md5:'abc').toHex }
+            equalTo:'900150983cd24fb0d6963f7d28e17f72';
+        .is:{ ([Crypto]Digest.blake3:'abc').toHex }
+            equalTo:'6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85';
+    };
+
+    .test:
+    digestInputs -> {
+        "* A String hashes as its UTF-8 bytes — identical to hashing the Bytes.
+        .is:{ [Crypto]Digest.sha256:'abc'.asBytes } equalTo:([Crypto]Digest.sha256:'abc');
+        "* Anything else is a TypeError.
+        .does:{ [Crypto]Digest.sha256:42 } throw:TypeError;
+        "* Digests are Bytes — compose with the existing codecs.
+        .is:{ Base64.encode:([Crypto]Digest.md5:'abc') } equalTo:'kAFQmDzST7DWlj99KOF/cg==';
+    };
+
+    .test:
+    hmac -> {
+        "* RFC 4231 test case 2 (key 'Jefe').
+        .is:{ ([Crypto]Hmac.sha256:'what do ya want for nothing?' key:'Jefe').toHex }
+            equalTo:'5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843';
+        "* RFC 2202 test case 2.
+        .is:{ ([Crypto]Hmac.sha1:'what do ya want for nothing?' key:'Jefe').toHex }
+            equalTo:'effcdf6ae5eb2fa2d27416d5f184df9c259a7c79';
+        .is:{ ([Crypto]Hmac.sha512:'m' key:'k').count } equalTo:64;
+        "* Constant-time check: the right MAC verifies, a tampered one doesn't.
+        var mac = [Crypto]Hmac.sha256:'msg' key:'k';
+        .isTrue:{ [Crypto]Hmac.verifySha256:mac message:'msg' key:'k' };
+        .isFalse:{ [Crypto]Hmac.verifySha256:mac message:'tampered' key:'k' };
+        .isFalse:{ [Crypto]Hmac.verifySha256:mac message:'msg' key:'wrong' };
+    };
+
+    .test:
+    secureRandom -> {
+        .is:{ ([Crypto]Random.bytes:32).count } equalTo:32;
+        .is:{ ([Crypto]Random.bytes:0).count } equalTo:0;
+        "* Two draws are (astronomically) never equal.
+        .isFalse:{ ([Crypto]Random.bytes:16) == ([Crypto]Random.bytes:16) };
+        .does:{ [Crypto]Random.bytes:(0 - 1) } throw:ValueError;
+        "* [Crypto] classes are namespaces of class methods — never instantiated.
+        .does:{ [Crypto]Random.new } throw:ClassError;
+    };
+}

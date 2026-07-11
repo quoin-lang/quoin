@@ -172,6 +172,28 @@ the ordinary operators.
 ULID.generate.s.length    "* -> 26
 ```
 
+### Hashes, MACs & secure random — `[Crypto]`
+
+**`[Crypto]Digest`** computes one-shot digests — `sha256:` / `sha512:` /
+`sha1:` / `blake3:`, plus `md5:` (not cryptography anymore; it lives here to
+keep the hashes together). Each takes a String (hashed as its UTF-8 bytes) or
+a Bytes value and answers the raw digest as **Bytes**, composing with the
+codecs above: `toHex` for the usual text form, `Base64.encode:` for wire
+formats. **`[Crypto]Hmac`** is the keyed counterpart (`sha256:key:`,
+`sha512:key:`, `sha1:key:`) — and checking a received MAC goes through
+`verifySha256:message:key:`, which compares in **constant time**; `==` on the
+recomputed Bytes bails at the first differing byte and leaks how much of a
+guess was right. **`[Crypto]Random`** answers bytes from the operating
+system's CSPRNG for keys, tokens, and salts — the seedable `Random` class is
+for simulations, this one is for secrets.
+
+```quoin
+([Crypto]Digest.sha256:'abc').toHex          "* -> 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+var mac = [Crypto]Hmac.sha256:'msg' key:'secret'
+[Crypto]Hmac.verifySha256:mac message:'msg' key:'secret'    "* -> true
+([Crypto]Random.bytes:16).count              "* -> 16
+```
+
 ### Covered elsewhere
 
 - **Concurrency** — `Task`, `Fiber`, `Channel`, `Async`, the `parallelCollect:`

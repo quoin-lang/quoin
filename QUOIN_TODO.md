@@ -555,10 +555,19 @@ deferred `Mirror` in `## REPL`.
   common case today; see `docs/STDLIB_TIME.md` deferred).
 
 **Crypto & hashing**
-- [ ] ⭐ **Digests** — `sha256`/`sha1`/`md5`/`blake3` + HMAC over `Bytes`/`String` (`sha2`, `blake3`).
-- [ ] ⭐ **UUID** — v4 (random) and v7 (time-ordered) (`uuid`).
-- [ ] **Secure random** — CSPRNG bytes (pairs with Random/UUID). Later: symmetric (AES-GCM) and
-  signatures (Ed25519).
+- [x] ⭐ **Digests** — `[Crypto]Digest` class methods `sha256:`/`sha512:`/`sha1:`/`md5:`/`blake3:`
+  over String (UTF-8) or Bytes → the raw digest as Bytes (compose with `toHex`/`Base64.encode:`),
+  and `[Crypto]Hmac` `sha256:key:`/`sha512:key:`/`sha1:key:` + constant-time
+  `verifySha256:message:key:` (`==` on recomputed Bytes is a timing side channel — the verify
+  method is the taught idiom). `src/runtime/crypto.rs` (`sha2`/`sha1`/`md-5`/`blake3`/`hmac`);
+  vectors pinned to NIST / RFC 4231 / RFC 2202 / the BLAKE3 reference in `qnlib/tests/67-crypto.qn`;
+  book §44 "Hashes, MACs & secure random". One-shot only — streaming `update:`/`final` deferred
+  until something needs to hash a stream.
+- [x] ⭐ **UUID** — v4 (random) and v7 (time-ordered) (`uuid`). *(Was already shipped —
+  `UUID.generateV4`/`generateV7` with tests; the unchecked box was stale. Verified 2026-07-11.)*
+- [x] **Secure random** — `[Crypto]Random.bytes:n`: Bytes straight from the OS CSPRNG
+  (`getrandom`), deliberately not seedable — the seedable `Random` is for simulations, this one
+  is for secrets. Later: symmetric (AES-GCM) and signatures (Ed25519).
 
 **Compression & archives**
 - [x] ⭐ **gzip / zlib / deflate** — one-shot (de)compression as `Bytes` methods
