@@ -132,7 +132,21 @@ JSON.generate:#{ 'a':1 }    "* -> {"a":1}
 question of which encoding applied. Compression is built in as Bytes codecs:
 gzip and deflate both ways (`encodeGz`/`decodeGz`, `encodeDeflate`/
 `decodeDeflate`), zstandard decode (`decodeZstd`); malformed input raises a
-catchable `ParseError`.
+catchable `ParseError`. Decompression also *streams*: `gunzip` on an unread
+`ByteStream`/`StringStream` wraps it in place, so a `.gz` file — or the `.gz`
+half of a `.tar.gz` — reads incrementally through the ordinary stream methods
+(`readAll`, `readLine`, `eachLine:`), nothing materialized. Concatenated gzip
+members decode end to end; corrupt input is a catchable `IoError` on read.
+
+**[Archive]Tar** reads tar archives as a *stream* of entries — pure Quoin over
+any ByteStream, so `.tar.gz` is just composition: `[Archive]Tar.over:(handle
+.byteStream.gunzip)`. Entries arrive in order and are consumed once (`each:`
+carries the whole Iterate vocabulary; a passed entry's content is skipped in
+chunks, never materialized); ustar prefixes, GNU long names, and pax `path=`
+headers all resolve, and header checksums are verified. `extractTo:` writes
+files and directories under a target — with member paths normalized and
+**confined**: an absolute or `../`-escaping path throws before anything lands
+outside. Writing archives is a coming slice (it wants streaming gzip *encode*).
 
 ```quoin
 'hello'.asBytes.encodeGz.decodeGz.asString    "* -> hello
@@ -171,9 +185,24 @@ filesystem, which is exactly what makes it safe on a path you are about to
 create. Filesystem truth (existence, deletion, renames) lives on `[IO]File` and
 `[IO]Folder`.
 
+**[OS]Process** runs subprocesses *on the scheduler*: `run:` parks the calling
+task for the child's whole lifecycle — other tasks keep running — and answers a
+**ProcessResult** (`stdout`/`stderr`, `exitCode`, `ok?`, and `check`, which
+turns failure into a typed `ProcessError` carrying the result). The command is
+a List (program + arguments): there is **no shell**, so nothing splits, globs,
+or injects — and `run:env:` sets variables for the *child*, which is why
+`[OS]Env` itself can stay read-only. `start:` spawns for streaming: the handle's
+`stdout`/`stderrText` read like sockets, `writeStdin:`/`closeStdin` feed it,
+`wait`/`kill`/`terminate` manage it. Lifecycle is owned, not leaked: a
+cancelled `run:` (an `Async.timeout:` firing) kills its child, an undetached
+handle's child dies with it, and `detach` is the explicit opt-out.
+
 ```quoin
 [OS]Path.join:#('etc' 'app' 'conf.toml')                "* -> etc/app/conf.toml
 [OS]Env.at:'QN_SURELY_UNSET' ifAbsent:{ 'fallback' }    "* -> fallback
+([OS]Process.run:#( 'echo' 'hi' )).stdout               "* -> 'hi\n'
+([OS]Process.run:#( 'cat' ) input:'meow').stdout        "* -> 'meow'
+([OS]Process.run:#( 'false' )).ok?                      "* -> false
 ```
 
 ### Terminal & logging
@@ -202,6 +231,28 @@ and plain everywhere else. The `???` placeholder statement is a plain
 Term.strip:'[red]hot[/]'                     "* -> 'hot'
 ('FAIL'.styled:'bold red').plain             "* -> 'FAIL'
 Log.level:#error in:{ Log.info:{ !!! } }    "* -> nil
+```
+
+### Command-line tools
+
+**[CLI]Spec** turns `Runtime.arguments` into a declared interface: flags,
+value-taking options (defaults, `required:`, `values:` enums), positionals, a
+trailing `rest:` splat, or subcommands (each with its own sub-spec). `parse` is
+the production entry — `-h`/`--help` prints the *generated* help and exits 0,
+misuse prints the message plus usage to stderr and exits 2 — while `parseFrom:`
+throws a typed **UsageError** instead, which is how you test a tool in-process.
+GNU conventions: `--name value`, `--name=value`, short `-x`, `--` ends option
+parsing; values stay Strings (convert with `to_integer` and friends). Reading a
+name the spec never declared is a ValueError — a typo can't masquerade as an
+absent option. With a shebang and the execute bit (§36), the result is a real
+command: `./greet --help` is your tool's help, not qn's.
+
+```quoin
+var cli = [CLI]Spec.new:'greet' about:'says hello'
+cli.flag:'shout' short:'s' help:'LOUDLY'
+cli.positional:'name' help:'whom to greet'
+var args = cli.parseFrom:#( '-s' 'quoin' )
+#( (args.at:'name') (args.flag?:'shout') )    "* -> #(quoin true)
 ```
 
 ### Unique identifiers

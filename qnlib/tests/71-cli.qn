@@ -1,0 +1,146 @@
+"* [CLI]Spec / [CLI]Parsed (core/14-cli.qn): declarative argument parsing. Everything
+"* drives through parseFrom: (the testable seam — throws UsageError instead of exiting);
+"* the production `parse` wrapper is a thin exit-code shell over it, pinned end to end
+"* in tests/cli.rs through a real qn child.
+
+"* One spec shape, rebuilt fresh per use (specs are mutable builders).
+var cliTool = {
+    var cli = [CLI]Spec.new:'mytool' about:'frobs the inputs'
+    cli.flag:'verbose' short:'v' help:'chatty output'
+    cli.option:'output' short:'o' default:'out.txt' help:'where to write'
+    cli.option:'level' values:#( 'debug' 'info' 'warn' ) help:'log level'
+    cli.positional:'input' help:'the file to read'
+    cli.rest:'extras'
+    cli
+}
+
+(TestSuite.new:{ var name = 'Cli' }).add:{
+    .test:
+    flagsOptionsPositionals -> {
+        var a = cliTool.value.parseFrom:#( '--verbose' '--level=info' 'in.csv' 'x' 'y' );
+        .isTrue:{ a.flag?:'verbose' };
+        .is:{ a.at:'level' } equalTo:'info';
+        .is:{ a.at:'output' } equalTo:'out.txt';    "* default applied
+        .is:{ a.at:'input' } equalTo:'in.csv';
+        .is:{ a.at:'extras' } equalTo:#( 'x' 'y' );
+        "* Short options, --name value form, absent flag/rest defaults.
+        var b = cliTool.value.parseFrom:#( '-o' 'z.txt' 'in.csv' );
+        .is:{ b.at:'output' } equalTo:'z.txt';
+        .isFalse:{ b.flag?:'verbose' };
+        .is:{ b.at:'extras' } equalTo:#();
+        .is:{ b.command } equalTo:nil;
+        "* An option value may start with a dash (it is consumed, not parsed).
+        .is:{ (cliTool.value.parseFrom:#( '--output' '-weird' 'in' )).at:'output' }
+            equalTo:'-weird';
+    };
+
+    .test:
+    usageErrors -> {
+        var cli = cliTool.value;
+        "* Pin each diagnostic's exact text: the `{ …; !!! }` seals the block — a
+        "* parse that DIDN'T throw reaches the placeholder, whose UnreachableError
+        "* escapes the typed catch and fails the test loudly.
+        var expect = { |tokens message|
+            { cli.parseFrom:tokens; !!! }
+                .catch:{ |e:UsageError| .is:{ e.message } equalTo:message }
+        };
+        expect.valueWithArgs:#( #( '--outpt' 'x' 'in' ) 'unknown option --outpt' );
+        expect.valueWithArgs:#( #( '--level' 'chatty' 'in' )
+            'option --level expects one of debug|info|warn, got \'chatty\'' );
+        expect.valueWithArgs:#( #() 'missing required argument <input>' );
+        expect.valueWithArgs:#( #( '--output' ) 'option --output expects a value' );
+        expect.valueWithArgs:#( #( '-vf' 'in' )
+            'unknown option -vf (short options don\'t cluster)' );
+        expect.valueWithArgs:#( #( '--verbose=yes' 'in' )
+            '--verbose is a flag and takes no value' );
+        "* ...and the type itself.
+        .does:{ cli.parseFrom:#( '--outpt' ) } throw:UsageError;
+        "* Without a rest-splat, extras refuse.
+        var bare = [CLI]Spec.new:'t';
+        bare.positional:'one';
+        { bare.parseFrom:#( 'a' 'b' ); !!! }
+            .catch:{ |e:UsageError| .is:{ e.message } equalTo:'unexpected argument \'b\'' };
+        "* A required option must be given.
+        var req = [CLI]Spec.new:'t';
+        req.option:'must' required:true help:'x';
+        { req.parseFrom:#(); !!! }
+            .catch:{ |e:UsageError| .is:{ e.message } equalTo:'missing required option --must' };
+    };
+
+    .test:
+    dashDashAndHelp -> {
+        "* `--` ends option parsing: what follows is positional, hyphens and all.
+        var a = cliTool.value.parseFrom:#( 'in' '--' '--verbose' '-h' );
+        .is:{ a.at:'extras' } equalTo:#( '--verbose' '-h' );
+        .isFalse:{ a.flag?:'verbose' };
+        "* -h / --help short-circuit: nothing else is validated.
+        .isTrue:{ (cliTool.value.parseFrom:#( '-h' )).help? };
+        .isTrue:{ (cliTool.value.parseFrom:#( '--help' )).help? };
+        .isFalse:{ (cliTool.value.parseFrom:#( 'in' )).help? };
+        "* Reading an undeclared name is a ValueError (a typo can't read as nil).
+        { (cliTool.value.parseFrom:#( 'in' )).at:'nope'; !!! }
+            .catch:{ |e:ValueError|
+                .is:{ e.message } equalTo:'no argument named \'nope\' in the spec'
+            };
+    };
+
+    .test:
+    subcommands -> {
+        var git = [CLI]Spec.new:'mygit' about:'version control, badly';
+        git.flag:'quiet' short:'q' help:'less noise';
+        git.command:'add'
+            spec:{ |c|
+                c.flag:'all' short:'A' help:'stage everything';
+                c.rest:'paths'
+            }
+            help:'stage files';
+        git.command:'commit'
+            spec:{ |c| c.option:'message' short:'m' required:true help:'the message' }
+            help:'record changes';
+        var a = git.parseFrom:#( 'add' '-A' 'src/x.qn' );
+        .is:{ a.command } equalTo:'add';
+        .isTrue:{ a.flag?:'all' };
+        .is:{ a.at:'paths' } equalTo:#( 'src/x.qn' );
+        "* A parent flag works before or after the command.
+        .isTrue:{ (git.parseFrom:#( '-q' 'commit' '-m' 'x' )).flag?:'quiet' };
+        .isTrue:{ (git.parseFrom:#( 'commit' '-m' 'x' '-q' )).flag?:'quiet' };
+        .is:{ (git.parseFrom:#( 'commit' '-m' 'fix' )).at:'message' } equalTo:'fix';
+        "* The sub-spec's requirements apply; commands are required and validated.
+        var expect = { |tokens message|
+            { git.parseFrom:tokens; !!! }
+                .catch:{ |e:UsageError| .is:{ e.message } equalTo:message }
+        };
+        expect.valueWithArgs:#( #( 'commit' ) 'missing required option --message' );
+        expect.valueWithArgs:#( #( 'push' )
+            'unknown command \'push\' (expected one of: add, commit)' );
+        expect.valueWithArgs:#( #( '-q' ) 'expected a command (one of: add, commit)' );
+        "* Commands and positionals are mutually exclusive in one spec.
+        .does:{ git.positional:'x' help:nil } throw:ValueError;
+        var posy = [CLI]Spec.new:'t';
+        posy.positional:'x';
+        .does:{ posy.command:'c' spec:{ |c| c } } throw:ValueError;
+    };
+
+    .test:
+    helpText -> {
+        var text = cliTool.value.helpText;
+        .isTrue:{ text.starts?:'usage: mytool [options] <input> [extras…]' };
+        .isTrue:{ text.contains?:'frobs the inputs' };
+        .isTrue:{ text.contains?:'-v, --verbose' };
+        .isTrue:{ text.contains?:'-o, --output VALUE' };
+        .isTrue:{ text.contains?:'(default: out.txt)' };
+        .isTrue:{ text.contains?:'-h, --help' };
+        .isTrue:{ text.contains?:'<input>' };
+    };
+
+    .test:
+    stringSlicing -> {
+        "* The String#sliceFrom:to: this parser rides on — the List twin's contract.
+        .is:{ 'command'.sliceFrom:3 to:7 } equalTo:'mand';
+        .is:{ 'command'.sliceFrom:3 to:99 } equalTo:'mand';
+        .is:{ 'command'.sliceFrom:0 to:3 } equalTo:'com';
+        .is:{ 'command'.sliceFrom:5 to:2 } equalTo:'';
+        .is:{ 'command'.sliceFrom:(0 - 2) to:3 } equalTo:'com';
+        .is:{ 'çommand'.sliceFrom:0 to:2 } equalTo:'ço';    "* char-indexed, not bytes
+    };
+}

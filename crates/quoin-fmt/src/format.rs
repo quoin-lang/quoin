@@ -67,6 +67,13 @@ pub fn format_source(source: &str, filename: &str) -> Result<String, FormatError
     let doc = lower_program(&program, source, &comments);
 
     let mut out = render(&doc, DEFAULT_WIDTH);
+    // A shebang is grammar trivia (no AST node, not a comment), so the lowering
+    // never sees it — re-emit it verbatim as the first line. The self-verification
+    // below still covers it: the reformatted source re-parses WITH the shebang.
+    if source.starts_with("#!") {
+        let line = source.lines().next().unwrap_or_default();
+        out = format!("{line}\n{out}");
+    }
     // Normalize the file's trailing whitespace to exactly one newline.
     out.truncate(out.trim_end().len());
     if !out.is_empty() {

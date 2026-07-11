@@ -14,9 +14,12 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 ## 36. Running programs — `qn`
 
 > **Rules**
-> - `qn app.qn [args…]` runs a program. Everything after the file lands in
->   `Runtime.arguments` (a List of Strings). Arguments that *look like flags*
->   must sit after a `--` separator, or `qn` tries to parse them itself.
+> - `qn app.qn [args…]` runs a program. **Everything after the file** — flags
+>   included — lands in `Runtime.arguments` (a List of Strings), verbatim;
+>   `qn`'s own flags go *before* the file.
+> - A program may start with a **shebang** (`#!/usr/bin/env qn`): the line is
+>   trivia to the language, so a `chmod +x`'d script runs directly, and its
+>   arguments still arrive verbatim. Diagnostics keep true line numbers.
 > - `qn -e EXPR` evaluates one expression and prints its value (a `nil` result
 >   prints nothing) — the same rendering the REPL uses.
 > - **Exit codes**: `0` on normal completion; an **uncaught error** prints its
@@ -36,20 +39,17 @@ Runtime.arguments.print
 ```
 
 ```
-$ qn args.qn -- --verbose input.txt
+$ qn args.qn --verbose input.txt
 #(--verbose input.txt)
 ```
 
-The `--` matters: without it, `qn` claims dashed arguments as its own and
-refuses the ones it doesn't know.
+With the shebang and the execute bit, a `.qn` file is a command:
 
 ```
-$ qn args.qn --verbose
-error: unexpected argument '--verbose' found
-
-  tip: a similar argument exists: '--version'
-  tip: to pass '--verbose' as a value, use '-- --verbose'
-...
+$ head -1 tool.qn
+#!/usr/bin/env qn
+$ chmod +x tool.qn
+$ ./tool.qn --verbose input.txt
 ```
 
 `-e` is the one-liner form — handy in shell pipelines, and it prints the

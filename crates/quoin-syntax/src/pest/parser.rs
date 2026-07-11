@@ -245,6 +245,10 @@ fn parse_program(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
             Rule::stmt => {
                 stmts.push(Arc::new(parse_stmt(inner, filename, source_text)));
             }
+            // The shebang line is the OS's, not ours — no AST node, and because it
+            // parses (rather than being stripped pre-parse) every later span keeps
+            // its true line/column.
+            Rule::shebang => {}
             Rule::EOI => {}
             _ => unreachable!("Unexpected rule in program: {:?}", inner.as_rule()),
         }

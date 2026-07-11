@@ -752,6 +752,12 @@ fn drive_to_completion<F: DriverFrontend>(
                         for id in reaped {
                             backend.close(id);
                         }
+                        let reaped_children: Vec<u64> = arena.mutate_root(|_mc, vm| {
+                            vm.io.child_reap.borrow_mut().drain(..).collect()
+                        });
+                        for id in reaped_children {
+                            backend.reap_child(id);
+                        }
                         // The single reactor wait: park until some background future (I/O op
                         // or deadline timer) lands.
                         enum Woke {
@@ -912,6 +918,12 @@ fn drive_to_completion<F: DriverFrontend>(
                     arena.mutate_root(|_mc, vm| vm.io.socket_reap.borrow_mut().drain(..).collect());
                 for id in reaped {
                     backend.close(id);
+                }
+                // Kill+deregister children whose undetached handle was collected.
+                let reaped_children: Vec<u64> =
+                    arena.mutate_root(|_mc, vm| vm.io.child_reap.borrow_mut().drain(..).collect());
+                for id in reaped_children {
+                    backend.reap_child(id);
                 }
                 // Bulk-release the host-value handles of any dropped extension (its `Drop`
                 // enqueued its `ext_id`), so they stop rooting host Values.

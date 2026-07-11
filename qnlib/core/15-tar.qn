@@ -1,0 +1,285 @@
+"* Streaming tar reading, pure Quoin over a ByteStream — tar is 512-byte headers with
+"* octal fields, which is exactly what `readExactly:` was made for. Because the source
+"* is any ByteStream, `.tar.gz` reads by composing with `gunzip`:
+"*
+"*   [Archive]Tar.over:(([IO]File.open:'x.tar.gz').byteStream.gunzip)
+"*
+"* Entries stream in order and are consumed ONCE: read an entry's `bytes` before
+"* advancing (a passed entry's content is skipped, in chunks, never materialized).
+"* Handles ustar name prefixes, GNU long names ('L'), and pax extended headers
+"* ('x' path= overrides); header checksums are verified (mismatch → ParseError).
+"* Writing tar archives is a separate slice (it wants streaming gzip ENCODE).
+
+"* One archive member: metadata is plain fields; `bytes` pulls the content from the
+"* archive stream (only while this entry is the current one).
+[Archive]TarEntry <- { |@name @size @type @mtime @linkname @tar @seq|
+    "* The member's path, exactly as recorded (extractTo: is the safe way to
+    "* turn it into a filesystem path).
+    name -> { @name }
+
+    "* The content length in bytes.
+    size -> { @size }
+
+    "* `#file`, `#directory`, `#symlink`, or `#other` (anything else).
+    type -> { @type }
+
+    "* The recorded modification time.
+    mtime -> { ^Timestamp.fromUnixSeconds:@mtime }
+
+    "* A symlink's target (empty for other types).
+    linkname -> { @linkname }
+
+    "* The member's content. Only readable while this entry is the CURRENT one —
+    "* advancing (`next` / the `each:` loop) skips unread content — and only once.
+    bytes -> { ^@tar.contentFor:@seq }
+
+    "* The content decoded as UTF-8 text.
+    text -> { ^.bytes.asString }
+
+    s -> { ^'[Archive]TarEntry(%1, %2 bytes)' % #( @name @size ) }
+}
+
+"* The streaming reader. `each:` (and the whole Iterate vocabulary over it)
+"* consumes the stream — one pass, in archive order.
+"*
+"* ```
+"* var tar = [Archive]Tar.over:(([IO]File.open:'backup.tar').byteStream)
+"* tar.each:{ |e| ('%1  %2' % #( e.size e.name )).print }
+"* ```
+[Archive]Tar <- { |@stream @pendingName @done @seq @currentSize @currentRead|
+    .mix:Iterate;
+
+    .meta <-- {
+        "* A reader over a ByteStream — a file's, a socket's, or a `gunzip`-wrapped
+        "* one for `.tar.gz`.
+        over: -> { |stream| ^.new:{ var stream = stream } }
+    }
+
+    "* Internal.
+    init -> {
+        @done = false
+        @seq = 0
+        @currentSize = 0
+        @currentRead = true
+    }
+
+    "* The next entry, or nil at the end-of-archive marker. Skips the previous
+    "* entry's unread content first.
+    next -> {
+        @done.if:{ ^^nil };
+        .skipCurrent
+        { true }.whileDo:{
+            var header = @stream.readExactly:512
+            (.zero?:header).if:{
+                @done = true
+                ^^nil
+            };
+            .verify:header
+            var type = header.at:156
+            var size = .octalIn:header from:124 to:136
+            "* GNU long name ('L'): the content IS the next entry's name.
+            (type == 76).if:{
+                var nameBytes = .content:size
+                @pendingName = .stringIn:nameBytes from:0 to:(nameBytes.count)
+            }
+            else:{
+                (type == 120).if:{
+                    "* pax extended header: a path= record overrides the next name.
+                    var paxPath = .paxPath:(.content:size)
+                    paxPath.defined?.if:{ @pendingName = paxPath }
+                }
+                else:{
+                    (type == 103).if:{
+                        "* pax GLOBAL header: applies archive-wide; nothing we use — skip.
+                        .content:size
+                    }
+                    else:{
+                        var entryName = @pendingName.defined?
+                            .if:{ @pendingName }
+                             else:{ .ustarName:header }
+                        @pendingName = nil
+                        @seq = @seq + 1
+                        @currentSize = size
+                        @currentRead = false
+                        var me = self
+                        var entrySeq = @seq
+                        var typeSym = .typeSymbol:type
+                        var entryMtime = .octalIn:header from:136 to:148
+                        var entryLink = .stringIn:header from:157 to:257
+                        var entrySize = size
+                        ^^[Archive]TarEntry.new:{
+                            var name = entryName
+                            var size = entrySize
+                            var type = typeSym
+                            var mtime = entryMtime
+                            var linkname = entryLink
+                            var tar = me
+                            var seq = entrySeq
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    "* Yield each remaining entry in order; answers self. One pass — the Iterate
+    "* vocabulary (`select:`, `collect:`, `detect:`, …) rides on this and consumes
+    "* the stream the same way.
+    each: -> { |block|
+        { true }.whileDo:{
+            var entry = .next
+            entry.defined?.else:{ ^^self }
+            block.value:entry
+        }
+    }
+
+    "* Extract every remaining FILE and DIRECTORY under `dir` (symlinks and
+    "* specials are skipped). Member paths are normalized and confined: an
+    "* absolute path or one escaping `dir` (`../…`) throws a ValueError — an
+    "* archive must never write outside its target.
+    extractTo: -> { |dir|
+        var me = self;
+        .each:{ |entry|
+            var norm = [OS]Path.normalize:(entry.name)
+            ((norm.starts?:'/') || (norm == '..') || (norm.starts?:'../')).if:{
+                ValueError.throw:('tar: refusing unsafe path \'%\'' % entry.name)
+            }
+            "* `^` here would exit only the if-arm, not this callback (the checker
+            "* catches exactly that) — so the skip cases nest instead.
+            ((norm == '.') || (norm == '')).else:{
+                var target = [OS]Path.join:#( dir norm )
+                (entry.type == #directory).if:{ me.mkdirs:target }
+                else:{
+                    (entry.type == #file).if:{
+                        me.mkdirs:([OS]Path.dirname:target)
+                        var w = [IO]File.create:target
+                        w.writeAll:(entry.bytes)
+                        w.close
+                    }
+                }
+            }
+        }
+        self
+    }
+
+    "* -- internals ----------------------------------------------------------
+
+    "* The current entry's content (guarded: current entry only, read once).
+    contentFor: -> { |seq|
+        (seq == @seq).else:{
+            ValueError.throw:'tar: this entry has been passed — read bytes before advancing'
+        }
+        @currentRead.if:{ ValueError.throw:'tar: this entry\'s bytes were already read' }
+        @currentRead = true
+        ^.content:@currentSize
+    }
+
+    "* Read exactly `size` content bytes plus the block padding.
+    content: -> { |size|
+        var bytes = (size == 0).if:{ Bytes.empty } else:{ @stream.readExactly:size }
+        var rem = size % 512
+        (rem > 0).if:{ @stream.readExactly:(512 - rem) }
+        ^bytes
+    }
+
+    "* Skip the current entry's unread content, chunked — a passed-over entry may
+    "* be huge, and skipping must not materialize it.
+    skipCurrent -> {
+        @currentRead.if:{ ^^nil }
+        @currentRead = true
+        var left = @currentSize
+        { left > 0 }.whileDo:{
+            var chunk = (left < 65536).if:{ left } else:{ 65536 }
+            @stream.readExactly:chunk
+            left = left - chunk
+        }
+        var rem = @currentSize % 512
+        (rem > 0).if:{ @stream.readExactly:(512 - rem) }
+    }
+
+    zero?: -> { |header ^Boolean|
+        header.each:{ |b| (b != 0).if:{ ^^false } }
+        ^true
+    }
+
+    "* The header checksum: every byte summed with the checksum field itself read
+    "* as spaces. A mismatch means a corrupt or misaligned archive.
+    verify: -> { |header|
+        var expected = .octalIn:header from:148 to:156
+        var sum = 0
+        var i = 0
+        header.each:{ |b|
+            sum = sum + (((i >= 148) && (i < 156)).if:{ 32 } else:{ b })
+            i = i + 1
+        }
+        (sum == expected).else:{ ParseError.throw:'tar: header checksum mismatch' }
+    }
+
+    "* An octal field: digits accumulate, spaces/NULs (the traditional padding)
+    "* are skipped.
+    octalIn:from:to: -> { |header from to ^Integer|
+        var value = 0
+        var i = from
+        { i < to }.whileDo:{
+            var b = header.at:i
+            ((b >= 48) && (b <= 55)).if:{ value = (value * 8) + (b - 48) }
+            i = i + 1
+        }
+        ^value
+    }
+
+    "* A NUL-terminated text field.
+    stringIn:from:to: -> { |header from to ^String|
+        var end = from
+        { (end < to) && ((header.at:end) != 0) }.whileDo:{ end = end + 1 }
+        ^(header.from:from to:end).asString
+    }
+
+    "* The ustar split name: prefix[345..500] + '/' + name[0..100].
+    ustarName: -> { |header ^String|
+        var name = .stringIn:header from:0 to:100
+        var prefix = .stringIn:header from:345 to:500
+        ^(prefix == '').if:{ name } else:{ prefix + '/' + name }
+    }
+
+    typeSymbol: -> { |t|
+        ((t == 48) || (t == 0)).if:{ ^^#file }
+        (t == 53).if:{ ^^#directory }
+        (t == 50).if:{ ^^#symlink }
+        ^#other
+    }
+
+    "* The `path=` value from a pax extended header: records are
+    "* '<len> <key>=<value>\n' with len counting the whole record.
+    paxPath: -> { |bytes ^String?|
+        var path = nil
+        var pos = 0
+        { pos < bytes.count }.whileDo:{
+            var len = 0
+            var i = pos
+            { (i < bytes.count) && ((bytes.at:i) >= 48) && ((bytes.at:i) <= 57) }.whileDo:{
+                len = (len * 10) + ((bytes.at:i) - 48)
+                i = i + 1
+            }
+            (len == 0).if:{ ^^path }
+            "* i sits on the space; the record ends with '\n' (excluded).
+            var record = (bytes.from:(i + 1) to:(pos + len - 1)).asString
+            (record.starts?:'path=').if:{ path = record.sliceFrom:5 to:(record.length) }
+            pos = pos + len
+        }
+        ^path
+    }
+
+    "* mkdir -p: create each missing component (Folder.create: is idempotent).
+    mkdirs: -> { |path|
+        var current = ''
+        (path.split:'/').each:{ |part|
+            (part == '').else:{
+                current = (current == '')
+                    .if:{ (path.starts?:'/').if:{ '/' + part } else:{ part } }
+                     else:{ current + '/' + part }
+                [IO]Folder.create:current
+            }
+        }
+    }
+}

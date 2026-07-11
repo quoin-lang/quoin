@@ -23,3 +23,135 @@
         count -> { .keys.count }
     }
 }
+
+"* What a one-shot `[OS]Process.run:` answers: the child's complete output and how it
+"* ended. `stdout`/`stderr` decode as UTF-8 (use the `…Bytes` getters for binary
+"* output); `ok?` is exit code 0, and `check` turns failure into a typed ProcessError
+"* whose payload is this result.
+[OS]ProcessResult <- { |@stdoutBytes @stderrBytes @exitCode @signal @command|
+    .meta <-- {
+        "* Internal: wrap the raw result Map `primRun:…` answers.
+        of:command: -> { |raw command|
+            ^.new:{
+                var stdoutBytes = raw.at:'stdout'
+                var stderrBytes = raw.at:'stderr'
+                var exitCode = raw.at:'exitCode'
+                var signal = raw.at:'signal'
+                var command = command
+            }
+        }
+    }
+
+    "* The child's standard output, decoded as UTF-8.
+    stdout -> { @stdoutBytes.asString }
+
+    "* The child's standard error, decoded as UTF-8.
+    stderr -> { @stderrBytes.asString }
+
+    "* The raw standard output (for binary-producing children).
+    stdoutBytes -> { @stdoutBytes }
+
+    "* The raw standard error.
+    stderrBytes -> { @stderrBytes }
+
+    "* The exit code — nil when a signal ended the child (`signal` says which).
+    exitCode -> { @exitCode }
+
+    "* The signal that ended the child, or nil for a normal exit.
+    signal -> { @signal }
+
+    "* The command that ran (as given to `run:`).
+    command -> { @command }
+
+    "* Whether the child exited 0.
+    ok? -> { @exitCode == 0 }
+
+    "* Require success: answers self when the exit code is 0, otherwise throws a
+    "* ProcessError naming the program and how it ended, with this result as the
+    "* payload — the Rust-`status.success()` / Python-`check=True` idiom.
+    "*
+    "* ```
+    "* ([OS]Process.run:#( 'true' )).check.ok?    "* -> true
+    "* ```
+    check -> {
+        .ok?.if:{ ^^self }
+        var program = (@command.can?:List).if:{ @command.at:0 } else:{ @command }
+        var how = @exitCode.defined?
+            .if:{ 'exited %' % @exitCode }
+             else:{ 'was killed by signal %' % @signal }
+        var detail = .stderr.split:'\n'
+        var message = (detail.count > 0 && ((detail.at:0) != ''))
+            .if:{ '`%1` %2: %3' % #( program how (detail.at:0) ) }
+             else:{ '`%1` %2' % #( program how ) }
+        ProcessError.throw:message payload:self
+    }
+
+    "* The inspect string: the program and how it ended.
+    s -> {
+        var program = (@command.can?:List).if:{ @command.at:0 } else:{ @command }
+        var how = @exitCode.defined?.if:{ 'exit %' % @exitCode } else:{ 'signal %' % @signal }
+        ^'[OS]ProcessResult(%1, %2)' % #( program how )
+    }
+}
+
+"* The ergonomic selector family over the native kitchen sinks (`primRun:env:dir:input:`,
+"* `primStart:env:dir:` — src/runtime/process.rs). One shape: `run:` parks until exit and
+"* answers a ProcessResult; `start:` answers the streaming handle.
+[OS]Process <-- {
+    .meta <-- {
+        "* Run a command to completion — the calling task parks (others keep running) —
+        "* and answer a ProcessResult. The command is a List (program + arguments; no
+        "* shell, nothing splits or globs) or a bare String (program alone).
+        "*
+        "* ```
+        "* ([OS]Process.run:#( 'echo' 'hi' )).stdout    "* -> 'hi\n'
+        "* ([OS]Process.run:#( 'false' )).ok?           "* -> false
+        "* ```
+        run: -> { |command| ^.run:command input:nil env:nil dir:nil }
+
+        "* `run:` feeding the String or Bytes to the child's standard input (then EOF).
+        "*
+        "* ```
+        "* ([OS]Process.run:#( 'cat' ) input:'meow').stdout    "* -> 'meow'
+        "* ```
+        run:input: -> { |command input| ^.run:command input:input env:nil dir:nil }
+
+        "* `run:` with String → String vars set ON TOP of the inherited environment —
+        "* the sound way to give a CHILD an environment ([OS]Env itself stays read-only).
+        run:env: -> { |command env| ^.run:command input:nil env:env dir:nil }
+
+        "* `run:` with the child's working directory.
+        run:dir: -> { |command dir| ^.run:command input:nil env:nil dir:dir }
+
+        "* `run:env:` + `run:dir:` combined.
+        run:env:dir: -> { |command env dir| ^.run:command input:nil env:env dir:dir }
+
+        "* The kitchen sink — every option, nil where unused.
+        run:input:env:dir: -> { |command input env dir|
+            var raw = .primRun:command env:env dir:dir input:input
+            ^[OS]ProcessResult.of:raw command:command
+        }
+
+        "* Spawn for streaming and answer the Process handle: `stdout`/`stderr`(-`Text`)
+        "* read like sockets, `writeStdin:`/`closeStdin` feed it, `wait`/`kill`/
+        "* `terminate`/`detach` manage it. An undetached child dies with its handle.
+        "*
+        "* ```
+        "* var p = [OS]Process.start:#( 'cat' )
+        "* p.writeStdin:'hi
+        "* '
+        "* p.closeStdin
+        "* p.stdoutText.readLine    "* -> 'hi'
+        "* ```
+        start: -> { |command| ^.start:command env:nil dir:nil }
+
+        "* `start:` with child-environment vars (see `run:env:`).
+        start:env: -> { |command env| ^.start:command env:env dir:nil }
+
+        "* `start:` with the child's working directory.
+        start:dir: -> { |command dir| ^.start:command env:nil dir:dir }
+
+        "* `start:env:` + `start:dir:` combined.
+        start:env:dir: -> { |command env dir| ^.primStart:command env:env dir:dir }
+    }
+}

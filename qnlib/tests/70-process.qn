@@ -1,0 +1,119 @@
+"* [OS]Process (src/runtime/process.rs + core/12-os.qn): one-shot run:, the streaming
+"* handle, signals, and lifecycle. POSIX-portable commands only (sh, cat, echo, printf,
+"* sleep, true, false); no shell semantics anywhere — argv goes through verbatim.
+(TestSuite.new:{ var name = 'Process' }).add:{
+    .test:
+    oneShotRun -> {
+        .is:{ ([OS]Process.run:#( 'echo' 'hi' )).stdout } equalTo:'hi
+';
+        .is:{ ([OS]Process.run:#( 'true' )).exitCode } equalTo:0;
+        .is:{ ([OS]Process.run:#( 'sh' '-c' 'exit 3' )).exitCode } equalTo:3;
+        .isTrue:{ ([OS]Process.run:#( 'true' )).ok? };
+        .isFalse:{ ([OS]Process.run:#( 'false' )).ok? };
+        "* No shell: an argument with spaces is ONE argument.
+        .is:{ ([OS]Process.run:#( 'echo' 'a b' )).stdout } equalTo:'a b
+';
+        "* stderr captures separately.
+        var r = [OS]Process.run:#( 'sh' '-c' 'echo out; echo err >&2' );
+        .is:{ r.stdout } equalTo:'out
+';
+        .is:{ r.stderr } equalTo:'err
+';
+        "* A missing program is a catchable IoError; an empty command a ValueError.
+        .does:{ [OS]Process.run:'qn-definitely-not-a-program' } throw:IoError;
+        .does:{ [OS]Process.run:#() } throw:ValueError;
+    };
+
+    .test:
+    runOptions -> {
+        "* input: feeds stdin, then EOF.
+        .is:{ ([OS]Process.run:#( 'cat' ) input:'meow').stdout } equalTo:'meow';
+        "* env: sets vars ON TOP of the inherited environment — visible to the
+        "* child, invisible to us ([OS]Env stays read-only).
+        .is:{ ([OS]Process.run:#( 'sh' '-c' 'printf %s "$QN_PROC_TEST"' ) env:#{ 'QN_PROC_TEST': 'zap' }).stdout }
+            equalTo:'zap';
+        .is:{ [OS]Env.at:'QN_PROC_TEST' } equalTo:nil;
+        "* dir: is the child's working directory.
+        .is:{ ([OS]Process.run:#( 'pwd' ) dir:'/').stdout } equalTo:'/
+';
+        "* A child that exits without draining its input is not an error.
+        .isTrue:{ ([OS]Process.run:#( 'true' ) input:'ignored').ok? };
+    };
+
+    .test:
+    checkTurnsFailureIntoProcessError -> {
+        .isTrue:{ ([OS]Process.run:#( 'true' )).check.ok? };
+        .does:{ ([OS]Process.run:#( 'false' )).check } throw:ProcessError;
+        "* The error names the program and how it ended, and carries the result.
+        { ([OS]Process.run:#( 'sh' '-c' 'echo bad >&2; exit 3' )).check }
+            .catch:{ |e:ProcessError|
+                .is:{ e.message } equalTo:'`sh` exited 3: bad';
+                .is:{ e.payload.exitCode } equalTo:3;
+                .is:{ e.payload.stderr } equalTo:'bad
+'
+            };
+    };
+
+    .test:
+    streamingHandle -> {
+        var p = [OS]Process.start:#( 'sh' '-c' 'read line; echo got-$line; echo done' );
+        .isTrue:{ p.pid > 0 };
+        .isTrue:{ p.running? };
+        p.writeStdin:'meow
+';
+        p.closeStdin;
+        var out = p.stdoutText;
+        .is:{ out.readLine } equalTo:'got-meow';
+        .is:{ out.readLine } equalTo:'done';
+        .is:{ p.wait } equalTo:0;
+        "* wait is idempotent; the exit is recorded.
+        .is:{ p.wait } equalTo:0;
+        .is:{ p.exitCode } equalTo:0;
+        .isFalse:{ p.running? };
+        "* One stream per pipe; stdin is closed.
+        .does:{ p.stdoutText } throw:ValueError;
+        .does:{ p.writeStdin:'x' } throw:ValueError;
+    };
+
+    .test:
+    signals -> {
+        "* kill → the parked wait resolves with the signal exit (SIGKILL = 9).
+        var p = [OS]Process.start:#( 'sleep' '30' );
+        .isTrue:{ p.running? };
+        p.kill;
+        .is:{ p.wait } equalTo:nil;
+        .is:{ p.signal } equalTo:9;
+        .is:{ p.exitCode } equalTo:nil;
+        .isFalse:{ p.running? };
+        "* Signalling an exited child is a no-op, never a stranger's pid.
+        p.kill;
+        "* terminate is the polite variant (SIGTERM = 15).
+        var q = [OS]Process.start:#( 'sleep' '30' );
+        q.terminate;
+        q.wait;
+        .is:{ q.signal } equalTo:15;
+    };
+
+    .test:
+    killResolvesAParkedWait -> {
+        var p = [OS]Process.start:#( 'sleep' '30' );
+        var waiter = Task.spawn:{ p.wait };
+        Async.sleep:30;
+        "* Only one task may wait at a time.
+        .does:{ p.wait } throw:IoError;
+        p.kill;
+        .is:{ waiter.join } equalTo:nil;
+        .is:{ p.signal } equalTo:9;
+    };
+
+    .test:
+    timeoutKillsTheChild -> {
+        "* run: is spawned kill-on-drop: cancelling the parked task (the timeout
+        "* firing) kills the child — the run returns promptly instead of leaking
+        "* a 30-second sleeper.
+        var before = Instant.now;
+        .does:{ Async.timeout:200 do:{ [OS]Process.run:#( 'sleep' '30' ) } }
+            throw:TimeoutError;
+        .isTrue:{ before.elapsed < (Duration.seconds:10) };
+    };
+}

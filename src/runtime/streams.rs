@@ -121,6 +121,51 @@ impl Drop for NativeStream {
     }
 }
 
+/// The shared `codecWrap:` body — wrap the underlying registry stream in a named
+/// codec (io_codecs.rs), in place. Preconditions keep it honest: the stream must
+/// be open, UNREAD (read-ahead already buffered raw bytes would be silently lost
+/// to the decoder), and a read stream (write-buffered file streams have no
+/// read side to transform).
+fn codec_wrap<'gc>(
+    vm: &mut VmState<'gc>,
+    receiver: Value<'gc>,
+    args: &[Value<'gc>],
+    who: &str,
+) -> Result<Value<'gc>, QuoinError> {
+    let codec = arg!(args, String, 0);
+    let (id, closed, buffered, wcap) = receiver
+        .with_native_state::<NativeStream, _, _>(|s| (s.id, s.closed, s.rbuf.len(), s.wcap))
+        .map_err(QuoinError::Other)?;
+    if closed {
+        return Err(QuoinError::io(
+            IoErrorKind::Closed,
+            format!("{who}: the stream is closed"),
+        ));
+    }
+    if wcap > 0 {
+        return Err(QuoinError::io(
+            IoErrorKind::InvalidInput,
+            format!("{who}: this is a write stream — codecs wrap read streams"),
+        ));
+    }
+    if buffered > 0 {
+        return Err(QuoinError::io(
+            IoErrorKind::InvalidInput,
+            format!("{who}: the stream has already been read — wrap it before the first read"),
+        ));
+    }
+    match vm.await_io(IoRequest::WrapStream {
+        id,
+        codec: codec.to_string(),
+    })? {
+        IoResult::Connected(_) => Ok(receiver),
+        IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
+        other => Err(QuoinError::Other(format!(
+            "{who}: unexpected io result {other:?}"
+        ))),
+    }
+}
+
 pub fn build_byte_stream_class() -> NativeClassBuilder {
     let builder = NativeClassBuilder::new("ByteStream", Some("Object"))
         .construct_with("use ByteStream.over: (or streams from sockets/files)")
@@ -329,6 +374,18 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             "Read to EOF and answer everything as one Bytes. The whole remainder is held in \
              memory — for bounded reading of long streams use `read:` or `readUntil:limit:` \
              in a loop.",
+        )
+        .typed_instance_method("codecWrap:", &["String"], |vm, _mc, receiver, args| {
+            codec_wrap(vm, receiver, &args, "codecWrap:")
+        })
+        .doc(
+            "Wrap the stream in a named codec (see io_codecs.rs) IN PLACE — every later \
+             read yields the transformed bytes; answers the receiver. Prefer the sugar \
+             (`gunzip`). The stream must be open and UNREAD. An unknown codec throws an \
+             IoError.\n\n\
+             ```\n\
+             ([IO]File.open:'logs.gz').byteStream.gunzip.readAll    \"* the decompressed bytes\n\
+             ```",
         )
         // readExactly:n -> exactly n bytes, or throw if the stream ends first.
         .typed_instance_method("readExactly:", &["Integer"], |vm, mc, receiver, args| {
@@ -566,6 +623,14 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
              ([IO]File.open:'/tmp/notes.txt').stringStream.readAll     \"* -> 'hi'\n\
              [IO]File.delete:'/tmp/notes.txt'\n\
              ```",
+        )
+        .typed_instance_method("codecWrap:", &["String"], |vm, _mc, receiver, args| {
+            codec_wrap(vm, receiver, &args, "codecWrap:")
+        })
+        .doc(
+            "Wrap the stream in a named codec IN PLACE (see the ByteStream twin) — later \
+             reads decode the transformed bytes as UTF-8; answers the receiver. Prefer \
+             the sugar (`gunzip`); the stream must be open and unread.",
         )
         // write:text -> the String's UTF-8 bytes. Buffered on a file stream, straight through
         // on a socket. Returns nil.

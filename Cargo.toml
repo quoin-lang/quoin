@@ -87,6 +87,10 @@ libc = "0.2"
 async-io = "2"
 async-net = "2"
 async-fs = "2"
+# Subprocess on the same smol reactor: spawn + async piped stdio + async status.
+# Child kill-by-pid (kill during a parked wait, reap-on-collect) is libc::kill
+# (libc above) — the Child itself is exclusively borrowed by an in-flight wait.
+async-process = "2"
 futures-lite = "2"
 # The compute-offload pool's completion bridge (docs/CONCURRENCY_ARCH.md §4);
 # already in-tree transitively via the smol family.
@@ -103,6 +107,9 @@ httparse = "1"
 # gzip + deflate via flate2's miniz_oxide backend (`rust_backend`); zstd *decode* via
 # ruzstd. Both pure Rust — no C toolchain dependency, matching the ring/jiff choices.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Streaming (de)compression over registry streams (io_codecs.rs): drives flate2
+# through futures::io::AsyncRead — the trait the stream registry stores.
+async-compression = { version = "0.4", default-features = false, features = ["futures-io", "gzip"] }
 ruzstd = "0.8"
 console = "0.15"
 mimalloc = { version = "0.1", optional = true }

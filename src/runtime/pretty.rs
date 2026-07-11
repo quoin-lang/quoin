@@ -415,6 +415,9 @@ fn value_native_shape<'gc>(value: Value<'gc>, cname: &str) -> Option<PpShape<'gc
         "Span" => value
             .with_native_state::<crate::runtime::span::NativeSpan, _, _>(|s| s.pp_shape())
             .ok(),
+        "[OS]Process" => value
+            .with_native_state::<crate::runtime::process::NativeProcess, _, _>(|s| s.pp_shape())
+            .ok(),
         // Scalar value-like natives: each decomposes its own state into a structural `Record`.
         "DateTime" => value
             .with_native_state::<NativeDateTime, _, _>(|s| s.pp_shape())

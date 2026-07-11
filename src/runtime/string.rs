@@ -520,6 +520,37 @@ pub fn build_string_class() -> NativeClassBuilder {
              'hello'.index:'l'     \"* -> 2\n\
              ```",
         )
+        .typed_instance_method(
+            "sliceFrom:to:",
+            &["Integer", "Integer"],
+            |vm, mc, receiver, args| {
+                // The String twin of List#sliceFrom:to: — CHARACTER-indexed,
+                // end-exclusive, both ends clamped, inverted answers ''. The
+                // char walk pays only for the non-ASCII case.
+                let s = recv!(receiver, String);
+                let from = arg!(args, Int, 0).max(0) as usize;
+                let to = arg!(args, Int, 1).max(0) as usize;
+                let out = if to <= from {
+                    String::new()
+                } else if s.is_ascii() {
+                    let len = s.len();
+                    s[from.min(len)..to.min(len)].to_string()
+                } else {
+                    s.chars().skip(from).take(to - from).collect()
+                };
+                Ok(vm.new_string(mc, out))
+            },
+        )
+        .returns("String")
+        .doc(
+            "The characters from `from` (inclusive) to `to` (exclusive) — the String twin \
+             of `List#sliceFrom:to:`: character-indexed, both ends clamp to the string, an \
+             inverted range answers ''.\n\n\
+             ```\n\
+             'command'.sliceFrom:3 to:7     \"* -> mand\n\
+             'command'.sliceFrom:3 to:99    \"* -> mand\n\
+             ```",
+        )
         // Both args are typed: the substring (String) and the index (Integer); a
         // wrong-typed arg matches no variant -> MNU (dispatch enforces the types).
         .typed_instance_method(

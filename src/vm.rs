@@ -467,6 +467,10 @@ pub struct Io {
     /// host-value handles they held (`HandleTable::release_for_ext`). A non-GC queue mirroring
     /// `socket_reap`; a shared `Rc` clone lives in each `Extension` handle.
     pub ext_handle_reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+    /// Child ids whose `[OS]Process` handle was collected undetached (or explicitly killed at
+    /// teardown), awaiting a synchronous `IoBackend::reap_child` (kill if running + deregister).
+    /// A non-GC queue mirroring `socket_reap`; a shared `Rc` clone lives in each Process handle.
+    pub child_reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
 }
 
 /// Per-instruction instrumentation hooks, grouped out of `VmState`. Both `None` on a normal run, so
@@ -821,6 +825,7 @@ impl<'gc> VmState<'gc> {
                 backend: crate::io_backend::SmolBackend::new(),
                 socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 ext_handle_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                child_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             },
             instrumentation: Instrumentation {
                 debug: None,

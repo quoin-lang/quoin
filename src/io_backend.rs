@@ -80,6 +80,47 @@ impl<R: Unpin> futures_lite::AsyncWrite for ReadOnlyStream<R> {
     }
 }
 
+/// The write-only twin of [`ReadOnlyStream`], for a child process's stdin pipe:
+/// reads fail with `Unsupported` (reading your own child's *input* is a programmer
+/// error), writes pass through, and `Close` drops the pipe — which is how the
+/// child sees EOF.
+pub struct WriteOnlyStream<W>(pub W);
+
+impl<W: futures_lite::AsyncWrite + Unpin> futures_lite::AsyncWrite for WriteOnlyStream<W> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_flush(cx)
+    }
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_close(cx)
+    }
+}
+
+impl<W: Unpin> futures_lite::AsyncRead for WriteOnlyStream<W> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this stream is write-only",
+        )))
+    }
+}
+
 /// A plain-data I/O error (no `std::io::Error` borrow of OS state, Clone-friendly).
 #[derive(Clone, Debug)]
 pub struct IoError {
@@ -192,6 +233,41 @@ pub enum IoRequest {
     /// Accept one connection from the listener `id`, registering the accepted stream and
     /// returning its `Connected(id)`. Parks until a peer connects.
     Accept { id: StreamId },
+    /// One-shot subprocess: spawn, feed `input` to stdin (then close it), read stdout
+    /// and stderr CONCURRENTLY (either alone can deadlock on a full pipe buffer), and
+    /// wait for exit — the whole lifecycle inside this one op, nothing registered.
+    /// The command is spawned `kill_on_drop`, so cancelling the parked task (an
+    /// `Async.timeout:` firing) kills the child rather than leaking it.
+    RunProcess {
+        program: OsString,
+        args: Vec<OsString>,
+        /// Vars set ON TOP of the inherited environment (`Command::env` semantics).
+        env: Option<Vec<(OsString, OsString)>>,
+        dir: Option<OsString>,
+        input: Option<Vec<u8>>,
+    },
+    /// Spawn a subprocess for streaming: the child registers in the child table
+    /// (`ChildWait` / the sync signal ops address it by id) and its three pipes
+    /// register as ordinary streams — stdout/stderr read like a socket, stdin is
+    /// write-only (`Close` on it is how the child sees EOF). NOT kill-on-drop: the
+    /// handle's reap queue owns the kill (unless detached).
+    SpawnProcess {
+        program: OsString,
+        args: Vec<OsString>,
+        env: Option<Vec<(OsString, OsString)>>,
+        dir: Option<OsString>,
+    },
+    /// Park until the spawned child `id` exits; answers `ProcExited`. Exclusive —
+    /// the wait holds the child's only mutable borrow, so a second concurrent wait
+    /// on the same child errs rather than panicking (kill goes by pid and never
+    /// borrows, so killing a waited-on child works and resolves the wait).
+    ChildWait { id: u64 },
+    /// Wrap the stream at `id` in a named codec IN PLACE (same id — the TlsWrap
+    /// mechanics, made generic): take it out of the registry, pass it through the
+    /// `io_codecs` factory table, put the transformed stream back. The codec table
+    /// is the extension point — this op never grows another variant per codec.
+    /// An unknown codec errs and leaves the original stream untouched.
+    WrapStream { id: StreamId, codec: String },
 }
 
 /// The plain-data outcome of an [`IoRequest`].
@@ -219,6 +295,28 @@ pub enum IoResult {
     WorkerDone(Result<quoin_ext_proto::DataValue, String>),
     Wrote(usize),
     Closed,
+    /// A `RunProcess` finished: exit code (`None` when signal-terminated — then
+    /// `signal` says which), and the child's complete output.
+    ProcDone {
+        code: Option<i32>,
+        signal: Option<i32>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    /// A `SpawnProcess` succeeded: the child-table id, the OS pid, and the three
+    /// pipes as registered streams.
+    ProcSpawned {
+        child: u64,
+        pid: u32,
+        stdin: StreamId,
+        stdout: StreamId,
+        stderr: StreamId,
+    },
+    /// A `ChildWait` resolved (same code/signal split as `ProcDone`).
+    ProcExited {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
     Err(IoError),
 }
 
@@ -261,6 +359,14 @@ impl IoRequest {
             IoRequest::OpenStdin => "io: open stdin".to_string(),
             IoRequest::Listen { host, port } => format!("io: listen {host}:{port}"),
             IoRequest::Accept { .. } => "io: accept".to_string(),
+            IoRequest::RunProcess { program, .. } => {
+                format!("proc: run {}", program.to_string_lossy())
+            }
+            IoRequest::SpawnProcess { program, .. } => {
+                format!("proc: spawn {}", program.to_string_lossy())
+            }
+            IoRequest::ChildWait { .. } => "proc: wait".to_string(),
+            IoRequest::WrapStream { codec, .. } => format!("io: wrap {codec}"),
         }
     }
 }
@@ -273,17 +379,98 @@ pub trait IoBackend {
     /// `StreamId` onto a non-GC queue the scheduler drains here — no `await`, no task
     /// context. Missing ids are a no-op, so double-close is harmless.
     fn close(&self, id: StreamId);
+
+    /// Synchronously kill (if still running) and deregister a spawned child — the
+    /// child twin of `close`, drained from the child-reap queue when an undetached
+    /// Process handle is collected or the VM exits. Missing/exited ids are a no-op.
+    fn reap_child(&self, _id: u64) {}
+
+    /// Send a signal to a spawned child, by PID — never touching the `Child`, so it
+    /// works (and resolves the wait) while a `ChildWait` is parked on it. A no-op
+    /// once the exit is recorded, so a stale handle can't signal a recycled pid.
+    fn child_signal(&self, _id: u64, _signal: i32) -> Result<(), IoError> {
+        Err(IoError {
+            kind: std::io::ErrorKind::Unsupported,
+            message: "this backend has no subprocess support".to_string(),
+        })
+    }
+
+    /// Whether a spawned child is still running — exact, not a pid probe: recorded
+    /// exit → false; a parked wait (which by definition hasn't resolved) → true;
+    /// otherwise a non-blocking `try_status`, recording an exit it discovers.
+    fn child_running(&self, _id: u64) -> bool {
+        false
+    }
+
+    /// Mark a child detached: neither the reap path nor backend teardown kills it.
+    fn child_detach(&self, _id: u64) {}
 }
 
 // ---------------------------------------------------------------------------
 // SmolBackend — the native implementation, on `async-io`.
 // ---------------------------------------------------------------------------
 
+/// A spawned child in the table. The `Child` sits behind a `RefCell` whose ONLY
+/// mutable borrower is an in-flight `ChildWait` (guarded by `waiting`); everything
+/// else goes through the pid (`kill`) or the cells. While the entry holds the
+/// un-dropped `Child`, the OS cannot recycle the pid (an exited child is a zombie
+/// until async-process's reaper — which runs on `Child` drop — collects it), so
+/// signalling by pid is race-free.
+struct ChildSlot {
+    child: RefCell<async_process::Child>,
+    pid: u32,
+    /// `(code, signal)` once exited; recorded by the wait that observed it (or by
+    /// a `child_running` probe).
+    exited: Cell<Option<(Option<i32>, Option<i32>)>>,
+    /// A `ChildWait` is in flight (its RAII guard clears this even on cancel).
+    waiting: Cell<bool>,
+    /// Detached: outlives the VM (the table's teardown kill skips it).
+    detached: Cell<bool>,
+}
+
+impl Drop for SmolInner {
+    fn drop(&mut self) {
+        // Backend teardown (process exit): a still-running, undetached child dies
+        // with the VM — the streaming twin of RunProcess's kill_on_drop. Detached
+        // children are the one deliberate survivor.
+        #[cfg(unix)]
+        for slot in self.children.borrow().values() {
+            if slot.exited.get().is_none() && !slot.detached.get() {
+                unsafe {
+                    libc::kill(slot.pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+    }
+}
+
+/// Decompose an `ExitStatus` into the `(code, signal)` pair the results carry.
+fn exit_parts(status: std::process::ExitStatus) -> (Option<i32>, Option<i32>) {
+    #[cfg(unix)]
+    let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+    #[cfg(not(unix))]
+    let signal = None;
+    (status.code(), signal)
+}
+
+/// Clears the slot's `waiting` flag when the wait op ends — including a CANCELLED
+/// wait (the future is dropped mid-park), which would otherwise wedge the flag and
+/// refuse every later wait on that child.
+struct WaitGuard(Rc<ChildSlot>);
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        self.0.waiting.set(false);
+    }
+}
+
 struct SmolInner {
     streams: RefCell<HashMap<StreamId, Box<dyn AsyncStream>>>,
     // Listening sockets live in their own registry: a `TcpListener` accepts connections
     // (it isn't an `AsyncStream`), so it can't share the `streams` map. Same id space.
     listeners: RefCell<HashMap<StreamId, async_net::TcpListener>>,
+    // Spawned children, addressed by their own ids (same counter as streams — the
+    // spaces never meet). See `ChildSlot`.
+    children: RefCell<HashMap<u64, Rc<ChildSlot>>>,
     next_id: Cell<u64>,
     // TLS connectors are built lazily and cached: loading the webpki root bundle once
     // (rather than per connection) is the whole reason `TlsWrap` is cheap. `unsync`
@@ -447,6 +634,7 @@ impl SmolBackend {
             inner: Rc::new(SmolInner {
                 streams: RefCell::new(HashMap::new()),
                 listeners: RefCell::new(HashMap::new()),
+                children: RefCell::new(HashMap::new()),
                 next_id: Cell::new(1),
                 tls_secure: OnceCell::new(),
                 tls_insecure: OnceCell::new(),
@@ -782,12 +970,176 @@ impl IoBackend for SmolBackend {
                 }
             }),
 
+            IoRequest::WrapStream { id, codec } => Box::pin(async move {
+                // Resolve the codec BEFORE taking the stream, so an unknown name
+                // errs with the stream (and its fd) untouched in the registry.
+                let wrap = match crate::io_codecs::lookup(&codec) {
+                    Ok(f) => f,
+                    Err(e) => return IoResult::Err(e),
+                };
+                let stream = match take_stream(&inner, id) {
+                    Ok(s) => s,
+                    Err(e) => return IoResult::Err(e),
+                };
+                IoResult::Connected(inner.insert_at(id, wrap(stream)))
+            }),
+
             IoRequest::OpenFile { path } => Box::pin(async move {
                 // `async-fs` opens on the blocking pool (regular files aren't pollable),
                 // same trick as `async-net`'s DNS. The `File` is `AsyncRead + AsyncWrite +
                 // Unpin`, so it drops into the same registry as any socket.
                 match async_fs::File::open(&path).await {
                     Ok(file) => IoResult::Connected(inner.insert(Box::new(file))),
+                    Err(e) => IoResult::Err(e.into()),
+                }
+            }),
+
+            IoRequest::RunProcess {
+                program,
+                args,
+                env,
+                dir,
+                input,
+            } => Box::pin(async move {
+                let mut cmd = async_process::Command::new(&program);
+                cmd.args(&args);
+                if let Some(env) = env {
+                    for (k, v) in env {
+                        cmd.env(k, v);
+                    }
+                }
+                if let Some(dir) = dir {
+                    cmd.current_dir(dir);
+                }
+                cmd.stdin(if input.is_some() {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                });
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+                // Cancellation semantics: this op owns the whole child lifecycle, so
+                // dropping the future mid-flight (Async.timeout: fired, task
+                // cancelled) must kill the child, not leak it.
+                cmd.kill_on_drop(true);
+                let mut child = match cmd.spawn() {
+                    Ok(c) => c,
+                    Err(e) => return IoResult::Err(e.into()),
+                };
+                if let (Some(mut sin), Some(bytes)) = (child.stdin.take(), input) {
+                    use futures_lite::AsyncWriteExt;
+                    // A child that exits without draining its input (`head -1`)
+                    // breaks the pipe mid-write; that is normal, not an error —
+                    // the exit status tells the real story either way.
+                    let _ = sin.write_all(&bytes).await;
+                    // `sin` drops here → the child sees EOF.
+                }
+                // `output()` reads stdout and stderr CONCURRENTLY while awaiting
+                // exit — reading either alone deadlocks when the other pipe's
+                // buffer fills.
+                match child.output().await {
+                    Ok(out) => {
+                        let (code, signal) = exit_parts(out.status);
+                        IoResult::ProcDone {
+                            code,
+                            signal,
+                            stdout: out.stdout,
+                            stderr: out.stderr,
+                        }
+                    }
+                    Err(e) => IoResult::Err(e.into()),
+                }
+            }),
+
+            IoRequest::SpawnProcess {
+                program,
+                args,
+                env,
+                dir,
+            } => Box::pin(async move {
+                let mut cmd = async_process::Command::new(&program);
+                cmd.args(&args);
+                if let Some(env) = env {
+                    for (k, v) in env {
+                        cmd.env(k, v);
+                    }
+                }
+                if let Some(dir) = dir {
+                    cmd.current_dir(dir);
+                }
+                cmd.stdin(std::process::Stdio::piped());
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+                // NOT kill_on_drop: the handle's reap queue owns the kill (a
+                // detached child must survive its Child being dropped).
+                let mut child = match cmd.spawn() {
+                    Ok(c) => c,
+                    Err(e) => return IoResult::Err(e.into()),
+                };
+                let pid = child.id();
+                let stdin = inner.insert(Box::new(WriteOnlyStream(
+                    child.stdin.take().expect("stdin was piped"),
+                )));
+                let stdout = inner.insert(Box::new(ReadOnlyStream(
+                    child.stdout.take().expect("stdout was piped"),
+                )));
+                let stderr = inner.insert(Box::new(ReadOnlyStream(
+                    child.stderr.take().expect("stderr was piped"),
+                )));
+                let id = inner.next_id.get();
+                inner.next_id.set(id + 1);
+                inner.children.borrow_mut().insert(
+                    id,
+                    Rc::new(ChildSlot {
+                        child: RefCell::new(child),
+                        pid,
+                        exited: Cell::new(None),
+                        waiting: Cell::new(false),
+                        detached: Cell::new(false),
+                    }),
+                );
+                IoResult::ProcSpawned {
+                    child: id,
+                    pid,
+                    stdin,
+                    stdout,
+                    stderr,
+                }
+            }),
+
+            IoRequest::ChildWait { id } => Box::pin(async move {
+                let slot = match inner.children.borrow().get(&id) {
+                    Some(s) => Rc::clone(s),
+                    None => {
+                        return IoResult::Err(IoError {
+                            kind: std::io::ErrorKind::NotFound,
+                            message: "process handle is closed".to_string(),
+                        });
+                    }
+                };
+                if let Some((code, signal)) = slot.exited.get() {
+                    return IoResult::ProcExited { code, signal };
+                }
+                if slot.waiting.replace(true) {
+                    return IoResult::Err(IoError {
+                        kind: std::io::ErrorKind::WouldBlock,
+                        message: "another task is already waiting on this process".to_string(),
+                    });
+                }
+                let _guard = WaitGuard(Rc::clone(&slot));
+                // The wait holds the child's only mutable borrow across the await —
+                // everything concurrent (kill, running?, reap) goes through the pid
+                // or the cells, never this RefCell (see ChildSlot).
+                let status = {
+                    let mut child = slot.child.borrow_mut();
+                    child.status().await
+                };
+                match status {
+                    Ok(status) => {
+                        let (code, signal) = exit_parts(status);
+                        slot.exited.set(Some((code, signal)));
+                        IoResult::ProcExited { code, signal }
+                    }
                     Err(e) => IoResult::Err(e.into()),
                 }
             }),
@@ -869,6 +1221,87 @@ impl IoBackend for SmolBackend {
             }
         }
     }
+
+    fn reap_child(&self, id: u64) {
+        // Kill (if still running), then drop the table entry. A parked wait holds
+        // its own `Rc` — the kill resolves it with the signal exit; the `Child`
+        // itself drops when the last Rc goes, and async-process's global reaper
+        // collects the zombie.
+        let slot = self.inner.children.borrow_mut().remove(&id);
+        if let Some(slot) = slot {
+            if slot.exited.get().is_none() && !slot.detached.get() {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(slot.pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    fn child_signal(&self, id: u64, signal: i32) -> Result<(), IoError> {
+        let slot = match self.inner.children.borrow().get(&id) {
+            Some(s) => Rc::clone(s),
+            None => {
+                return Err(IoError {
+                    kind: std::io::ErrorKind::NotFound,
+                    message: "process handle is closed".to_string(),
+                });
+            }
+        };
+        // Exited (recorded) → no-op: the pid may be recycled once the zombie is
+        // reaped, and signalling a stranger is the one unforgivable outcome.
+        if slot.exited.get().is_some() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            let rc = unsafe { libc::kill(slot.pid as libc::pid_t, signal) };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error().into())
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = signal;
+            Err(IoError {
+                kind: std::io::ErrorKind::Unsupported,
+                message: "process signals are unix-only".to_string(),
+            })
+        }
+    }
+
+    fn child_running(&self, id: u64) -> bool {
+        let slot = match self.inner.children.borrow().get(&id) {
+            Some(s) => Rc::clone(s),
+            None => return false,
+        };
+        if slot.exited.get().is_some() {
+            return false;
+        }
+        // A parked wait holds the child's borrow — and also proves the child has
+        // not exited yet (the wait would have resolved and recorded it).
+        if slot.waiting.get() {
+            return true;
+        }
+        let mut child = slot.child.borrow_mut();
+        match child.try_status() {
+            Ok(Some(status)) => {
+                let (code, signal) = exit_parts(status);
+                slot.exited.set(Some((code, signal)));
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        }
+    }
+
+    fn child_detach(&self, id: u64) {
+        if let Some(slot) = self.inner.children.borrow().get(&id) {
+            slot.detached.set(true);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -927,6 +1360,16 @@ impl IoBackend for MockBackend {
                 buf.truncate(max);
                 IoResult::Read(buf)
             }
+            IoRequest::RunProcess { .. }
+            | IoRequest::SpawnProcess { .. }
+            | IoRequest::ChildWait { .. } => IoResult::Err(IoError {
+                kind: std::io::ErrorKind::Unsupported,
+                message: "the mock backend has no subprocess support".to_string(),
+            }),
+            IoRequest::WrapStream { .. } => IoResult::Err(IoError {
+                kind: std::io::ErrorKind::Unsupported,
+                message: "the mock backend has no stream codecs".to_string(),
+            }),
             IoRequest::Write { bytes, .. } => {
                 let n = bytes.len();
                 self.writes.borrow_mut().push(bytes);

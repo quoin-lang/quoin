@@ -216,6 +216,12 @@ yield operator in `## Misc`, operators-as-`:`-selectors in the dispatch overhaul
 but *not* parser changes — left in place: per-argument guard blocks and `#bind:{}` destructuring,
 both under `## Misc`.)
 
+- [x] **Shebang support.** A leading `#!/usr/bin/env qn` line is grammar trivia (`shebang` rule
+  in Quoin.pest — parsed, not stripped, so diagnostics keep true line numbers); `qn fmt`
+  re-emits it verbatim; and qn's own arg parsing gained `allow_hyphen_values`, so
+  `./tool.qn --verbose` (and `qn tool.qn --verbose`) hands the flags to the SCRIPT — the old
+  `--` separator is no longer needed. Tests: parser/fmt pins + `tests/shebang.rs` (direct
+  exec with hyphen args; unshifted error positions). Book §36.
 - [ ] **Scope a namespace for definitions (`module`-like).** A way to open a namespace in code so
   that `Class` and constant definitions inside the scope implicitly register under it — instead of
   repeating the `[Ns]` prefix on every definition. Analogous to Ruby's `module Foo … end` (or
@@ -594,10 +600,27 @@ deferred `Mirror` in `## REPL`.
 **Compression & archives**
 - [x] ⭐ **gzip / zlib / deflate** — one-shot (de)compression as `Bytes` methods
   (`decodeGz`/`encodeGz`, `decodeDeflate`/`encodeDeflate`) via flate2's miniz_oxide backend
-  (pure Rust). `src/runtime/compress.rs`. Remaining: streaming (incremental) over a `ByteStream`.
+  (pure Rust). `src/runtime/compress.rs`. **Streaming READ shipped** (2026-07-11):
+  `ByteStream/StringStream#gunzip` wraps the registry stream IN PLACE via the generic
+  `IoRequest::WrapStream` + the codec factory table in `src/io_codecs.rs` — adding a codec is a
+  table entry + a qnlib sugar one-liner; the async machinery never changes again (parameterized
+  wraps like TLS stay bespoke). Multi-member gz decodes end to end; unread-stream precondition
+  enforced. Tests `qnlib/tests/72-gzip-stream.qn`. **Streaming WRITE deferred to tar-write**: the
+  gzip trailer is written by the encoder's close, but the reap path only DROPS fds — the close
+  path must learn to finish the encoder first, or collected handles write corrupt archives.
 - [x] ⭐ **zstd** — decode via `ruzstd` (pure Rust) as `Bytes.decodeZstd`. Encode deferred (no
   pure-Rust zstd compressor — would need the C `zstd` crate). `src/runtime/compress.rs`.
-- [ ] **tar** (`tar`) and **zip** (`zip`) — archive read/write.
+- [x] **tar READ** — `[Archive]Tar`/`[Archive]TarEntry` (`qnlib/core/15-tar.qn`, PURE QUOIN over
+  ByteStream — tar is 512-byte headers + octal fields, i.e. `readExactly:` work; `.tar.gz` =
+  compose with `gunzip`). Streaming one-pass entries (read `bytes` before advancing; skipped
+  content never materializes), ustar prefix + GNU 'L' + pax `path=`, checksum verification →
+  ParseError, `extractTo:` with normalized+CONFINED paths (traversal attack pinned by a
+  hand-crafted archive in `qnlib/tests/73-tar.qn`; real fixtures come from the system tar via
+  [OS]Process). Book §44.
+- [ ] **tar WRITE** — wants streaming gzip ENCODE first (the trailer-on-close problem recorded
+  under the compression item); plain `.tar` write could ship earlier if needed.
+- [ ] **zip** (`zip`) — archive read/write; needs central-directory (non-streaming) reading, its
+  own design.
 
 **System & process**
 - [x] ⭐ **Environment** — `[OS]Env` read/iterate shipped (`src/runtime/os.rs`, tests
@@ -606,12 +629,32 @@ deferred `Mirror` in `## REPL`.
   threads, and the real use case (configuring a child) belongs to the subprocess item below.
 - [x] ⭐ **Path** — `[OS]Path` shipped (`src/runtime/os.rs`, tests `57-os-path.qn`). *(Box was
   stale — verified 2026-07-11.)*
-- [ ] **Process / subprocess** — spawn a command, capture stdout/stderr/exit; async-aware (parks on
-  the scheduler like socket I/O).
+- [x] **Process / subprocess** — `[OS]Process` (`src/runtime/process.rs` + `core/12-os.qn`,
+  `async-process` on the same smol reactor). `run:`/`run:input:env:dir:` parks the task for the
+  whole lifecycle → ProcessResult (`ok?`, `check` → typed ProcessError w/ the result as payload);
+  `start:` → streaming handle (pipes are registry streams — `stdout(Text)`/`stderr(Text)` read
+  like sockets, `writeStdin:`/`closeStdin`; `wait`/`kill`/`terminate`/`running?`/`detach`).
+  Command = List, NO shell by design; `env:` sets vars for the CHILD (resolving the [OS]Env
+  set question above). Lifecycle owned: cancelled `run:` kills its child (`kill_on_drop`),
+  undetached handle collected → child-reap queue kills it, VM teardown kills undetached
+  survivors, `detach` opts out. Kill goes by PID (never borrows the Child — a parked `ChildWait`
+  holds its only `&mut`); one wait at a time by construction. Tests `qnlib/tests/70-process.qn`;
+  book §44. Deferred: `runShell:` convenience, PTY allocation, a pipeline DSL (compose via
+  streams meanwhile).
 - [x] ⭐ **`[IO]Stdin`** — shipped (`src/runtime/io.rs` + `qnlib/core/06-io.qn`, tests
   `59-io-stdin.qn`). *(Box was stale — verified 2026-07-11.)*
-- [ ] **CLI argument parsing** — options/flags/positionals/subcommands on top of
-  `VmOptions.arguments`.
+- [x] **CLI argument parsing** — `[CLI]Spec`/`[CLI]Parsed` (`qnlib/core/14-cli.qn`, pure Quoin):
+  flags, options (defaults/`required:`/`values:` enums), positionals, `rest:` splat, subcommands
+  (sub-spec per command; parent flags work before or after the command name). `parse` = production
+  (auto `-h`/`--help` from the generated helpText; misuse → message + usage on stderr, exit 2);
+  `parseFrom:` = the testable seam (throws typed UsageError). GNU forms (`--x v`, `--x=v`, `-x`,
+  `--`); values stay Strings. Undeclared `at:` name → ValueError. Enablers shipped with it:
+  `String#sliceFrom:to:` (char-indexed substring — String had NO slicing) and the file-run
+  pass-through in `VmRunnerOptions::parse` (pre-clap argv split, `file_run_split` — clap's
+  trailing_var_arg still intercepted `--help`/`--version` mid-capture, so everything after FILE
+  now bypasses clap; **qn's own flags go BEFORE the file**). Tests `qnlib/tests/71-cli.qn` +
+  `tests/cli.rs`; book §44 + §36. Deferred: short clustering (`-vf`), repeatable options,
+  negative-number positionals (use `--`), shell completions.
 
 **Networking** (built on the async arc — see `## Networking & Async I/O`)
 - [x] **HTTP client (high-level)** — `[HTTP]Client.get:`/`post:`/`request:` builder over
@@ -766,6 +809,17 @@ deferred `Mirror` in `## REPL`.
   inconsistent with the strict-Boolean family (`if:`/`whileDo:` raise on non-Bool since the
   bug-hunt F1/F14 fixes; the comparator result is the remaining truthiness leak in a
   documented-strict position). Minor: raise like `whileDo:` does, or document.
+- [ ] **`var x = x` in a `new:{}` block read nil in one specific context** (2026-07-11,
+  found writing [Archive]Tar). In `[Archive]Tar#next`, `TarEntry.new:{ var name = name; … }`
+  bound @name to nil although a debug print showed `name` = './' immediately before the
+  construction; renaming the enclosing locals (`entryName` etc.) fixed it — the workaround
+  shipped in `qnlib/core/15-tar.qn` (`next`). THREE minimization attempts did NOT reproduce:
+  seven self-shadowed vars at top level; class method + whileDo + 3-deep else + `^^` + mixin +
+  intervening self-sends; multiple self-shadowed vars in a method. The failing shape had, in
+  addition: the outer var initialized from a `@field.defined?.if:else:` chain, the enclosing
+  class carrying same-named state, and 7 block vars. Needs VM-level debugging (env-frame capture
+  in instantiation blocks?) — start by restoring the original names in 15-tar.qn and bisecting
+  the real site.
 - [ ] **Builder-panic parse errors leak the raw Rust panic banner to stderr** before the
   graceful report. The F4/F7 fix converts post-pest AST-builder panics (int literal ≥ 2^63,
   `\uD800` surrogate escape) into catchable `ParseError`s via `catch_unwind`
