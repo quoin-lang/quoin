@@ -547,18 +547,37 @@ deferred `Mirror` in `## REPL`.
 - [ ] **Logging** — leveled logger (`debug`/`info`/`warn`/`error`), formatting, pluggable sinks,
   defaulting to `[IO]Stderr`.
 
-**Time** — Phases 1+2 shipped (`docs/STDLIB_TIME.md`); the civil-types residual remains.
+**Time** — Phases 1+2+3 shipped (`docs/STDLIB_TIME.md`).
 - [x] **DateTime** — zone-aware instants, RFC 3339, components, arithmetic (`jiff`).
 - [x] **Duration & monotonic clock** — `Duration` value type + `Instant.now`/elapsed.
-- [ ] **Civil `Date`/`Time` + first-class `Span`/`Period`** — ISO-8601 duration parsing
-  (`P1Y2M…`), mixed-unit arithmetic, calendar diffs (the `plus…`/`minus…` methods cover the
-  common case today; see `docs/STDLIB_TIME.md` deferred).
+- [x] **Civil `Date`/`Time` + first-class `Span`** — `Date` (calendar date, no zone;
+  nonexistent dates refuse; `± Span` end-of-month clamped; `until:` → calendar Span) +
+  `Time` (wall-clock; `± Duration` WRAPS around midnight; `until:` → signed Duration) +
+  `Span` (parses ISO `P1Y2M` and friendly `1y 2mo`; `+:`/`-:` FIELD-WISE, units never
+  convert; FIELDWISE `==:`, no `<:`; `asDuration` refuses calendar units) + the DateTime
+  bridges (`± Span`, `until:`, `date`/`time`, `Date#atTime:zone:`/`inZone:`).
+  `src/runtime/civil.rs` + `span.rs`; tests `qnlib/tests/68-civil-time.qn`; book §44;
+  full as-built spec in `docs/STDLIB_TIME.md` Phase 3. Named `Span` (jiff's term), not
+  `Period`.
+  - [ ] Deferred from v1: strftime-style custom parse/format (`format:`/`parseFormat:`),
+    week-of-year / quarter accessors, `Date` range iteration (`d1..d2` riding the range
+    protocol), `Span` rounding/normalization (`round:`/`total:` — needs a relative-date
+    anchor design), and `DateTime#nearest:`-style snapping.
 
 **Crypto & hashing**
-- [ ] ⭐ **Digests** — `sha256`/`sha1`/`md5`/`blake3` + HMAC over `Bytes`/`String` (`sha2`, `blake3`).
-- [ ] ⭐ **UUID** — v4 (random) and v7 (time-ordered) (`uuid`).
-- [ ] **Secure random** — CSPRNG bytes (pairs with Random/UUID). Later: symmetric (AES-GCM) and
-  signatures (Ed25519).
+- [x] ⭐ **Digests** — `[Crypto]Digest` class methods `sha256:`/`sha512:`/`sha1:`/`md5:`/`blake3:`
+  over String (UTF-8) or Bytes → the raw digest as Bytes (compose with `toHex`/`Base64.encode:`),
+  and `[Crypto]Hmac` `sha256:key:`/`sha512:key:`/`sha1:key:` + constant-time
+  `verifySha256:message:key:` (`==` on recomputed Bytes is a timing side channel — the verify
+  method is the taught idiom). `src/runtime/crypto.rs` (`sha2`/`sha1`/`md-5`/`blake3`/`hmac`);
+  vectors pinned to NIST / RFC 4231 / RFC 2202 / the BLAKE3 reference in `qnlib/tests/67-crypto.qn`;
+  book §44 "Hashes, MACs & secure random". One-shot only — streaming `update:`/`final` deferred
+  until something needs to hash a stream.
+- [x] ⭐ **UUID** — v4 (random) and v7 (time-ordered) (`uuid`). *(Was already shipped —
+  `UUID.generateV4`/`generateV7` with tests; the unchecked box was stale. Verified 2026-07-11.)*
+- [x] **Secure random** — `[Crypto]Random.bytes:n`: Bytes straight from the OS CSPRNG
+  (`getrandom`), deliberately not seedable — the seedable `Random` is for simulations, this one
+  is for secrets. Later: symmetric (AES-GCM) and signatures (Ed25519).
 
 **Compression & archives**
 - [x] ⭐ **gzip / zlib / deflate** — one-shot (de)compression as `Bytes` methods
@@ -569,12 +588,16 @@ deferred `Mirror` in `## REPL`.
 - [ ] **tar** (`tar`) and **zip** (`zip`) — archive read/write.
 
 **System & process**
-- [ ] ⭐ **Environment** — read/iterate/set process env vars (`[OS]Env`).
-- [ ] ⭐ **Path** — `join:`/`dirname`/`basename`/`extension`/`normalize`/`isAbsolute?` (string-level
-  path manipulation, separate from `[IO]File`).
+- [x] ⭐ **Environment** — `[OS]Env` read/iterate shipped (`src/runtime/os.rs`, tests
+  `58-os-env.qn`). *(Box was stale — verified 2026-07-11.)* SET is deliberately absent, with the
+  rationale recorded in the module doc: edition-2024 `set_var` is unsafe under this VM's worker
+  threads, and the real use case (configuring a child) belongs to the subprocess item below.
+- [x] ⭐ **Path** — `[OS]Path` shipped (`src/runtime/os.rs`, tests `57-os-path.qn`). *(Box was
+  stale — verified 2026-07-11.)*
 - [ ] **Process / subprocess** — spawn a command, capture stdout/stderr/exit; async-aware (parks on
   the scheduler like socket I/O).
-- [ ] ⭐ **`[IO]Stdin`** — line/byte reading. Also unblocks P3 "REPL in Quoin" (see `## REPL`).
+- [x] ⭐ **`[IO]Stdin`** — shipped (`src/runtime/io.rs` + `qnlib/core/06-io.qn`, tests
+  `59-io-stdin.qn`). *(Box was stale — verified 2026-07-11.)*
 - [ ] **CLI argument parsing** — options/flags/positionals/subcommands on top of
   `VmOptions.arguments`.
 

@@ -78,7 +78,7 @@ protocol, not a separate toolkit: any Iterate-able of numbers has `mean`,
 
 ### Time
 
-Four types, split by job so each can be exactly right: **Instant** is the
+Split by job so each type can be exactly right: **Instant** is the
 monotonic clock — for measuring elapsed time, immune to wall-clock adjustments,
 meaningless across processes; **Timestamp** is absolute UTC wall-clock time;
 **DateTime** is a Timestamp plus its **TimeZone** (IANA zones), which is what
@@ -86,10 +86,27 @@ makes calendar arithmetic, DST, and offsets come out right; **Duration** is a
 signed span with nanosecond precision. **Timer** is the one-selector stopwatch:
 `Timer.time:aBlock` answers the block's elapsed whole microseconds.
 
+The civil types drop what doesn't apply: **Date** is a calendar date with no
+time and no zone (birthdays, deadlines — "March 3rd" everywhere), **Time** a
+wall-clock time of day with no date (its `Duration` arithmetic *wraps* around
+midnight). And **Span** is the calendar-aware duration — years, months, weeks,
+days, and time units held as *separate fields*, so "1 month" stays 1 month
+until it meets a date, where `+`/`-` apply it correctly (end-of-month clamping,
+DST). `Span` parses ISO 8601 (`'P1Y2M'`) and the friendly form (`'1y 2mo'`);
+its equality is *fieldwise* (`1h` ≠ `60m` — whether they match depends on a
+calendar), and `asDuration` converts only pure-time spans, refusing calendar
+units rather than guessing. Diffs go the other way with `until:` — a calendar
+Span (`'2y 2mo 3d'`) on `Date` and `DateTime`, where subtraction answers an
+absolute `Duration`. Civil and zone-aware meet through `date.atTime:zone:` /
+`date.inZone:` (→ DateTime) and `DateTime#date` / `#time` (→ civil).
+
 ```quoin
 (Duration.minutes:2) + (Duration.seconds:30)    "* -> 2m 30s
 (Timestamp.parse:'2026-07-09T12:00:00Z').inZone:(TimeZone.of:'Asia/Tokyo')
 "* -> 2026-07-09T21:00:00+09:00[Asia/Tokyo]
+(Date.year:2024 month:1 day:31) + (Span.months:1)      "* -> 2024-02-29
+(Date.parse:'2024-01-15').until:(Date.parse:'2026-03-18')    "* -> 2y 2mo 3d
+((Time.hour:23 minute:30) + (Duration.hours:1)).s      "* -> '00:30:00'
 ```
 
 ### Data formats
@@ -170,6 +187,28 @@ the ordinary operators.
 
 ```quoin
 ULID.generate.s.length    "* -> 26
+```
+
+### Hashes, MACs & secure random — `[Crypto]`
+
+**`[Crypto]Digest`** computes one-shot digests — `sha256:` / `sha512:` /
+`sha1:` / `blake3:`, plus `md5:` (not cryptography anymore; it lives here to
+keep the hashes together). Each takes a String (hashed as its UTF-8 bytes) or
+a Bytes value and answers the raw digest as **Bytes**, composing with the
+codecs above: `toHex` for the usual text form, `Base64.encode:` for wire
+formats. **`[Crypto]Hmac`** is the keyed counterpart (`sha256:key:`,
+`sha512:key:`, `sha1:key:`) — and checking a received MAC goes through
+`verifySha256:message:key:`, which compares in **constant time**; `==` on the
+recomputed Bytes bails at the first differing byte and leaks how much of a
+guess was right. **`[Crypto]Random`** answers bytes from the operating
+system's CSPRNG for keys, tokens, and salts — the seedable `Random` class is
+for simulations, this one is for secrets.
+
+```quoin
+([Crypto]Digest.sha256:'abc').toHex          "* -> 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+var mac = [Crypto]Hmac.sha256:'msg' key:'secret'
+[Crypto]Hmac.verifySha256:mac message:'msg' key:'secret'    "* -> true
+([Crypto]Random.bytes:16).count              "* -> 16
 ```
 
 ### Covered elsewhere
