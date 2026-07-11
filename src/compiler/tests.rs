@@ -2861,3 +2861,57 @@ fn caret_in_discarded_if_arm_lints() {
         0
     );
 }
+
+/// Tier-shape pin (see qnlib/tests/65-aot-gallery.qn): a literal-block
+/// `each:` site's guard must carry the block's template id — that id is what
+/// lets the interpreted arm route to the compiled speculated block instead
+/// of the splice (S2). A `None` here silently reverts every interpreted
+/// `each:` site to splice-only, exactly the "identical under QN_AOT=0"
+/// regression the routing fixed.
+#[test]
+fn fused_each_guard_carries_the_block_template_id() {
+    let src = "var data = #( 1 2 3 );\ndata.each:{ |x| x * 2 };\n";
+    let ast = crate::parser::try_parse_quoin_string_named(src, "<tier-pin>").expect("parse");
+    let NodeValue::Program(p) = &ast.value else {
+        panic!("not a program");
+    };
+    let mut compiler = Compiler::new().with_template_ids();
+    let sb = compiler.compile_program(p).expect("compile");
+    let guards: Vec<Option<u32>> = sb
+        .bytecode
+        .iter()
+        .filter_map(|i| match i {
+            Instruction::BranchIfNotList(_, tid) => Some(*tid),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(guards.len(), 1, "one fused each: site expected");
+    assert!(
+        guards[0].is_some(),
+        "the fused guard must carry the literal block's template id"
+    );
+}
+
+/// Tier-shape pin: a `detect:`-shaped signature — `Block` param, `^T?`
+/// return erasing to `Object` — IS an AOT candidate. Its return used to end
+/// candidacy at the precheck (`precheckSignature`), which kept the whole
+/// `^T`/`^T?`/`^Object` family interpreted for months with nothing failing.
+#[test]
+fn type_var_nullable_return_is_a_candidate() {
+    let src = "Holder(T) <- {\n    .meta <-- {\n        pick: -> { |b: Block(T ^Boolean) ^T?| nil }\n    };\n    .sealed!\n};\n";
+    let ast = crate::parser::try_parse_quoin_string_named(src, "<tier-pin>").expect("parse");
+    let NodeValue::Program(p) = &ast.value else {
+        panic!("not a program");
+    };
+    let mut compiler = Compiler::new().with_template_ids().with_aot();
+    compiler.compile_program(p).expect("compile");
+    let cands = compiler.take_aot_candidates();
+    let pick = cands
+        .iter()
+        .find(|c| c.selector == "pick:")
+        .expect("`^T?` must not end candidacy (the detect: cliff)");
+    assert!(
+        matches!(pick.ret, crate::codegen::AotRet::Obj),
+        "an erased type-var return rides as Obj"
+    );
+}

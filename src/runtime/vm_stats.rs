@@ -44,6 +44,10 @@ fn aot_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'g
     }
 
     let mut aot = Vec::new();
+    aot.push((
+        "enabled".to_string(),
+        vm.new_bool(mc, crate::tuning::aot_enabled()),
+    ));
     aot.push(("compiled".to_string(), vm.new_int(mc, compiled as i64)));
     aot.push((
         "entryBails".to_string(),
@@ -550,5 +554,31 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
              ... }` Map per distinct refusal or skip -- for finding which of YOUR members \
              stayed interpreted and why. A block literal has no user-facing name, so block \
              templates appear under the pseudo-selector 'block@<template-id>'.",
+        )
+        // `VM.aotCompiled` -> the positive mirror: what is natively compiled
+        // RIGHT NOW (a tombstoned entry drops out, exactly as it stopped
+        // being dispatched to). The tier-shape pins assert against this.
+        .class_method("aotCompiled", |vm, mc, _receiver, _args| {
+            let entries = codegen::compiled_snapshot();
+            let mut out = Vec::with_capacity(entries.len());
+            for (selector, role) in entries {
+                let mut m = Vec::new();
+                m.push(("selector".to_string(), vm.new_string(mc, selector)));
+                let role = match role {
+                    codegen::AotRole::Method => "method",
+                    codegen::AotRole::BlockTemplate => "block",
+                };
+                m.push(("role".to_string(), vm.new_string(mc, role.to_string())));
+                out.push(vm.new_map(mc, m));
+            }
+            Ok(vm.new_list(mc, out))
+        })
+        .doc(
+            "What is natively compiled right now: a List with one `#{ 'selector': ... \
+             'role': ... }` Map per registered entry ('method' or 'block'; block templates \
+             appear as 'block@<template-id>'). The positive mirror of `aotRefusals` -- an \
+             entry that was compiled and later tombstoned (a mispredicting speculation) \
+             drops back out. Empty when AOT is disabled; `VM.stats.at:'aot'` carries an \
+             `enabled` flag.",
         )
 }
