@@ -10,7 +10,6 @@ use crate::vm::{VmState, VmStatus};
 use gc_arena::Gc;
 use gc_arena::collect::{DynCollect, Trace};
 use gc_arena::lock::RefLock;
-use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 use std::any::Any;
 use std::mem::transmute;
@@ -20,6 +19,16 @@ use std::mem::transmute;
 /// ONCE at insert (dispatching a user instance's `hash` method there, never
 /// from inside a Rust `Hash`/`Eq` impl) — so removal/re-indexing and `==:`
 /// never re-dispatch.
+///
+/// Two tiers, decided by size alone: at or below [`SMALL_LINEAR_MAX`]
+/// entries the index stays EMPTY and every lookup scans the cached hashes
+/// linearly — a u64 compare per entry beats an FxHashMap probe plus a
+/// heap-allocated bucket per distinct hash on the small maps that dominate
+/// real programs (JSON objects, config shapes; the index tax measured +21%
+/// on the json bench). Crossing the threshold builds the index once from
+/// the cached hashes; shrinking back below it drops the index again, so
+/// `entries.len() > SMALL_LINEAR_MAX ⇔ index populated` is the single
+/// source of truth and there is no flag to drift.
 ///
 /// The key contract (docs in `value_hash_scalar`): scalars and
 /// content-payloads key by value; user instances by identity unless their
@@ -38,6 +47,12 @@ pub struct NativeMapState {
     pub elem: Option<ElemTag>,
 }
 
+/// The linear/indexed tier boundary (see the type doc). 16 keeps every
+/// JSON-object-sized map on the scan path while a hash-heavy workload
+/// (the 20k-membership sweep that motivated the index) crosses over
+/// within its first insertions.
+const SMALL_LINEAR_MAX: usize = 16;
+
 impl NativeMapState {
     pub fn new_empty() -> Self {
         Self {
@@ -45,6 +60,45 @@ impl NativeMapState {
             index: FxHashMap::default(),
             elem: None,
         }
+    }
+
+    /// Whether the index tier is active (see the type doc: derived from the
+    /// entry count, never stored).
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.entries.len() > SMALL_LINEAR_MAX
+    }
+
+    /// (Re)build the index from the cached hashes — no dispatch.
+    fn build_index(&mut self) {
+        self.index.clear();
+        for (i, (h, _, _)) in self.entries.iter().enumerate() {
+            self.index.entry(*h).or_default().push(i as u32);
+        }
+    }
+
+    /// The one lookup primitive both tiers share: visit each entry index
+    /// whose CACHED hash equals `hash`, in insertion order, stopping at the
+    /// first `Some` from `f`. Callers do their own key comparison — the hash
+    /// match is only the candidate filter, identical in both tiers.
+    #[inline]
+    fn find_hash_match<R>(&self, hash: u64, mut f: impl FnMut(u32) -> Option<R>) -> Option<R> {
+        if !self.indexed() {
+            for (i, (h, _, _)) in self.entries.iter().enumerate() {
+                if *h == hash
+                    && let Some(r) = f(i as u32)
+                {
+                    return Some(r);
+                }
+            }
+            return None;
+        }
+        for &i in self.index.get(&hash)? {
+            if let Some(r) = f(i) {
+                return Some(r);
+            }
+        }
+        None
     }
 
     pub fn len(&self) -> usize {
@@ -60,21 +114,17 @@ impl NativeMapState {
         unsafe { transmute(self.entries.as_slice()) }
     }
 
-    /// The bucket for `hash`, as owned `(index, key)` pairs — cloned OUT so
-    /// the caller can drop the state borrow before dispatching guest `==:`
-    /// (a hook could re-enter this very map).
+    /// The hash's candidate `(index, key)` pairs — cloned OUT so the caller
+    /// can drop the state borrow before dispatching guest `==:` (a hook
+    /// could re-enter this very map).
     pub fn bucket<'gc>(&self, hash: u64) -> Vec<(u32, Value<'gc>)> {
-        self.index
-            .get(&hash)
-            .map(|ixs| {
-                ixs.iter()
-                    .map(|&i| {
-                        let (_, k, _) = self.entries[i as usize];
-                        (i, unsafe { transmute::<Value<'static>, Value<'gc>>(k) })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        let mut out = Vec::new();
+        self.find_hash_match(hash, |i| {
+            let (_, k, _) = self.entries[i as usize];
+            out.push((i, unsafe { transmute::<Value<'static>, Value<'gc>>(k) }));
+            None::<()>
+        });
+        out
     }
 
     pub fn value_at<'gc>(&self, idx: u32) -> Value<'gc> {
@@ -90,16 +140,24 @@ impl NativeMapState {
         let i = self.entries.len() as u32;
         self.entries
             .push((hash, unsafe { transmute(key) }, unsafe { transmute(value) }));
-        self.index.entry(hash).or_default().push(i);
+        if self.indexed() {
+            if self.index.is_empty() {
+                self.build_index(); // this push crossed the tier boundary
+            } else {
+                self.index.entry(hash).or_default().push(i);
+            }
+        }
     }
 
     /// Remove the entry at `idx`, preserving order. O(n): later indices
-    /// shift, so the index rebuilds from the cached hashes (no dispatch).
+    /// shift, so the index rebuilds from the cached hashes (no dispatch) —
+    /// or drops entirely when the removal lands back in the linear tier.
     pub fn remove_at<'gc>(&mut self, idx: u32) -> Value<'gc> {
         let (_, _, v) = self.entries.remove(idx as usize);
-        self.index.clear();
-        for (i, (h, _, _)) in self.entries.iter().enumerate() {
-            self.index.entry(*h).or_default().push(i as u32);
+        if self.indexed() {
+            self.build_index();
+        } else {
+            self.index.clear();
         }
         unsafe { transmute(v) }
     }
@@ -109,8 +167,7 @@ impl NativeMapState {
     /// compares String payloads only. No guest dispatch, no vm needed.
     pub fn get_str<'gc>(&self, key: &str) -> Option<Value<'gc>> {
         let h = hash_bytes(key.as_bytes());
-        let ixs = self.index.get(&h)?;
-        for &i in ixs {
+        self.find_hash_match(h, |i| {
             let (_, k, v) = &self.entries[i as usize];
             if let Value::Object(obj) = k
                 && let ObjectPayload::String(s) = &obj.borrow().payload
@@ -118,8 +175,8 @@ impl NativeMapState {
             {
                 return Some(unsafe { transmute::<Value<'static>, Value<'gc>>(*v) });
             }
-        }
-        None
+            None
+        })
     }
 
     /// Scalar-exact lookup: `Some(hit)` when the key's native `==` is
@@ -130,16 +187,14 @@ impl NativeMapState {
             return None;
         }
         let h = value_hash_scalar(key)?;
-        let hit = self.index.get(&h).and_then(|ixs| {
-            ixs.iter().find_map(|&i| {
-                let (_, k, v) = &self.entries[i as usize];
-                let k: &Value<'gc> = unsafe { transmute(k) };
-                if k == key {
-                    Some(unsafe { transmute::<Value<'static>, Value<'gc>>(*v) })
-                } else {
-                    None
-                }
-            })
+        let hit = self.find_hash_match(h, |i| {
+            let (_, k, v) = &self.entries[i as usize];
+            let k: &Value<'gc> = unsafe { transmute(k) };
+            if k == key {
+                Some(unsafe { transmute::<Value<'static>, Value<'gc>>(*v) })
+            } else {
+                None
+            }
         });
         Some(hit)
     }
@@ -150,16 +205,15 @@ impl NativeMapState {
             return None;
         }
         let h = value_hash_scalar(&key)?;
-        if let Some(ixs) = self.index.get(&h) {
-            for &i in ixs {
-                let k: &Value<'gc> = unsafe { transmute(&self.entries[i as usize].1) };
-                if *k == key {
-                    self.set_value_at(i, value);
-                    return Some(());
-                }
-            }
+        let existing = self.find_hash_match(h, |i| {
+            let k: &Value<'gc> = unsafe { transmute(&self.entries[i as usize].1) };
+            (*k == key).then_some(i)
+        });
+        if let Some(i) = existing {
+            self.set_value_at(i, value);
+        } else {
+            self.append(h, key, value);
         }
-        self.append(h, key, value);
         Some(())
     }
 }
@@ -406,7 +460,7 @@ pub fn build_map_class() -> NativeClassBuilder {
         // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6): the VALUE type
         // is generic (`Map(String V)`). ---
         .class_method("new", |vm, mc, _receiver, _args| {
-            Ok(vm.new_map(mc, IndexMap::new()))
+            Ok(vm.new_map(mc, Vec::new()))
         })
         .doc("A fresh empty map — the same value the `#{}` literal builds.")
         // `Map.new:` — a config block on a native map is meaningless; refuse
@@ -427,7 +481,7 @@ pub fn build_map_class() -> NativeClassBuilder {
                 got: args[0].type_name().to_string(),
                 msg: "Map.of: expects a value class (e.g. `Map.of:Integer`)".to_string(),
             })?;
-            let v = vm.new_map(mc, IndexMap::new());
+            let v = vm.new_map(mc, Vec::new());
             let _ = v.with_native_state_mut::<NativeMapState, _, _>(mc, |m| m.elem = Some(tag));
             Ok(v)
         })
@@ -459,7 +513,7 @@ pub fn build_map_class() -> NativeClassBuilder {
                     other => other,
                 })?;
             }
-            let v = vm.new_map(mc, IndexMap::new());
+            let v = vm.new_map(mc, Vec::new());
             let _ = v.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
                 for (h, k, val) in entries {
                     m.append(h, k, val);
@@ -475,7 +529,7 @@ pub fn build_map_class() -> NativeClassBuilder {
         )
         .instance_method("emptyLike", |vm, mc, receiver, _args| {
             let tag = receiver.with_native_state(|m: &NativeMapState| m.elem)?;
-            let v = vm.new_map(mc, IndexMap::new());
+            let v = vm.new_map(mc, Vec::new());
             if tag.is_some() {
                 let _ = v.with_native_state_mut::<NativeMapState, _, _>(mc, |m| m.elem = tag);
             }

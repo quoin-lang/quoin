@@ -6,7 +6,6 @@ use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::value::{ObjectPayload, Value};
 
-use indexmap::IndexMap;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
@@ -153,9 +152,9 @@ pub fn data_to_value<'gc>(dv: &DataValue, host: &dyn Host<'gc>) -> Result<Value<
             host.new_list(vals)
         }
         DataValue::Object(pairs) => {
-            let mut map = IndexMap::with_capacity(pairs.len());
+            let mut map = Vec::with_capacity(pairs.len());
             for (k, val) in pairs {
-                map.insert(k.clone(), data_to_value(val, host)?);
+                map.push((k.clone(), data_to_value(val, host)?));
             }
             host.new_map(map)
         }

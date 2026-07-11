@@ -98,6 +98,36 @@ VPoint <- { |@x @y|
         .is:{ ok } equalTo:'encoded';
     };
 
+    .test:lookupsAcrossTheIndexTierBoundary -> {
+        "* Maps are linear-scanned below a size threshold and hash-indexed
+        "* above it (the small-map tier). This walks a map ACROSS the
+        "* boundary in both directions - every lookup, overwrite, and
+        "* removal must behave identically in both tiers.
+        var m = #{};
+        var i = 0;
+        { i < 40 }.whileDo:{ m.at:('k' + i) put:i; i = i + 1 };
+        .is:{ m.count } equalTo:40;
+        .is:{ m.at:'k0' } equalTo:0;
+        .is:{ m.at:'k39' } equalTo:39;
+        .is:{ m.at:'nope' } equalTo:nil;
+        m.at:'k20' put:999;
+        .is:{ m.at:'k20' } equalTo:999;
+        "* shrink back through the boundary
+        var j = 39;
+        { m.count > 5 }.whileDo:{ m.remove:('k' + j); j = j - 1 };
+        .is:{ m.count } equalTo:5;
+        .is:{ m.at:'k0' } equalTo:0;
+        .is:{ m.at:'k4' } equalTo:4;
+        .is:{ m.at:'k20' } equalTo:nil;
+        .is:{ m.keys.first } equalTo:'k0';
+        "* and grow across it again
+        var g = 0;
+        { g < 30 }.whileDo:{ m.at:('g' + g) put:g; g = g + 1 };
+        .is:{ m.count } equalTo:35;
+        .is:{ m.at:'g29' } equalTo:29;
+        .is:{ m.at:'k0' } equalTo:0;
+    };
+
     .test:hashIsIntegerEverywhere -> {
         .is:{ 5.hash.class.name } equalTo:'Integer';
         .is:{ 'str'.hash.class.name } equalTo:'Integer';

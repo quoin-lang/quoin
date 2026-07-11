@@ -26,12 +26,33 @@ pub struct NativeSetState {
     pub elem: Option<ElemTag>,
 }
 
+/// The linear/indexed tier boundary, mirroring `NativeMapState` exactly (see
+/// the type doc there): at or below this size the index stays empty and
+/// membership scans the cached hashes; the 20k-sweep workloads that motivated
+/// the index cross over within their first insertions.
+const SMALL_LINEAR_MAX: usize = 16;
+
 impl NativeSetState {
     pub fn new_empty() -> Self {
         Self {
             entries: Vec::new(),
             index: FxHashMap::default(),
             elem: None,
+        }
+    }
+
+    /// Whether the index tier is active — derived from the entry count,
+    /// never stored (`entries.len() > SMALL_LINEAR_MAX ⇔ index populated`).
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.entries.len() > SMALL_LINEAR_MAX
+    }
+
+    /// (Re)build the index from the cached hashes — no dispatch.
+    fn build_index(&mut self) {
+        self.index.clear();
+        for (i, (h, _)) in self.entries.iter().enumerate() {
+            self.index.entry(*h).or_default().push(i as u32);
         }
     }
 
@@ -56,20 +77,27 @@ impl NativeSetState {
         unsafe { transmute(self.entries[idx as usize].1) }
     }
 
-    /// The bucket for `hash` as owned `(index, element)` pairs — cloned OUT
-    /// so callers drop the borrow before dispatching guest `==:`.
+    /// The hash's candidate `(index, element)` pairs — cloned OUT so callers
+    /// drop the borrow before dispatching guest `==:`. Linear tier scans the
+    /// cached hashes; indexed tier probes the bucket.
     pub fn bucket<'gc>(&self, hash: u64) -> Vec<(u32, Value<'gc>)> {
+        let candidate = |i: u32| {
+            (i, unsafe {
+                transmute::<Value<'static>, Value<'gc>>(self.entries[i as usize].1)
+            })
+        };
+        if !self.indexed() {
+            return self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, (h, _))| *h == hash)
+                .map(|(i, _)| candidate(i as u32))
+                .collect();
+        }
         self.index
             .get(&hash)
-            .map(|ixs| {
-                ixs.iter()
-                    .map(|&i| {
-                        (i, unsafe {
-                            transmute::<Value<'static>, Value<'gc>>(self.entries[i as usize].1)
-                        })
-                    })
-                    .collect()
-            })
+            .map(|ixs| ixs.iter().map(|&i| candidate(i)).collect())
             .unwrap_or_default()
     }
 
@@ -77,16 +105,23 @@ impl NativeSetState {
     pub fn append(&mut self, hash: u64, value: Value<'_>) {
         let i = self.entries.len() as u32;
         self.entries.push((hash, unsafe { transmute(value) }));
-        self.index.entry(hash).or_default().push(i);
+        if self.indexed() {
+            if self.index.is_empty() {
+                self.build_index(); // this push crossed the tier boundary
+            } else {
+                self.index.entry(hash).or_default().push(i);
+            }
+        }
     }
 
     /// Remove by index, preserving order; rebuilds the index from cached
-    /// hashes (no dispatch).
+    /// hashes (no dispatch) — or drops it when back in the linear tier.
     pub fn remove_at(&mut self, idx: u32) {
         self.entries.remove(idx as usize);
-        self.index.clear();
-        for (i, (h, _)) in self.entries.iter().enumerate() {
-            self.index.entry(*h).or_default().push(i as u32);
+        if self.indexed() {
+            self.build_index();
+        } else {
+            self.index.clear();
         }
     }
 

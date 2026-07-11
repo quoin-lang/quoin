@@ -19,7 +19,6 @@ use crate::value::{NativeClassBuilder, Value};
 use crate::vm::VmState;
 
 use gc_arena::Mutation;
-use indexmap::IndexMap;
 use std::path::{Component, Path, PathBuf};
 
 /// Elements of a Quoin `List` argument, or a `TypeError` naming the caller.
@@ -303,10 +302,10 @@ pub fn build_os_env_class() -> NativeClassBuilder {
         // The whole environment as a Map, sorted by name. This is also how you get the `Iterate`
         // combinators (`select:`, `collect:`, …) — a namespace class has no instances to mix into.
         .class_method("asMap", |vm, mc, _r, _args| {
-            let mut map = IndexMap::new();
+            let mut map = Vec::new();
             for (k, v) in env_pairs() {
                 let value = vm.new_string(mc, v);
-                map.insert(k, value);
+                map.push((k, value));
             }
             Ok(vm.new_map(mc, map))
         })

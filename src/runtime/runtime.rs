@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use gc_arena::lock::RefLock;
 use gc_arena::{Gc, Mutation};
-use indexmap::IndexMap;
 use std::collections::HashSet;
 
 /// An eval environment binding (a seeded local in the eval'd frame).
@@ -102,16 +101,16 @@ pub fn build_runtime_class() -> NativeClassBuilder {
              of Strings.",
         )
         .class_method("options", |vm, mc, _receiver, _args| {
-            let mut map = IndexMap::new();
+            let mut map = Vec::new();
             let args_list = vm
                 .options
                 .arguments
                 .iter()
                 .map(|s| vm.new_string(mc, s.clone()))
                 .collect::<Vec<_>>();
-            map.insert("arguments".to_string(), vm.new_list(mc, args_list));
+            map.push(("arguments".to_string(), vm.new_list(mc, args_list)));
             let supports_color_val = vm.new_bool(mc, vm.options.supports_color);
-            map.insert("supports_color".to_string(), supports_color_val);
+            map.push(("supports_color".to_string(), supports_color_val));
             Ok(vm.new_map(mc, map))
         })
         .doc(

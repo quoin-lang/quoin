@@ -59,7 +59,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gc_arena::collect::Trace;
 use gc_arena::{Gc, lock::RefLock};
 
-use indexmap::IndexMap;
 use quoin_ext_proto::{
     Arg, ArrowArray, ArrowDType, ClassDecl, DataValue as WireData, Msg, PROTOCOL_VERSION,
 };
@@ -226,9 +225,9 @@ pub(crate) fn wire_to_value<'gc>(
             vm.new_list(mc, vals)
         }
         WireData::Map(entries) => {
-            let mut map = IndexMap::with_capacity(entries.len());
+            let mut map = Vec::with_capacity(entries.len());
             for (k, val) in entries {
-                map.insert(k.clone(), wire_to_value(vm, mc, val, res)?);
+                map.push((k.clone(), wire_to_value(vm, mc, val, res)?));
             }
             vm.new_map(mc, map)
         }
