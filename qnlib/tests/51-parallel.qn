@@ -6,14 +6,14 @@
 
 (TestSuite.new:{ var name = 'Parallel' }).add:{
     .test:collectMatchesSerialInOrder -> {
-        var items = #();
-        (0..3000).each:{ |i| items.add:i };
+        var items = #()
+        (0..3000).each:{ |i| items.add:i }
         var f = { |x| x * 3 + 1 };
         .is:{ items.parallelCollect:f } equalTo:(items.collect:f)
     };
 
     .test:reduceMatchesSerial -> {
-        var items = #();
+        var items = #()
         (0..3000).each:{ |i| items.add:i };
         .is:{ items.parallelReduce:{ |a b| a + b } } equalTo:(items.reduce:{ |a b| a + b })
     };
@@ -23,18 +23,18 @@
     };
 
     .test:capturedDataShipsAsSnapshot -> {
-        var items = #();
-        (0..2500).each:{ |i| items.add:i };
-        var offset = 100;
+        var items = #()
+        (0..2500).each:{ |i| items.add:i }
+        var offset = 100
         var got = items.parallelCollect:{ |x| x + offset };
         .is:{ got.at:0 } equalTo:100;
         .is:{ got.at:2499 } equalTo:2599
     };
 
     .test:nonPortableBlockRaisesCatchably -> {
-        var items = #();
-        (0..2500).each:{ |i| items.add:i };
-        var acc = 0;
+        var items = #()
+        (0..2500).each:{ |i| items.add:i }
+        var acc = 0
         var refused = { items.parallelCollect:{ |x| acc = acc + x }; false }.catch:{ |e|
             e.s.contains?:'acc'
         };

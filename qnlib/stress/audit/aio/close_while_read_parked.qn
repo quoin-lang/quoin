@@ -1,25 +1,25 @@
 "* Close a socket while another task is parked in read: on it.
 "* Correct: the parked reader wakes with an error. Observed: it hangs forever
 "* (backend.close is a no-op while the stream is leased out by the in-flight read).
-var listener = TcpListener.listen:'127.0.0.1:0';
-var target = '127.0.0.1:' + listener.port;
-Task.spawn:{ var c = listener.accept; Async.sleep:120000; c.close };
+var listener = TcpListener.listen:'127.0.0.1:0'
+var target = '127.0.0.1:' + listener.port
+Task.spawn:{ var c = listener.accept; Async.sleep:120000; c.close }
 
-var sock = TcpSocket.connect:target;
-var entered = #();
+var sock = TcpSocket.connect:target
+var entered = #()
 var reader = Task.spawn:{
-    entered.add:1;
+    entered.add:1
     { var d = sock.read:10; ('reader got: ' + d.s).print }.catch:{ |e|
         ('reader woke with error (correct): ' + e.s).print
     }
-};
-{ entered.count == 0 }.whileDo:{ Async.sleep:1 };
-Async.sleep:30;  "* let the reader actually park in the backend read
+}
+{ entered.count == 0 }.whileDo:{ Async.sleep:1 }
+Async.sleep:30  "* let the reader actually park in the backend read
 
-sock.close;
-('socket closed; closed? = ' + sock.closed?.s).print;
+sock.close
+('socket closed; closed? = ' + sock.closed?.s).print
 { Async.timeout:1500 do:{ reader.join }; 'reader finished after close'.print }.catch:{ |e:TimeoutError|
     'BUG CONFIRMED: reader still parked 1.5s after close (would hang forever)'.print
 }
-catch:{ |e| ('reader join err: ' + e.s).print };
+catch:{ |e| ('reader join err: ' + e.s).print }
 'main done'.print

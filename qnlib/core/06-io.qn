@@ -1,7 +1,7 @@
 "* The process's standard output as a writable [IO]Handle constant.
-[IO]Stdout <- ([IO]Handle.stdout);
+[IO]Stdout <- ([IO]Handle.stdout)
 "* The process's standard error as a writable [IO]Handle constant.
-[IO]Stderr <- ([IO]Handle.stderr);
+[IO]Stderr <- ([IO]Handle.stderr)
 
 "* [IO]Stdin is a class rather than a constant like the two above: opening stdin parks on the
 "* scheduler, and the prelude also runs under `qn benchmark`, which has none. The stream is
@@ -11,22 +11,22 @@
 [IO]Stdin <-- {
     .meta <-- {
         "* The next line, without its terminator; nil at end of input.
-        readLine -> { ^.stream.readLine };
+        readLine -> { ^.stream.readLine }
 
         "* Every remaining line, one block call each. The idiom for a filter program.
-        eachLine: -> { |block: Block| ^.stream.eachLine:block };
+        eachLine: -> { |block: Block| ^.stream.eachLine:block }
 
         "* Everything remaining, as one String.
-        readAll -> { ^.stream.readAll };
+        readAll -> { ^.stream.readAll }
 
         "* Whether the shared stdin stream has been closed with `close` (reaching
         "* end of input does not close it).
-        closed? -> { ^.stream.closed? };
+        closed? -> { ^.stream.closed? }
         "* Close the shared stdin stream; a later read raises an IoError of kind
         "* #closed.
         close -> { ^.stream.close }
     }
-};
+}
 
 "* One-shot writes, over the buffered streams the native class provides. These are what a
 "* script that just wants to save its output should reach for: each opens, writes, and closes,
@@ -37,28 +37,28 @@
     .meta <-- {
         "* Replace `path`'s contents with `text` (creating it if absent).
         write:to: -> { |text: String path: String|
-            var s = ([IO]File.create:path).stringStream;
+            var s = ([IO]File.create:path).stringStream
             { s.write:text }.finally:{ s.close }
-        };
+        }
 
         "* Add `text` to the end of `path` (creating it if absent).
         append:to: -> { |text: String path: String|
-            var s = ([IO]File.append:path).stringStream;
+            var s = ([IO]File.append:path).stringStream
             { s.write:text }.finally:{ s.close }
-        };
+        }
 
         "* The whole file as one String.
         read: -> { |path: String|
-            var s = ([IO]File.open:path).stringStream;
+            var s = ([IO]File.open:path).stringStream
             { ^s.readAll }.finally:{ s.close }
         }
     }
-};
+}
 
 "* Iteration for directory listings: mixing in Iterate gives a Folder the whole
 "* collection protocol (`collect:`, `select:`, `count`, …) over its entries.
 [IO]Folder <-- {
-    .mix:Iterate;
+    .mix:Iterate
 
     "* Call `b` with each entry — [IO]File objects; `is_file?` tells files from
     "* subfolders — then rewind so the folder can be iterated again. Satisfies the

@@ -1,23 +1,23 @@
 "* This exists in the standard library as NumberRange.
 MyRange <- { |@start @end|
-    .mix:Iterate;
+    .mix:Iterate
 
     init: -> { |start end|
-        @start = start;
+        @start = start
         @end = end
-    };
+    }
 
     "* Only one method required to implement Iterate: call the block per element.
     each: -> { |b|
-        var i = @start;
+        var i = @start
         { i < @end }.whileDo:{ b.valueWithSelfOrArg:i; i = i + 1 }
     }
-};
+}
 
 var r = MyRange.new:{
-    var start = 0;
+    var start = 0
     var end = 9
-};
+}
 
 r.collect:{ |n| n + 1 }
 "* #( 1 2 3 4 5 6 7 8 9 )

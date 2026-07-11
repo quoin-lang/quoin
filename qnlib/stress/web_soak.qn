@@ -20,32 +20,32 @@
 "*   success -> a final "OK: N rounds passed" line and no failure line;
 "*   failure -> a "SOAK FAILED: ..." line per mismatch, and a final FAILED line.
 "* ===========================================================================
-use std:net/http;
-use std:net/http_server;
-use std:web/*;
+use std:net/http
+use std:net/http_server
+use std:web/*
 
 [Soak]Check <- { | @failures |
-    init -> { @failures = 0 };
+    init -> { @failures = 0 }
     is:equalTo:label: -> { |got expected label|
         (got == expected).else:{
-            @failures = @failures + 1;
+            @failures = @failures + 1
             ('SOAK FAILED: ' + label + ': got [' + got.s + '] expected [' + expected.s + ']').print
         }
-    };
+    }
     failures -> { @failures }
-};
+}
 
-var check = [Soak]Check.new;
-var rounds = 5;
+var check = [Soak]Check.new
+var rounds = 5
 
 "* --- the app under test ----------------------------------------------------
-var app = [Web]App.new;
-app.get:'/hello' do:{ 'hi' };
-app.get:'/users/:id' do:{ |req| #{ 'id':(req.param:'id') } };
-app.post:'/echo' do:{ |req| [Web]Response.json:(req.json) status:201 };
+var app = [Web]App.new
+app.get:'/hello' do:{ 'hi' }
+app.get:'/users/:id' do:{ |req| #{ 'id':(req.param:'id') } }
+app.post:'/echo' do:{ |req| [Web]Response.json:(req.json) status:201 }
 app.get:'/stream'
-do:{ [Web]Response.stream:(Generator.from:{ ^>'a'; ^>'bb'; ^>'ccc' }) contentType:'text/plain' };
-app.get:'/teapot' do:{ HttpError.throw:418 };
+do:{ [Web]Response.stream:(Generator.from:{ ^>'a'; ^>'bb'; ^>'ccc' }) contentType:'text/plain' }
+app.get:'/teapot' do:{ HttpError.throw:418 }
 
 "* SAME-UNIT MODEL: pool workers re-run this whole file; app construction
 "* above runs in both contexts, everything below only in the main VM (a
@@ -191,18 +191,18 @@ wServer.close;
 (check.failures == 0)
     .if:{ ('OK: ' + rounds + ' rounds passed (incl. 2-worker pool phase)').print }
      else:{ ('FAILED: ' + check.failures + ' checks failed').print }
-};
+}
 
 "* Worker context is MODE-ADDRESSED by the first inbox message: 'soak'
 "* runs the whole battery inside this worker (spawn it from the REPL and
 "* watch `$ps tree` — its phase-2 pool workers appear as grandchildren);
 "* anything else is the pool path (the sentinel, verified downstream).
 (Worker.worker?).if:{
-    var mode = Worker.receive;
+    var mode = Worker.receive
     (mode == 'soak').if:{
         "* this worker HOSTS the battery (incl. its phase-2 pool): its
         "* serve calls must act as the pool main, not a pool worker
-        app.poolMain:true;
+        app.poolMain:true
         mainFlow.value
     }
     else:{ app.poolWorkerLoopWith:mode }

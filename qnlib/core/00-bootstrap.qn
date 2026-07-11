@@ -4,45 +4,45 @@ Basic stuff that needs to be loaded first. Everything else should try to be self
 
 true <-- {
     "* The literal name: 'true'.
-    s --> { 'true' };
+    s --> { 'true' }
 
     "* On true, answer the block's value.
-    if: -> { |ifblock| ifblock.value };
+    if: -> { |ifblock| ifblock.value }
     "* On true, skip the block and answer nil.
-    else: -> { |_| nil };
+    else: -> { |_| nil }
     "* Two-armed conditional: on true, the first block's value.
     "*
     "* ```
     "* (3 < 4).if:{ 'yes' } else:{ 'no' }    "* -> yes
     "* ```
-    if:else: -> { |ifblock _| ifblock.value };
+    if:else: -> { |ifblock _| ifblock.value }
     "* Logical negation: `true.not` is false.
-    not -> { false };
+    not -> { false }
     "* `!true` is false.
-    #'!' -> { false };
+    #'!' -> { false }
 
     "* Boolean ordering: `true` sorts before `false`, so `true < x` iff x is falsy.
     #'<:' -> { |x| !x }
-};
+}
 
 false <-- {
     "* The literal name: 'false'.
-    s --> { 'false' };
+    s --> { 'false' }
 
     "* On false, skip the block and answer nil.
-    if: -> { |ifblock| nil };
+    if: -> { |ifblock| nil }
     "* On false, answer the block's value.
-    else: -> { |elseblock| elseblock.value };
+    else: -> { |elseblock| elseblock.value }
     "* Two-armed conditional: on false, the second block's value.
-    if:else: -> { |_ elseblock| elseblock.value };
+    if:else: -> { |_ elseblock| elseblock.value }
     "* Logical negation: `false.not` is true.
-    not -> { true };
+    not -> { true }
     "* `!false` is true.
-    #'!' -> { true };
+    #'!' -> { true }
 
     "* `false` is the maximum, so `false < x` is never true.
     #'<:' -> { |_| false }
-};
+}
 
 "* Defaults every object inherits: the existence test, truthiness, unary `+`, and
 "* the comparison operators derived from `<:`.
@@ -54,23 +54,23 @@ Object <-- {
     "* 'x'.defined?    "* -> true
     "* nil.defined?    "* -> false
     "* ```
-    defined? -> { |^Boolean| true };
+    defined? -> { |^Boolean| true }
 
     "* Everything except nil/false is truthy, so `!self` is false here; nil and
     "* the booleans override. (`-self` is handled per numeric type, not here.)
-    #'!' -> { false };
+    #'!' -> { false }
 
     "* Unary plus (`+self`) is identity for every type.
-    #'+' -> { self };
+    #'+' -> { self }
 
     "* Greater-than, derived from `<:` (defined natively per primitive type, and on
     "* the booleans): any class that defines `<:` gets `>:`/`<=:`/`>=:` for free.
-    #'>:' -> { |x| x < self };
+    #'>:' -> { |x| x < self }
     "* Less-than-or-equal, derived from `<:` as `!(x < self)`.
-    #'<=:' -> { |x| !(x < self) };
+    #'<=:' -> { |x| !(x < self) }
     "* Greater-than-or-equal, derived from `<:` as `!(self < x)`.
     #'>=:' -> { |x| !(self < x) }
-};
+}
 
 "* Pattern-matching support for classes.
 Class <-- {
@@ -83,7 +83,7 @@ Class <-- {
     "* Integer ~ 'x'    "* -> false
     "* ```
     #'~:' -> { |x| x.can?:self }
-};
+}
 
 "* The base class for mixins — method bundles a class pulls in with `.mix:`. Define
 "* one by subclassing (`Mixin <- MyMixin <- { ... }`); mixins are never instantiated.
@@ -95,15 +95,15 @@ Mixin <- {
         "* never registered. This default accepts every host.
         assertMeetsRequirements: -> {}
     }
-};
+}
 
 "* Marker mixin for classes constructible from a tagged list literal:
 "* `#Name( 1 2 3 )` compiles to `Name.newUserList:#(1 2 3)`.
-Mixin <- ActAsUserList <- { .sealed! };
+Mixin <- ActAsUserList <- { .sealed! }
 
 "* Marker mixin for classes constructible from a tagged string literal:
 "* `#Name'text'` compiles to `Name.newUserString:'text'` (see ANSI).
-Mixin <- ActAsUserString <- { .sealed! };
+Mixin <- ActAsUserString <- { .sealed! }
 
 "* The root of every throwable error: a human-readable `message` plus an optional
 "* `payload`. Subclass it for your own error types (`Error <- MyError <- {}`) and
@@ -112,7 +112,7 @@ Error <- { |@message @payload|
     .meta <-- {
         "* Convenience constructor that builds an instance and immediately throws,
         "* e.g. `TypeError.throw:'expected an Integer'`. Inherited by subclasses.
-        throw: -> { |msg| ^(.new:{ var message = msg }).throw };
+        throw: -> { |msg| ^(.new:{ var message = msg }).throw }
         "* Like `throw:`, also attaching a payload value the handler can read back.
         "*
         "* ```
@@ -120,12 +120,12 @@ Error <- { |@message @payload|
         "*     .catch:{ |e:Error| e.payload }    "* -> missing
         "* ```
         throw:payload: -> { |msg p| ^(.new:{ var message = msg; var payload = p }).throw }
-    };
+    }
 
     "* The human-readable description this error was thrown with.
-    message -> { @message };
+    message -> { @message }
     "* The value attached at the throw site (`throw:payload:`), or nil.
-    payload -> { @payload };
+    payload -> { @payload }
 
     "* Renders as class name and message.
     "*
@@ -133,7 +133,7 @@ Error <- { |@message @payload|
     "* { TypeError.throw:'nope' }.catch:{ |e:TypeError| e.s }    "* -> TypeError: nope
     "* ```
     s --> { .class.name.s + ': ' + @message.s }
-};
+}
 
 "* The core error types below mirror the VM's internal error kinds: failed native
 "* operations raise them directly, and user code can throw and catch them like any
@@ -141,28 +141,28 @@ Error <- { |@message @payload|
 
 "* A value of the wrong type where another was required (e.g. writing a non-String
 "* to an IO handle).
-Error <- TypeError <- {};
+Error <- TypeError <- {}
 "* A method or block invoked with the wrong number of arguments.
-Error <- ArgumentError <- {};
+Error <- ArgumentError <- {}
 "* A message sent to a receiver that has no matching method.
 "*
 "* ```
 "* { nil.foo }.catch:{ |e:MessageNotUnderstood| e.message }    "* -> no method 'foo' for Nil
 "* ```
-Error <- MessageNotUnderstood <- {};
+Error <- MessageNotUnderstood <- {}
 "* A multimethod send where two variants are equally specific for the arguments and
 "* no tiebreaker exists.
-Error <- AmbiguousMethodError <- {};
+Error <- AmbiguousMethodError <- {}
 "* Reading a name bound to nothing (`typo`). Assigning to an undeclared local is a
 "* compile error; this is the other half of that rule. To ask whether a class exists
 "* without reading it, use `Class.exists?:#Name`.
-Error <- NameError <- {};
+Error <- NameError <- {}
 "* An impossible arithmetic operation — division or modulo by zero.
 "*
 "* ```
 "* { 1 / 0 }.catch:{ |e:ArithmeticError| e.message }    "* -> Division by zero
 "* ```
-Error <- ArithmeticError <- {};
+Error <- ArithmeticError <- {}
 "* Raised by an out-of-bounds index (e.g. `List.at:put:`, `Bytes.at:`). The VM
 "* populates `index` (the offending index) and `length` (the collection's size) so a
 "* handler can report or recover without parsing the message.
@@ -172,28 +172,28 @@ Error <- IndexError <- { |@index @length|
     "* ```
     "* { #(1 2).at:9 put:0 }.catch:{ |e:IndexError| e.index }    "* -> 9
     "* ```
-    index -> { @index };
+    index -> { @index }
     "* The receiver's length at the time of the failure.
     length -> { @length }
-};
+}
 "* A Fiber misused: resuming a finished or failed Fiber, a Fiber resuming itself, or
 "* `Fiber.yield:` outside of one.
-Error <- FiberError <- {};
+Error <- FiberError <- {}
 "* A class-structural violation: extending a `sealed!` class, instantiating an
 "* `abstract!` one, and similar hierarchy errors (BUGS.md Finding 12).
-Error <- ClassError <- {};
+Error <- ClassError <- {}
 
 "* A recursion the VM refused before it could overflow the machine stack: a block that
 "* re-enters itself (an `each:` body re-iterating its own receiver, a self-nesting
 "* `catch:`), or a custom `==:`/`hash`/comparator hook re-entering a native operation.
 "* Raised instead of the process dying with an uncatchable SIGBUS.
-Error <- StackError <- {};
+Error <- StackError <- {}
 "* A value of the right type but invalid content (e.g. a non-hex string to
 "* `Integer.fromHex:`, a byte outside 0..255, a malformed `host:port`).
-Error <- ValueError <- {};
+Error <- ValueError <- {}
 "* A parse/decode failure of input data (invalid UTF-8, a malformed HTTP response
 "* head, a compile error from `eval:`).
-Error <- ParseError <- {};
+Error <- ParseError <- {}
 "* Raised by an exhausted iterator's `next` (see core/02-iterate.qn).
 "*
 "* ```
@@ -201,7 +201,7 @@ Error <- ParseError <- {};
 "* it.next;                                           "* -> 1
 "* { it.next }.catch:{ |e:StopIteration| 'done' }    "* -> done
 "* ```
-Error <- StopIteration <- {};
+Error <- StopIteration <- {}
 
 "* Raised by socket/stream/file operations. `kind` is a symbol categorizing the
 "* failure — #connectionRefused, #connectionReset, #timedOut, #unexpectedEof,
@@ -218,12 +218,12 @@ Error <- IoError <- { |@kind|
         "*     .catch:{ |e:IoError| e.kind }    "* -> connectionRefused
         "* ```
         throw:kind: -> { |msg k| ^(.new:{ var message = msg; var kind = k }).throw }
-    };
+    }
 
     "* The failure category as a symbol (#notFound, #timedOut, #closed, …), or nil
     "* for a Quoin-side `throw:` that didn't set one.
     kind -> { @kind }
-};
+}
 
 "* Raised by the `Async.timeout:ms do:{…}` deadline combinator (the bare form, no
 "* `onCancel:`). `ms` is the elapsed deadline. A direct Error subtype — a timeout can wrap
@@ -236,28 +236,28 @@ Error <- TimeoutError <- { |@ms|
     "*     .catch:{ |e:TimeoutError| e.ms }    "* -> 5
     "* ```
     ms -> { @ms }
-};
+}
 
 "* Quoin-side numeric conveniences; the arithmetic itself is native.
 Double <-- {
     .meta <-- {
         "* The type's zero value (0.0); `Iterate#sum:` seeds an accumulation with it.
         default -> { 0.0 }
-    };
+    }
 
     "* Identity — a Double answers itself, so `double` normalizes a value that may
     "* already be a Double.
-    double -> { self };
+    double -> { self }
 
     "* The next number up: self + 1.0.
     "*
     "* ```
     "* 2.5.next    "* -> 3.5
     "* ```
-    next -> { self + 1.0 };
+    next -> { self + 1.0 }
 
     "* Unary minus (`-self`). `0 - self` promotes through Integer#-:, yielding a Double.
-    #'-' -> { 0 - self };
+    #'-' -> { 0 - self }
 
     "* Absolute value.
     "*
@@ -265,28 +265,28 @@ Double <-- {
     "* (-2.5).abs    "* -> 2.5
     "* ```
     abs -> { (self < 0).if:{ -self } else:{ self } }
-};
+}
 
 "* Quoin-side numeric conveniences; the arithmetic itself is native.
 Integer <-- {
     .meta <-- {
         "* The type's zero value (0); `Iterate#sum:` seeds an accumulation with it.
         default -> { 0 }
-    };
+    }
 
     "* Identity — an Integer answers itself, so `integer` normalizes a value that
     "* may already be an Integer.
-    integer -> { self };
+    integer -> { self }
 
     "* The next integer up: self + 1.
     "*
     "* ```
     "* 3.next    "* -> 4
     "* ```
-    next -> { self + 1 };
+    next -> { self + 1 }
 
     "* Unary minus (`-self`).
-    #'-' -> { 0 - self };
+    #'-' -> { 0 - self }
 
     "* Absolute value.
     "*
@@ -294,42 +294,42 @@ Integer <-- {
     "* (-5).abs    "* -> 5
     "* ```
     abs -> { (self < 0).if:{ -self } else:{ self } }
-};
+}
 
 "* nil's overrides: falsy, prints as nothing, and absorbs arithmetic.
 Nil <-- {
     .meta <-- {
         "* nil — the type's only value.
         default -> { nil }
-    };
+    }
 
     "* The empty string: nil renders as nothing.
-    s --> { '' };
+    s --> { '' }
     "* false — nil (and only nil) is undefined.
-    defined? --> { |^Boolean| false };
+    defined? --> { |^Boolean| false }
 
     "* nil is falsy: `!nil` is true.
-    #'!' -> { true };
+    #'!' -> { true }
 
     "* Arithmetic on nil absorbs: nil + x is nil, so a missing value propagates
     "* through a calculation instead of erroring.
-    #'+:' -> { |_| self };
+    #'+:' -> { |_| self }
     "* nil - x is nil (see `+:`).
-    #'-:' -> { |_| self };
+    #'-:' -> { |_| self }
     "* nil * x is nil (see `+:`).
-    #'*:' -> { |_| self };
+    #'*:' -> { |_| self }
     "* nil / x is nil (see `+:`).
-    #'/:' -> { |_| self };
+    #'/:' -> { |_| self }
     "* nil % x is nil (see `+:`).
     #'%:' -> { |_| self }
-};
+}
 
 "* Blocks as match patterns and as loop conditions.
 Block <-- {
     "* A block used as a match pattern (`{|n| n > 5} ~ x` / case `when:`) runs as a
     "* predicate: the subject is passed as the argument and as `self`, so both
     "* `{|n| ...}` and `{ . ... }` guard forms work.
-    #'~:' -> { |x| .valueWithSelfOrArg:x };
+    #'~:' -> { |x| .valueWithSelfOrArg:x }
 
     "* The while loop: re-evaluate the receiver before each pass and, while it
     "* answers true, run `block`.
@@ -340,12 +340,12 @@ Block <-- {
     "* i    "* -> 3
     "* ```
     whileDo: -> { |block|
-        var s = self;
+        var s = self
         s.value.if:{
-            block.value;
+            block.value
             ^^s.whileDo:block
         }
-    };
+    }
 
     "* Loop while the receiver answers a defined value, passing each value to
     "* `block` — the idiom for draining a cursor or other yields-nil-when-done
@@ -358,14 +358,14 @@ Block <-- {
     "* total    "* -> 6
     "* ```
     whileDefinedDo: -> { |block|
-        var s = self;
-        var v = s.value;
+        var s = self
+        var v = s.value
         v.defined?.if:{
-            block.value:v;
+            block.value:v
             ^^s.whileDefinedDo:block
         }
     }
-};
+}
 
 "* A String carrying color markup, e.g. `#ANSI'a $#ff6961[red$] word'`. `$attr[text$]`
 "* spans style the text (attr = a #rrggbb hex color and/or ;-separated attributes such
@@ -377,22 +377,22 @@ ANSI <- { |@string|
 
     .meta <-- {
         "* The empty ANSI string.
-        default -> { #ANSI'' };
+        default -> { #ANSI'' }
 
         "* The constructor behind the `#ANSI'...'` literal: wrap an already-marked-up
         "* String.
         newUserString: -> { |s:String| ^.new:{ var string = s } }
-    };
+    }
 
     "* Store the wrapped markup String (used by `new:`; prefer the `#ANSI'...'` literal).
-    init: -> { |string| @string = string };
+    init: -> { |string| @string = string }
 
     "* The raw markup template, exactly as written — no color rendering.
     "*
     "* ```
     "* #ANSI'hi %1'.string    "* -> hi %1
     "* ```
-    string -> { @string };
+    string -> { @string }
 
     "* XXX: Need a way to modify scope for this to work.
     "* #'%' -> { .class.newUserString:(%@string) }
@@ -409,12 +409,12 @@ ANSI <- { |@string|
             .if:{ arg.collect:{ |e| (e.can?:ANSI).if:{ e } else:{ e.s.ansiEscaped } } }
              else:{ (arg.can?:ANSI).if:{ arg } else:{ arg.s.ansiEscaped } };
         .class.newUserString:(@string % escaped)
-    };
+    }
 
     "* The length of the underlying markup String — markup and interpolation
     "* characters count too, so this is not the rendered width. (XXX: rendered
     "* length?)
-    length -> { @string.length };
+    length -> { @string.length }
 
     "* Renders as the tagged-literal form.
     "*

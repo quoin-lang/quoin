@@ -8,42 +8,42 @@
 "* serialized and evaluated once each (DAG dedup).
 "*
 "* Run from the repo root:  qn quoin_packages/numpy/demos/mandelbrot.qn
-use numpy:*;
+use numpy:*
 
-var width = 76;
-var height = 24;
-var maxIter = 32;
-var ramp = #( ' ' '.' ':' ';' '+' '*' '%' '@' );
+var width = 76
+var height = 24
+var maxIter = 32
+var ramp = #( ' ' '.' ':' ';' '+' '*' '%' '@' )
 
 "* The real parts are the same for every row: one resident array, built once.
-var cr = [NumPy]Array.linspace:(-2.2) to:0.8 count:width;
+var cr = [NumPy]Array.linspace:(-2.2) to:0.8 count:width
 
 var elapsed = Timer.time:{
     (0..height).each:{ |row|
-        var ci = (row * (2.4 / (height - 1))) - 1.2;
+        var ci = (row * (2.4 / (height - 1))) - 1.2
 
-        var zr = cr * 0.0;
-        var zi = cr * 0.0;
-        var count = cr * 0.0;
+        var zr = cr * 0.0
+        var zi = cr * 0.0
+        var count = cr * 0.0
 
         (0..maxIter).each:{ |i|
-            var zr2 = zr * zr;
-            var zi2 = zi * zi;
-            var active = (zr2 + zi2) <= 4.0;
-            var nzr = (zr2 - zi2) + cr;
-            var nzi = ((zr * zi) * 2.0) + ci;
-            zr = active.where:nzr else:zr;
-            zi = active.where:nzi else:zi;
+            var zr2 = zr * zr
+            var zi2 = zi * zi
+            var active = (zr2 + zi2) <= 4.0
+            var nzr = (zr2 - zi2) + cr
+            var nzi = ((zr * zi) * 2.0) + ci
+            zr = active.where:nzr else:zr
+            zi = active.where:nzi else:zi
             count = active.where:(count + 1.0) else:count
-        };
+        }
 
         "* the row's single force: 76 escape counts back as one list
-        var counts = count.toList;
-        var chars = #();
-        counts.each:{ |c| chars.add:(ramp.at:(((c * 7.0) / maxIter).floor)) };
+        var counts = count.toList
+        var chars = #()
+        counts.each:{ |c| chars.add:(ramp.at:(((c * 7.0) / maxIter).floor)) }
         (chars.join:'').print
     }
-};
+}
 
 ('% pixels, % iterations deep, 1 round trip per row, %ms'
     % #( (width * height) maxIter (elapsed / 1000) )).print

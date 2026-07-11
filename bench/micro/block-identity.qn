@@ -4,17 +4,17 @@ loop plus the result-list append - with NOTHING inside the block. 20M
 element visits.
 Run whole-process: `qn bench/micro/block-identity.qn`."
 
-var data = #();
-var i = 0;
-{ i < 1000 }.whileDo:{ data.add:i; i = i + 1 };
+var data = #()
+var i = 0
+{ i < 1000 }.whileDo:{ data.add:i; i = i + 1 }
 
-var sink = 0;
-var k = 0;
+var sink = 0
+var k = 0
 { k < 20000 }.whileDo:{
-    var out = data.collect:{ |x| x };
-    sink = sink + (out.at:999);
+    var out = data.collect:{ |x| x }
+    sink = sink + (out.at:999)
     k = k + 1
-};
+}
 
 (sink == 19980000)
     .if:{ 'block-identity: ok'.print }

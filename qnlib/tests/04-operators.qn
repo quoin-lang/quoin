@@ -15,19 +15,19 @@
         .is:{
             TORC <- {
                 x -> {
-                    true.if:{ ^^42 };
+                    true.if:{ ^^42 }
                     ^66
                 }
-            };
+            }
             TORC.new.x
         }
         equalTo:42;
 
         .is:{
             var x = {
-                ^42;
+                ^42
                 66
-            };
+            }
             x.value
         }
         equalTo:42

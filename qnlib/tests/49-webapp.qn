@@ -1,25 +1,25 @@
 "* [Web]App: the pure core (handle:req -> response, no sockets), the respondTo:
 "* render conventions, middleware onion, HttpError mapping, and the request
 "* conveniences — plus one live round-trip driven by the [HTTP]Client.
-use std:net/http;
-use std:net/http_server;
-use std:web/*;
+use std:net/http
+use std:net/http_server
+use std:web/*
 
 "* A constructed request — the pure-core payoff: no sockets anywhere.
 [Test]WebReq <- {
     .meta <-- {
-        get: -> { |target| ^[Test]WebReq.verb:'GET' target:target body:nil };
+        get: -> { |target| ^[Test]WebReq.verb:'GET' target:target body:nil }
         verb:target:body: -> { |verb target body|
             ^[HTTP]ServerRequest.new:{
-                var method = verb;
-                target = target;
-                var version = 1;
-                var headers = #();
+                var method = verb
+                target = target
+                var version = 1
+                var headers = #()
                 body = body
             }
         }
     }
-};
+}
 
 (TestSuite.new:{ var name = 'WebApp' }).add:{
     .test:
@@ -166,7 +166,7 @@ use std:web/*;
         server.join;
         server.close;
     };
-};
+}
 
 "* Handler-side fan-out composes with the concurrency library: a handler is
 "* just code in a Task, so Plan trees await inside it — the official idiom

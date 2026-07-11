@@ -1,5 +1,5 @@
 "* [Web]Url: the pure-Quoin percent codec — no network anywhere in this suite.
-use std:web/*;
+use std:web/*
 
 (TestSuite.new:{ var name = 'WebUrl' }).add:{
     .test:

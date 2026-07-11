@@ -26,10 +26,10 @@ fn fmt_rewrites_in_place_by_default() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // No space after `:`, explicit `;` between statements, trailing newline — written to the file.
+    // No space after `:`, no `;` at an unambiguous line break, trailing newline — written to the file.
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "x.foo:a bar:b;\ny=1\n"
+        "x.foo:a bar:b\ny=1\n"
     );
     // The formatted file is on stderr as a changed file, and nothing goes to stdout.
     assert!(String::from_utf8_lossy(&out.stderr).contains("default.qn"));
@@ -60,10 +60,7 @@ fn fmt_dry_run_writes_to_stdout_without_touching_the_file() {
         .output()
         .expect("run");
     assert!(out.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "x.foo:a bar:b;\ny=1\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "x.foo:a bar:b\ny=1\n");
     // The file on disk is untouched.
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -195,7 +192,7 @@ fn fmt_stdin_formats_to_stdout() {
     // The unsaved buffer is formatted and written to stdout; nothing touches disk.
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "x = 1;\ny = 2;\nfoo -> { @bar }\n"
+        "x = 1\ny = 2\nfoo -> { @bar }\n"
     );
 }
 

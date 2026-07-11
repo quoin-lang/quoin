@@ -8,7 +8,7 @@ Fib <- {
     .meta <-- {
         value: -> { |n| (n <= 1).if:{ ^n } else:{ ^(.value:(n - 1)) + (.value:(n - 2)) } }
     }
-};
+}
 
-var r = Fib.value:32;
+var r = Fib.value:32
 (r == 2178309).if:{ 'fib_untyped_32: ok'.print } else:{ ('fib_untyped_32: FAIL got ' + r).print }

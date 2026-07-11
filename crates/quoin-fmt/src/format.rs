@@ -97,6 +97,41 @@ pub fn format_source(source: &str, filename: &str) -> Result<String, FormatError
     Ok(out)
 }
 
+/// Whether omitting the `;` between two line-separated statements would let
+/// the parser GLUE them — newlines (and comments) are trivia, so a statement
+/// boundary only holds when the next statement's first token cannot continue
+/// the previous expression. Each arm was probed against the live grammar
+/// (see format_tests::minimal_semicolons); the formatter's self-verifying
+/// reparse remains the backstop for any case this table misses — a miss
+/// refuses the write, it never corrupts.
+fn needs_separator(source: &str, prev: &Node, next: &Node, next_start: usize) -> bool {
+    // An operator-leading statement extends the previous expression: `%'…'`
+    // interpolation (the classic), prefix `-`/`+` (the F11 family), and `|`
+    // (`|@field|` member declarations would OR-glue onto the previous
+    // member's block). A `.`-leading self-send chains onto ANY previous
+    // expression (`a␤.print` is `a.print`; `foo -> { 1 }␤.meta <-- {…}`
+    // would send `meta` to the block).
+    let first = source[next_start..].chars().next().unwrap_or(';');
+    if "+-*/%<>=!&|~?.".contains(first) {
+        return true;
+    }
+    // A bare-identifier statement followed by an assignment or declaration
+    // fuses into one destructuring assignment: `grade␤var name = …` parses
+    // as targets `grade var name` (the reported "undeclared local `var`").
+    // Exact by AST on both sides: only a bare identifier can extend a target
+    // list (a send, literal, or paren group before an assignment stays a
+    // statement of its own — probed).
+    if matches!(prev.value, NodeValue::Identifier(_))
+        && matches!(
+            next.value,
+            NodeValue::Assignment(_) | NodeValue::Declaration(_)
+        )
+    {
+        return true;
+    }
+    false
+}
+
 fn lower_program(program: &Node, source: &str, comments: &[Comment]) -> Doc {
     let exprs = match &program.value {
         NodeValue::Program(p) => &p.expressions,
@@ -175,14 +210,25 @@ fn emit_sequence(
         };
 
         if prev_end.is_some() {
-            parts.push(Doc::text(";"));
+            // In soft mode the plain separator is a `Line` (a space when the enclosing group renders
+            // flat), but a trailing line comment or a requested blank line still forces a break.
+            let hard = !soft || !trailing_prev.is_empty() || blank;
+            // The `;` is a SEPARATOR, not a terminator: it is only emitted where it is
+            // load-bearing. On a guaranteed line break that means exactly the boundaries
+            // where the next statement would glue onto this one (newlines are trivia to
+            // the parser). A soft separator may render as a space — there the `;` always
+            // matters — so it rides as `FlatText`, present in the flat rendering and gone
+            // in the broken one, which is also what keeps a width-forced break idempotent
+            // on the next run.
+            if needs_separator(source, &stmts[i - 1], &stmts[i], start) {
+                parts.push(Doc::text(";"));
+            } else if !hard {
+                parts.push(Doc::FlatText(";".to_string()));
+            }
             for c in &trailing_prev {
                 parts.push(Doc::text("  "));
                 parts.push(Doc::verbatim(c.text.clone()));
             }
-            // In soft mode the plain separator is a `Line` (a space when the enclosing group renders
-            // flat), but a trailing line comment or a requested blank line still forces a break.
-            let hard = !soft || !trailing_prev.is_empty() || blank;
             parts.push(if hard { Doc::HardLine } else { Doc::Line });
         }
 

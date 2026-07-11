@@ -1,6 +1,6 @@
-var spec = Worker.receive;
-var n = spec.at:'n';
-var heavy = #();
-(0..n).each:{ |i| heavy.add:(i % 977) };
-var out = heavy.collect:{ |x| var s = 0; (0..200).each:{ |k| s = s + ((x + k) * 7 % 31) }; s };
-Worker.send:(out.count);
+var spec = Worker.receive
+var n = spec.at:'n'
+var heavy = #()
+(0..n).each:{ |i| heavy.add:(i % 977) }
+var out = heavy.collect:{ |x| var s = 0; (0..200).each:{ |k| s = s + ((x + k) * 7 % 31) }; s }
+Worker.send:(out.count)

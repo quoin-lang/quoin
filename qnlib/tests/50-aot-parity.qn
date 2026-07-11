@@ -8,19 +8,19 @@
 AotSpin <- {
     .meta <-- {
         spin: -> { |n: Integer ^Integer|
-            var i = 0;
-            { i < n }.whileDo:{ i = i + 1 };
+            var i = 0
+            { i < n }.whileDo:{ i = i + 1 }
             i
-        };
+        }
 
         fib: -> { |n: Integer ^Integer|
             (n <= 1).if:{ ^n } else:{ ^(.fib:(n - 1)) + (.fib:(n - 2)) }
-        };
+        }
 
         div:by: -> { |a: Integer b: Integer ^Integer| a / b }
     };
     .sealed!
-};
+}
 
 (TestSuite.new:{ var name = 'AotParity' }).add:{
     .test:scalarResultsMatchInterpreter -> {
@@ -40,11 +40,11 @@ AotSpin <- {
     "* checkpoint delivers cancellation exactly like the interpreter's
     "* per-instruction check (coarser granularity, same contract).
     .test:cancelledCompiledLoopDiesAtFirstCheckpoint -> {
-        var t = Task.spawn:{ AotSpin.spin:100000000000 };
+        var t = Task.spawn:{ AotSpin.spin:100000000000 }
         t.cancel;
         .is:{ { t.join; 'joined' }.catch:{ |e| 'cancelled' } } equalTo:'cancelled'
     }
-};
+}
 
 "* v0.2 shapes: slot-window frames — object params/locals, list ops, string
 "* constants, and outcalls (dynamic sends leaving the compiled world through
@@ -53,35 +53,35 @@ AotSpin <- {
 
 AotHelper <- {
     .meta <-- {
-        twice: -> { |x| x * 2 };
+        twice: -> { |x| x * 2 }
         explode: -> { |x| 'kaboom'.throw }
     }
-};
+}
 
 AotLists <- {
     .meta <-- {
         buildTo: -> { |n: Integer ^List|
-            var l = #();
-            var i = 0;
-            { i < n }.whileDo:{ l.add:(i * 3); i = i + 1 };
+            var l = #()
+            var i = 0
+            { i < n }.whileDo:{ l.add:(i * 3); i = i + 1 }
             l
-        };
+        }
 
         sum:count: -> { |l: List n: Integer ^Integer|
-            var total = 0;
-            var i = 0;
-            { i < n }.whileDo:{ total = total + (l.at:i); i = i + 1 };
+            var total = 0
+            var i = 0
+            { i < n }.whileDo:{ total = total + (l.at:i); i = i + 1 }
             total
-        };
+        }
 
-        describe: -> { |x: Integer ^String| 'value: ' + (AotHelper.twice:x) };
+        describe: -> { |x: Integer ^String| 'value: ' + (AotHelper.twice:x) }
 
-        boom: -> { |x: Integer ^Integer| AotHelper.explode:x };
+        boom: -> { |x: Integer ^Integer| AotHelper.explode:x }
 
         writeOob: -> { |l: List ^Integer| l.at:99 put:5; 0 }
     };
     .sealed!
-};
+}
 
 (TestSuite.new:{ var name = 'AotParityV2' }).add:{
     .test:listBuildAndReadBack -> {
@@ -108,7 +108,7 @@ AotLists <- {
     .test:indexErrorFromCompiledListSet -> {
         .is:{ { AotLists.writeOob:(AotLists.buildTo:3) }.catch:{ |e| 'caught' } } equalTo:'caught'
     }
-};
+}
 
 "* Checked-generics enforcement holds INSIDE compiled code: the AOT ListPush/
 "* ListSet helpers gate on the tag exactly like the interpreter arms, and the
@@ -117,13 +117,13 @@ AotLists <- {
 AotGenerics <- {
     .meta <-- {
         fillInto:count: -> { |l: List n: Integer ^Integer|
-            var i = 0;
-            { i < n }.whileDo:{ l.add:i; i = i + 1 };
+            var i = 0
+            { i < n }.whileDo:{ l.add:i; i = i + 1 }
             i
         }
     };
     .sealed!
-};
+}
 
 (TestSuite.new:{ var name = 'AotParityGenerics' }).add:{
     .test:
@@ -134,7 +134,7 @@ AotGenerics <- {
         .is:{ { AotGenerics.fillInto:(List.of:String) count:4 }.catch:{ |e| 'caught' } }
             equalTo:'caught';
     };
-};
+}
 
 "* G3: the proven Boolean?-if lowering. A checked List(Boolean) element read
 "* feeding if: compiles to a direct branch with a nil->MNU stub (no capturing
@@ -144,15 +144,15 @@ AotGenerics <- {
 AotNilIf <- {
     .meta <-- {
         flagAt: -> { |n: Integer ^Integer|
-            var flags: List(Boolean) = #();
-            flags.add:true;
-            flags.add:false;
-            (flags.at:n).if:{ ^^1 };  "* allow: nil-receiver (nil->MNU is the point)
+            var flags: List(Boolean) = #()
+            flags.add:true
+            flags.add:false
+            (flags.at:n).if:{ ^^1 }  "* allow: nil-receiver (nil->MNU is the point)
             0
         }
     };
     .sealed!
-};
+}
 
 (TestSuite.new:{ var name = 'AotParityNilIf' }).add:{
     .test:provenBoolIfBranches -> {
@@ -164,7 +164,7 @@ AotNilIf <- {
         var m = { AotNilIf.flagAt:99 }.catch:{ |e| e.message };
         .is:{ m } equalTo:'no method \'if:\' for Nil'
     }
-};
+}
 
 "* B1 (docs/BLOCK_AOT_ARCH.md): fused each: loops. The literal block is spliced
 "* into the method frame behind a native-List guard - no closure, no per-element
@@ -175,26 +175,26 @@ AotNilIf <- {
 AotFusedEach <- {
     .meta <-- {
         sumOf: -> { |xs: List ^Integer|
-            var sum = 0;
-            xs.each:{ |x: Integer| sum = sum + x };
+            var sum = 0
+            xs.each:{ |x: Integer| sum = sum + x }
             ^sum
-        };
+        }
         sumTagged: -> { |xs: List(Integer) ^Integer|
-            var sum = 0;
-            xs.each:{ |x: Integer| sum = sum + x };
+            var sum = 0
+            xs.each:{ |x: Integer| sum = sum + x }
             ^sum
-        };
+        }
         firstOver:limit: -> { |xs: List n: Integer ^Integer|
-            xs.each:{ |x: Integer| (x > n).if:{ ^^x } };
+            xs.each:{ |x: Integer| (x > n).if:{ ^^x } }
             ^0 - 1
         }
     };
     .sealed!
-};
+}
 
 CustomEachG <- {
     each: -> { |b| b.valueWithSelfOrArg:'custom-elem'; b.valueWithSelfOrArg:'custom-elem' }
-};
+}
 
 (TestSuite.new:{ var name = 'AotParityFusedEach' }).add:{
     .test:fusedSumBothParamShapes -> {
@@ -272,7 +272,7 @@ CustomEachG <- {
         .is:{ xs.detect:{ |x| x > 2 } } equalTo:3;
         .is:{ xs.reduce:{ |a b| a + b } into:100 } equalTo:110;
     }
-};
+}
 
 "* B2: compiled Iterate combinator bodies (open-owner candidacy). The soundness
 "* crux: an open class's compiled entries are minted per-dispatch from the
@@ -309,7 +309,7 @@ CustomEachG <- {
         };
         .is:{ (#(1 2).collect:{ |x| x + 1 }).at:1 } equalTo:3;
     }
-};
+}
 
 "* B3a: compiled block templates. Blocks invoked via valueWithSelfOrArg: run
 "* natively when the registry has an entry - INCLUDING inside user Fibers
@@ -343,7 +343,7 @@ CustomEachG <- {
         var caught = { #(1).collect:{ |x| Math.ln:0 } }.catch:{ |e| 'caught' };
         .is:{ caught } equalTo:'caught';
     }
-};
+}
 
 "* B3b: cold-path closure materialization. A compiled frame can materialize a
 "* real closure (read-only captures, no ^^) over a SNAPSHOT env chained to the
@@ -356,18 +356,18 @@ NestedCaptureG <- {
         "* mirrors Route#allowFor:'s shape: outer block over a Map, inner block
         "* reading the METHOD param through both closure layers
         tally:in: -> { |needle table|
-            var hits = 0;
-            table.each:{ |kv| (kv.value.any?:{ |entry| entry == needle }).if:{ hits = hits + 1 } };
+            var hits = 0
+            table.each:{ |kv| (kv.value.any?:{ |entry| entry == needle }).if:{ hits = hits + 1 } }
             ^hits
         }
     }
-};
+}
 
 (TestSuite.new:{ var name = 'AotParityColdBlocks' }).add:{
     .test:nestedClosuresResolveThroughTheFullChain -> {
-        var t = #{};
-        t.at:'a' put:#( 1 2 );
-        t.at:'b' put:#( 2 3 );
+        var t = #{}
+        t.at:'a' put:#( 1 2 )
+        t.at:'b' put:#( 2 3 )
         t.at:'c' put:#( 9 );
         .is:{ NestedCaptureG.tally:2 in:t } equalTo:2;
         .is:{ NestedCaptureG.tally:9 in:t } equalTo:1;
@@ -379,13 +379,13 @@ NestedCaptureG <- {
         .is:{ (xs.select:{ |x| x > 2 }).count } equalTo:3;
         .is:{ (xs.reject:{ |x| x > 2 }).count } equalTo:2;
         .is:{ xs.uniq.count } equalTo:5;
-        .is:{ xs.sort.at:0 } equalTo:1;
+        .is:{ xs.sort.at:0 } equalTo:1
         var thrown = { xs.select:{ |x| (x == 4).if:{ ValueError.throw:'mid' }; true } }.catch:{ |e|
             e.class.name
         };
         .is:{ thrown } equalTo:'ValueError'
     }
-};
+}
 
 "* S1 (SPECULATIVE_AOT_ARCH): unannotated methods compile at warmth from their
 "* OBSERVED kinds, with entry preconditions that Bail to the interpreter on a
@@ -394,11 +394,11 @@ NestedCaptureG <- {
 
 SpecArith <- {
     .meta <-- {
-        triple: -> { |x| ^(x * 3) + 1 };
-        addBoth:and: -> { |a b: Integer| ^a + b };
+        triple: -> { |x| ^(x * 3) + 1 }
+        addBoth:and: -> { |a b: Integer| ^a + b }
         orNil: -> { |v| v.defined?.if:{ ^v } else:{ ^0 } }
     }
-};
+}
 
 (TestSuite.new:{ var name = 'AotParitySpeculation' }).add:{
     .test:promotionKeepsResults -> {
@@ -438,7 +438,7 @@ SpecArith <- {
         .is:{ total } equalTo:230;
         .is:{ SpecArith.addBoth:0.5 and:2 } equalTo:2.5;
     }
-};
+}
 
 "* S1 seam regressions, each found by promotion sweeping qnlib (docs/
 "* SPECULATIVE_AOT_ARCH.md): value-as-real-method, ^^ escaping through a
@@ -448,62 +448,62 @@ SpecArith <- {
 
 SpecSeams <- {
     .meta <-- {
-        callIt: -> { |b| ^b.value };
-        pick: -> { |v| v.else:{ ^^'from-arm' }; ^'fell-through' };
+        callIt: -> { |b| ^b.value }
+        pick: -> { |v| v.else:{ ^^'from-arm' }; ^'fell-through' }
         recordish: -> { |testBlock|
-            var result = nil;
-            var elapsed = Timer.time:{ result = testBlock.value };
+            var result = nil
+            var elapsed = Timer.time:{ result = testBlock.value }
             ^(result == true)
-        };
+        }
         scan: -> { |s|
-            var src = s.asBytes;
-            var n = src.count;
-            var i = 0;
-            var steps = 0;
+            var src = s.asBytes
+            var n = src.count
+            var i = 0
+            var steps = 0
             { i < n }.whileDo:{
-                var b = src.at:i;
-                (b == 37).if:{ i = i + 3 } else:{ i = i + 1 };
+                var b = src.at:i
+                (b == 37).if:{ i = i + 3 } else:{ i = i + 1 }
                 steps = steps + 1
-            };
+            }
             ^steps
         }
     }
-};
+}
 
 (TestSuite.new:{ var name = 'AotParitySpecSeams' }).add:{
     .test:valueDispatchesAsARealMethod -> {
-        var total = 0;
-        var i = 0;
+        var total = 0
+        var i = 0
         { i < 20 }.whileDo:{ total = total + (SpecSeams.callIt:{ 3 }); i = i + 1 };
         .is:{ total } equalTo:60;
         .is:{ false.else:{ 42 } } equalTo:42
     };
 
     .test:nonLocalReturnCrossesCompiledFrames -> {
-        var i = 0;
-        var r = '';
+        var i = 0
+        var r = ''
         { i < 20 }.whileDo:{ r = SpecSeams.pick:false; i = i + 1 };
         .is:{ r } equalTo:'from-arm';
         .is:{ SpecSeams.pick:true } equalTo:'fell-through'
     };
 
     .test:nilDeclaredCaptureWritesBack -> {
-        var i = 0;
-        var ok = 0;
+        var i = 0
+        var ok = 0
         { i < 20 }.whileDo:{
-            (SpecSeams.recordish:{ 1 < 2 }).if:{ ok = ok + 1 };
+            (SpecSeams.recordish:{ 1 < 2 }).if:{ ok = ok + 1 }
             i = i + 1
         };
         .is:{ ok } equalTo:20
     };
 
     .test:siblingClosuresShareCells -> {
-        var i = 0;
-        var last = 0;
+        var i = 0
+        var last = 0
         { i < 20 }.whileDo:{ last = SpecSeams.scan:'ab%41cd'; i = i + 1 };
         .is:{ last } equalTo:5
     }
-};
+}
 
 "* S2 (SPECULATIVE_AOT_ARCH): observed-scalar RETURNS compile as scalars with
 "* epoch-guarded DIRECT SELF-RECURSION for open owners. Redefining any method
@@ -514,12 +514,12 @@ SpecRec <- {
     .meta <-- {
         fib: -> { |n| (n <= 1).if:{ ^n } else:{ ^(.fib:(n - 1)) + (.fib:(n - 2)) } }
     }
-};
+}
 SpecRedef <- {
     .meta <-- {
         gen: -> { |n| (n <= 0).if:{ ^0 } else:{ ^1 + (.gen:(n - 1)) } }
     }
-};
+}
 
 (TestSuite.new:{ var name = 'AotParitySpecReturns' }).add:{
     .test:recursionCompilesAndStaysExact -> {
@@ -540,7 +540,7 @@ SpecRedef <- {
         SpecRedef <-- { .meta <-- { gen: -> { |n| ^100 + n } } };
         .is:{ SpecRedef.gen:10 } equalTo:110;
     }
-};
+}
 
 "* S3 (SPECULATIVE_AOT_ARCH): compiled field access through the interpreter's
 "* shared (template_id, ip) field-slot caches. Reads of missing fields are
@@ -549,44 +549,44 @@ SpecRedef <- {
 "* identical to interpreted semantics.
 
 SpecCell <- { | @v @w |
-    init: -> { |v| @v = v; @w = 0 };
-    v -> { ^@v };
-    bumpW -> { @w = @w + 1; ^@w };
-    missing -> { ^@u2 };
+    init: -> { |v| @v = v; @w = 0 }
+    v -> { ^@v }
+    bumpW -> { @w = @w + 1; ^@w }
+    missing -> { ^@u2 }
     sum -> { ^@v + @w }
-};
+}
 
 (TestSuite.new:{ var name = 'AotParityFields' }).add:{
     .test:accessorsCompileAndStayExact -> {
-        var c = SpecCell.new:{ var v = 7 };
-        var i = 0;
-        var total = 0;
+        var c = SpecCell.new:{ var v = 7 }
+        var i = 0
+        var total = 0
         { i < 20 }.whileDo:{ total = total + c.v + c.bumpW; i = i + 1 };
         .is:{ total } equalTo:350;
         .is:{ c.sum } equalTo:27
     };
 
     .test:missingFieldReadsNil -> {
-        var c = SpecCell.new:{ var v = 1 };
-        var i = 0;
+        var c = SpecCell.new:{ var v = 1 }
+        var i = 0
         { i < 12 }.whileDo:{ c.missing; i = i + 1 };
         .is:{ c.missing } equalTo:nil
     };
 
     .test:fieldsInsideBlockTemplatesUseElementSelf -> {
-        var cells = #();
-        var i = 0;
-        { i < 3 }.whileDo:{ cells.add:(SpecCell.new:{ var v = i }); i = i + 1 };
-        var k = 0;
-        var total = 0;
+        var cells = #()
+        var i = 0
+        { i < 3 }.whileDo:{ cells.add:(SpecCell.new:{ var v = i }); i = i + 1 }
+        var k = 0
+        var total = 0
         { k < 15 }.whileDo:{
-            total = 0;
-            cells.each:{ |c| total = total + c.v };
+            total = 0
+            cells.each:{ |c| total = total + c.v }
             k = k + 1
         };
         .is:{ total } equalTo:3
     }
-};
+}
 
 "* --- S5a: non-local return (^^) from compiled frames --------------------
 "* A compiled method has no interpreter frame; a `^^` whose home is a live
@@ -597,49 +597,49 @@ SpecCell <- { | @v @w |
 "* below it.
 NlrClassify <- {
     classify: -> { |n|
-        (n < 10).if:{ ^^'small' };
+        (n < 10).if:{ ^^'small' }
         ^'big'
     }
-};
+}
 
 NlrTask <- { | @count @hold |
-    init: -> { |count| @count = count; @hold = 0 };
+    init: -> { |count| @count = count; @hold = 0 }
     step -> {
-        @count = @count - 1;
-        (@count == 0).if:{ @hold = @hold + 1; ^^'held' };
+        @count = @count - 1
+        (@count == 0).if:{ @hold = @hold + 1; ^^'held' }
         ^'ran'
-    };
+    }
     hold -> { ^@hold }
-};
+}
 
 NlrInner <- {
     pick: -> { |n| (n < 0).if:{ ^^'neg' }; ^'pos' }
-};
+}
 
 NlrOuter <- {
     combo: -> { |n| var r = NlrInner.new.pick:n; ^'got-' + r }
-};
+}
 
 NlrRunner <- {
     run: -> { |b| b.value; ^'not-escaped' }
-};
+}
 
 NlrCaller <- {
     tryIt -> {
-        var s = 'escaped';
-        var blk = { ^^ s };
-        var r = NlrRunner.new.run:blk;
+        var s = 'escaped'
+        var blk = { ^^ s }
+        var r = NlrRunner.new.run:blk
         ^'after-' + r
     }
-};
+}
 
 NlrCatcher <- {
     m -> {
-        var v = 'early';
-        { ^^ v }.catch:{ |e| 'caught' };
+        var v = 'early'
+        { ^^ v }.catch:{ |e| 'caught' }
         ^'late'
     }
-};
+}
 
 (TestSuite.new:{ var name = 'AotParityNlr' }).add:{
     .test:coldArmReturnsFromTheMethod -> {
@@ -712,15 +712,15 @@ NlrCatcher <- {
         .is:{ ta.join } equalTo:'ok-A';
         .is:{ tb.join } equalTo:'ok-B'
     }
-};
+}
 
 NlrWorker <- {
     work:sleep: -> { |label ms|
-        Async.sleep:ms;
-        (label.length > 0).if:{ ^^'ok-' + label };
+        Async.sleep:ms
+        (label.length > 0).if:{ ^^'ok-' + label }
         ^'fell-through'
     }
-};
+}
 
 "* --- S5b: nested literals in materialized cold arms ----------------------
 "* The materialized closure runs interpreted, so nested blocks execute
@@ -729,33 +729,33 @@ NlrWorker <- {
 "* frame). HandlerTask#run: (richards) is the motivating shape: a ^^ two
 "* arms deep.
 NlrHandler <- { | @v1 @v2 |
-    init: -> { |v1| @v1 = v1; @v2 = 0 };
+    init: -> { |v1| @v1 = v1; @v2 = 0 }
     handle: -> { |limit|
         @v1.defined?.if:{
-            var have = @v1;
+            var have = @v1
             (have < limit).if:{
                 (@v2 < 100).if:{
-                    @v2 = @v2 + have;
+                    @v2 = @v2 + have
                     ^^'queued'
                 }
             }
             else:{
-                @v1 = nil;
+                @v1 = nil
                 ^^'drained'
             }
-        };
+        }
         ^'idle'
-    };
+    }
     v2 -> { ^@v2 }
-};
+}
 
 NlrNestWriter <- {
     tally: -> { |n|
-        var seen = 0;
-        (n > 0).if:{ (n > 10).if:{ seen = n * 2 } else:{ seen = n } };
+        var seen = 0
+        (n > 0).if:{ (n > 10).if:{ seen = n * 2 } else:{ seen = n } }
         ^seen
     }
-};
+}
 
 (TestSuite.new:{ var name = 'AotParityNlrNested' }).add:{
     .test:nestedArmReturnsThroughTwoLevels -> {
@@ -781,7 +781,7 @@ NlrNestWriter <- {
         "* 1..10 -> n, 11..14 -> 2n : 55 + 2*(11+12+13+14) = 155
         .is:{ total } equalTo:155
     }
-};
+}
 
 "* --- tracked-closure escape (R0a) ----------------------------------------
 "* A materialized closure with OBLIGATIONS (pending write-backs, or a ^^
@@ -790,24 +790,24 @@ NlrNestWriter <- {
 "* obligations would key to a stale SSA value and silently orphan. Both
 "* shapes REFUSE (stay interpreted) — these pin the observable parity.
 EscWriter <- {
-    run: -> { |b| b.value };
+    run: -> { |b| b.value }
     tally -> {
-        var total = 0;
+        var total = 0
         var blk = { total = total + 1 };
         .run:blk;
-        .run:blk;
+        .run:blk
         ^total
     }
-};
+}
 
 EscCatcher <- {
     m -> {
-        var v = 'early';
-        var p = { ^^ v };
-        p.catch:{ |e| 'caught' };
+        var v = 'early'
+        var p = { ^^ v }
+        p.catch:{ |e| 'caught' }
         ^'late'
     }
-};
+}
 
 (TestSuite.new:{ var name = 'AotParityEscape' }).add:{
     .test:localBoundWriteCaptureStaysExact -> {
@@ -826,7 +826,7 @@ EscCatcher <- {
         { i < 5 }.whileDo:{ acc = acc + (t.m); i = i + 1 };
         .is:{ acc } equalTo:'caughtcaughtcaughtcaughtcaught'
     }
-};
+}
 
 "* Block-argument scalar speculation: a hot one-param block whose observed
 "* args are all Integer compiles its param into a register lane, guarded by

@@ -5,18 +5,18 @@
 
 RenderG <- {
     .meta <-- {
-        show: -> { |xs: List(Integer)| 'ints' };
-        show: -> { |xs: List(String)| 'strings' };
+        show: -> { |xs: List(Integer)| 'ints' }
+        show: -> { |xs: List(String)| 'strings' }
         show: -> { |xs: List| 'plain' }
     }
-};
+}
 
 ShapeG <- {
     area -> { 0 }
-};
+}
 ShapeG <- CircleG <- {
     area -> { 314 }
-};
+}
 
 (TestSuite.new:{ var name = 'CheckedGenerics' }).add:{
     .test:

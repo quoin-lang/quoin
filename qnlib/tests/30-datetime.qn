@@ -14,7 +14,7 @@
         .isFalse:{ TimeZone.utc == (TimeZone.of:'America/New_York') };
         .isFalse:{ TimeZone.utc == 'UTC' }
     }
-};
+}
 
 (TestSuite.new:{ var name = 'Timestamp' }).add:{
     .test:
@@ -45,7 +45,7 @@
         .is:{ ((Timestamp.parse:'2024-01-01T00:00:00Z').inZone:(TimeZone.of:'America/New_York')).hour }
             equalTo:19;
     };
-};
+}
 
 (TestSuite.new:{ var name = 'DateTime' }).add:{
     .test:

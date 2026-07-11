@@ -1,3 +1,3 @@
-'before'.print;
-Channel.new.receive;
+'before'.print
+Channel.new.receive
 'after'.print

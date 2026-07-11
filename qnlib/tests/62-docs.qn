@@ -8,25 +8,25 @@
 "* A haiku about docs.
 TDocPoint <- { |@x|
     "* The x coordinate.
-    x -> { @x };
+    x -> { @x }
 
     y -> { 0 }
-};
+}
 
 "* Reopens are documented too: this block belongs to the extension site.
 TDocPoint <-- {
     "* Manhattan distance from the origin.
     manhattan -> { @x.abs }
-};
+}
 
 TDocBare <- {
     x -> { 1 }
-};
+}
 
 "* A reopen doc standing in for a missing class doc.
 TDocBare <-- {
     y -> { 2 }
-};
+}
 
 (TestSuite.new:{ var name = 'Docs' }).add:{
     .test:aClassAnswersItsDocBlock -> {

@@ -3,24 +3,24 @@ Every Quoin string is currently two GC allocations (Object wrapper +
 inner String), so this measures the representation cost directly.
 Run whole-process: `qn bench/qn/strings.qn` from the repo root."
 
-var words = 'lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua'.splitString:' ';
+var words = 'lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua'.splitString:' '
 
-var checksum = 0;
-var k = 0;
+var checksum = 0
+var k = 0
 { k < 15000 }.whileDo:{
-    var sentence = '';
-    words.each:{ |w| sentence = sentence + w + ' ' };
-    checksum = checksum + sentence.length;
+    var sentence = ''
+    words.each:{ |w| sentence = sentence + w + ' ' }
+    checksum = checksum + sentence.length
 
-    var parts = sentence.splitString:' ';
-    checksum = checksum + parts.count;
+    var parts = sentence.splitString:' '
+    checksum = checksum + parts.count
 
-    (sentence.contains?:'tempor').if:{ checksum = checksum + 1 };
-    (sentence.starts?:'lorem').if:{ checksum = checksum + 1 };
-    checksum = checksum + sentence.upper.length + sentence.lower.length;
-    checksum = checksum + (sentence.index:'dolor');
-    checksum = checksum + (words.join:'-').length;
+    (sentence.contains?:'tempor').if:{ checksum = checksum + 1 }
+    (sentence.starts?:'lorem').if:{ checksum = checksum + 1 }
+    checksum = checksum + sentence.upper.length + sentence.lower.length
+    checksum = checksum + (sentence.index:'dolor')
+    checksum = checksum + (words.join:'-').length
     k = k + 1
-};
+}
 
 (checksum == 7755000).if:{ 'strings: ok'.print } else:{ ('strings: FAIL got ' + checksum).print }

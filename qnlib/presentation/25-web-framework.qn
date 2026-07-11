@@ -6,82 +6,82 @@
 "*
 "* See docs/WEB_ARCH.md for the architecture.
 "* ===========================================================================
-use std:net/http;
-use std:net/http_server;
-use std:web/*;
+use std:net/http
+use std:net/http_server
+use std:web/*
 
-var users = #{ '1':#{ 'id':'1' 'name':'Ada' } '2':#{ 'id':'2' 'name':'Grace' } };
+var users = #{ '1':#{ 'id':'1' 'name':'Ada' } '2':#{ 'id':'2' 'name':'Grace' } }
 
-var app = [Web]App.new;
+var app = [Web]App.new
 
 "* Middleware wraps every request (onion: first use: is outermost). This one
 "* logs the exchange; returning without calling `next` would short-circuit.
 app.use:{ |req next|
-    var resp = next.value:req;
-    ('  [log] ' + req.method + ' ' + req.path + ' -> ' + resp.status.s).print;
+    var resp = next.value:req
+    ('  [log] ' + req.method + ' ' + req.path + ' -> ' + resp.status.s).print
     resp
-};
+}
 
 "* A handler's return value is normalized by type: a String becomes text/plain,
 "* a Map or List becomes JSON, a bare Integer becomes that status, a Generator
 "* streams as chunked output, a [Web]Response passes through, nil becomes 404.
-app.get:'/' do:{ 'Hello from Quoin!' };
-app.get:'/users' do:{ users.values };
+app.get:'/' do:{ 'Hello from Quoin!' }
+app.get:'/users' do:{ users.values }
 app.get:'/users/:id'
 do:{ |req|
-    var u = users.at:(req.param:'id');
+    var u = users.at:(req.param:'id')
     u.defined?.if:{ u } else:{ 404 }
-};
+}
 app.post:'/users'
 do:{ |req|
-    var u = req.json;
-    users.at:(u.at:'id') put:u;
+    var u = req.json
+    users.at:(u.at:'id') put:u
     [Web]Response.json:u status:201
-};
+}
 app.get:'/admin'
 do:{ |req|
-    (req.header:'authorization').defined?.else:{ HttpError.throw:401 };
+    (req.header:'authorization').defined?.else:{ HttpError.throw:401 }
     'welcome, admin'
-};
+}
 app.get:'/events'
 do:{
     [Web]Response.stream:(Generator.from:{
-        ^>'data: one\n\n';
+        ^>'data: one\n\n'
         ^>'data: two\n\n'
     })
-};
+}
 
 "* `app.handle:req` is a pure function, so the whole app also works without a
 "* socket — that is how qnlib/tests/49-webapp.qn tests it. Here we run the real
 "* transport: start (background accept loop), drive it, wind down.
-var server = app.start:'127.0.0.1:0';
-var base = 'http://127.0.0.1:' + server.port;
-('serving on ' + base).print;
+var server = app.start:'127.0.0.1:0'
+var base = 'http://127.0.0.1:' + server.port
+('serving on ' + base).print
 
-var hello = [HTTP]Client.get:base;
-('GET /            -> ' + hello.status.s + ' ' + hello.body.text).print;
+var hello = [HTTP]Client.get:base
+('GET /            -> ' + hello.status.s + ' ' + hello.body.text).print
 
-var one = [HTTP]Client.get:(base + '/users/1');
-('GET /users/1     -> ' + one.status.s + ' ' + one.body.text).print;
+var one = [HTTP]Client.get:(base + '/users/1')
+('GET /users/1     -> ' + one.status.s + ' ' + one.body.text).print
 
-var missing = [HTTP]Client.get:(base + '/users/99');
-('GET /users/99    -> ' + missing.status.s).print;
+var missing = [HTTP]Client.get:(base + '/users/99')
+('GET /users/99    -> ' + missing.status.s).print
 
-var made = [HTTP]Client.post:(base + '/users') body:#{ 'id':'3' 'name':'Barbara' };
-('POST /users      -> ' + made.status.s + ' ' + made.body.text).print;
+var made = [HTTP]Client.post:(base + '/users') body:#{ 'id':'3' 'name':'Barbara' }
+('POST /users      -> ' + made.status.s + ' ' + made.body.text).print
 
-var denied = [HTTP]Client.get:(base + '/admin');
-('GET /admin       -> ' + denied.status.s + ' (no credentials)').print;
+var denied = [HTTP]Client.get:(base + '/admin')
+('GET /admin       -> ' + denied.status.s + ' (no credentials)').print
 
-var admitted = [HTTP]Client.get:(base + '/admin') headers:#( #('Authorization' 'let-me-in') );
-('GET /admin       -> ' + admitted.status.s + ' ' + admitted.body.text).print;
+var admitted = [HTTP]Client.get:(base + '/admin') headers:#( #('Authorization' 'let-me-in') )
+('GET /admin       -> ' + admitted.status.s + ' ' + admitted.body.text).print
 
-var events = [HTTP]Client.get:(base + '/events');
+var events = [HTTP]Client.get:(base + '/events')
 ('GET /events      -> ' + events.status.s + ' streamed '
     + events.body.text.length + ' bytes over '
-    + (events.header:'transfer-encoding')).print;
+    + (events.header:'transfer-encoding')).print
 
-server.stop;
-server.join;
-server.close;
+server.stop
+server.join
+server.close
 'done'.print

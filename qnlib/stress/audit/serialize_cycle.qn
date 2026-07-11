@@ -12,7 +12,7 @@
 "* This script now prints the caught error and exits 0. Regression tests:
 "* qnlib/tests/55-serialize-depth.qn.
 
-var l = #();
-l.add:l;
-{ (JSON.generate:l).print }.catch:{ |e:ValueError| ('caught: ' + e.message).print };
+var l = #()
+l.add:l
+{ (JSON.generate:l).print }.catch:{ |e:ValueError| ('caught: ' + e.message).print }
 'reached — the process survived'.print

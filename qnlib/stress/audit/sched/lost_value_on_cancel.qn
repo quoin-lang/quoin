@@ -1,12 +1,12 @@
 "* A parked receiver is handed a value (send: returns success), then cancelled
 "* before it runs: the committed value is silently dropped.
-var ch = Channel.new;
-var entered = #();
-var t = Task.spawn:{ entered.add:1; ch.receive };
-{ entered.count == 0 }.whileDo:{ Async.sleep:1 };
-ch.send:'precious';
-'send returned ok'.print;
-t.cancel;
-Async.sleep:20;
-('receiver status: ' + t.status).print;
+var ch = Channel.new
+var entered = #()
+var t = Task.spawn:{ entered.add:1; ch.receive }
+{ entered.count == 0 }.whileDo:{ Async.sleep:1 }
+ch.send:'precious'
+'send returned ok'.print
+t.cancel
+Async.sleep:20
+('receiver status: ' + t.status).print
 ('buffered count: ' + ch.count.s).print

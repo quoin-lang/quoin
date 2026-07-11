@@ -16,7 +16,7 @@
 
 "* Thrown while draining a body that exceeds a caller-imposed byte ceiling — the
 "* server's maxBodyBytes (the client never sets one). Catch it to answer 413.
-Error <- [HTTP]BodyTooLarge <- {};
+Error <- [HTTP]BodyTooLarge <- {}
 
 "* A request or response body — two backings, one interface. A *chunk* is just a
 "* bytes-backed body, so .chunks yields [HTTP]Body too (bytes + .text/.json/.meta views):
@@ -258,16 +258,16 @@ Error <- [HTTP]BodyTooLarge <- {};
         var ext = @mediaType.defined?.if:{ ', ' + @mediaType } else:{ '' };
         '[HTTP]Body(' + sz + ext + ')'
     }
-};
+}
 
 "* An HTTP response: status line, headers (a list of #(name value) pairs, order- and
 "* duplicate-preserving), and the body as an [HTTP]Body.
 [HTTP]Response <- { | @status @reason @headers @body |
     "* Internal: populate the four slots (internalSend builds responses).
     init: -> { |status reason headers body|
-        @status = status;
-        @reason = reason;
-        @headers = headers;
+        @status = status
+        @reason = reason
+        @headers = headers
         @body = body
     };
 
@@ -276,40 +276,40 @@ Error <- [HTTP]BodyTooLarge <- {};
         "* pair list, or nil. Shared by `send` (Content-Length/Transfer-Encoding) and
         "* the `header:` accessor.
         find:named: -> { |headers name|
-            var target = name.lower;
-            headers.each:{ |pair| ((pair.at:0).lower == target).if:{ ^^pair.at:1 } };
+            var target = name.lower
+            headers.each:{ |pair| ((pair.at:0).lower == target).if:{ ^^pair.at:1 } }
             ^nil
-        };
+        }
 
         "* Decode a body per its Content-Encoding: gzip / x-gzip, deflate, or zstd.
         "* Identity or an unrecognized coding returns the bytes unchanged. Picks the
         "* first recognized coding mentioned (a comma-list of codings is rare).
         decodeBody:encoding: -> { |bytes enc|
-            var e = enc.lower;
-            (e.contains?:'gzip').if:{ ^^bytes.decodeGz };
-            (e.contains?:'zstd').if:{ ^^bytes.decodeZstd };
-            (e.contains?:'deflate').if:{ ^^bytes.decodeDeflate };
+            var e = enc.lower
+            (e.contains?:'gzip').if:{ ^^bytes.decodeGz }
+            (e.contains?:'zstd').if:{ ^^bytes.decodeZstd }
+            (e.contains?:'deflate').if:{ ^^bytes.decodeDeflate }
             ^bytes
         }
-    };
+    }
 
     "* The numeric status code (e.g. 200).
-    status -> { @status };
+    status -> { @status }
     "* The reason phrase from the status line (e.g. 'OK'); display-only.
-    reason -> { @reason };
+    reason -> { @reason }
     "* Whether the status is 2xx.
-    ok? -> { (@status >= 200) && (@status < 300) };
+    ok? -> { (@status >= 200) && (@status < 300) }
     "* All headers as a #(name value) pair list, in wire order, duplicates preserved.
-    headers -> { @headers };
+    headers -> { @headers }
     "* Case-insensitive lookup: the first header named `name`, or nil.
-    header: -> { |name| [HTTP]Response.find:@headers named:name };
+    header: -> { |name| [HTTP]Response.find:@headers named:name }
     "* The Location header (a redirect's target), or nil.
-    location -> { .header:'location' };
+    location -> { .header:'location' }
     "* A redirect we could follow: a 3xx status carrying a Location header.
-    redirect? -> { (@status >= 300) && (@status < 400) && ((.header:'location').defined?) };
+    redirect? -> { (@status >= 300) && (@status < 400) && ((.header:'location').defined?) }
     "* The body as an [HTTP]Body — stream-backed until drained (.text / .json / .bytes).
     body -> { @body }
-};
+}
 
 "* The request Builder. Convenience methods on [HTTP]Client cover the common cases;
 "* a library reaches for this to set a custom verb, headers, body, or `insecure:`.
@@ -549,7 +549,7 @@ Error <- [HTTP]BodyTooLarge <- {};
         };
         ^next
     }
-};
+}
 
 "* The convenience facade: class-side helpers for the common verbs. Kept thin so a
 "* future stateful client (base URL, default headers, pooling) can be an *instance*
@@ -561,7 +561,7 @@ Error <- [HTTP]BodyTooLarge <- {};
         "* ```
         "* resp = (([HTTP]Client.request:'https://example.org/x').method:'DELETE').send
         "* ```
-        request: -> { |url| ^[HTTP]Request.new:{ url = url } };
+        request: -> { |url| ^[HTTP]Request.new:{ url = url } }
 
         "* GET `url` and return the [HTTP]Response; redirects are followed. The body
         "* arrives stream-backed — read it with .body.text / .json / .bytes, or stream
@@ -572,12 +572,12 @@ Error <- [HTTP]BodyTooLarge <- {};
         "* resp.status;         "* e.g. 200
         "* resp.body.text       "* the whole body as a String
         "* ```
-        get: -> { |url| ^(.request:url).send };
+        get: -> { |url| ^(.request:url).send }
         "* GET with extra request headers — #(name value) pairs.
         "* ```
         "* [HTTP]Client.get:url headers:#( #('Accept' 'application/json') )
         "* ```
-        get:headers: -> { |url headers| ^((.request:url).headers:headers).send };
+        get:headers: -> { |url headers| ^((.request:url).headers:headers).send }
 
         "* POST `body` to `url`. The body normalizes as [HTTP]Request body: does — a Map
         "* or List is JSON-encoded (Content-Type application/json), a String sends as its
@@ -585,7 +585,7 @@ Error <- [HTTP]BodyTooLarge <- {};
         "* ```
         "* resp = [HTTP]Client.post:'https://api.example.org/users' body:#{ 'name':'Quoin' }
         "* ```
-        post:body: -> { |url body| ^(((.request:url).method:'POST').body:body).send };
+        post:body: -> { |url body| ^(((.request:url).method:'POST').body:body).send }
         "* POST with extra request headers — #(name value) pairs.
         post:body:headers: -> { |url body headers|
             ^((((.request:url).method:'POST').body:body).headers:headers).send

@@ -39,7 +39,7 @@
 
     "* each: yields every byte as an Integer.
     .test:each -> {
-        var sum = 0;
+        var sum = 0
         'AB'.asBytes.each:{ |x| sum = sum + x };
         .is:{ sum } equalTo:131
     };

@@ -1,6 +1,6 @@
 "* Network-free coverage of the [HTTP] client's pure logic (URL parsing, request
 "* serialization, the Response object). The full round-trip lives in tests/http.rs.
-use std:net/http;
+use std:net/http
 
 (TestSuite.new:{ var name = 'HTTP' }).add:{
     .test:

@@ -9,13 +9,13 @@
 Error <- HttpError <- { | @status @body |
     "* Internal: default the status to 500 and derive the message ('HTTP 422').
     init: -> { |status body|
-        @status = status.defined?.if:{ status } else:{ 500 };
-        @body = body;
+        @status = status.defined?.if:{ status } else:{ 500 }
+        @body = body
         @message = 'HTTP ' + @status
-    };
+    }
 
     "* The HTTP status to answer with.
-    status -> { @status };
+    status -> { @status }
     "* The optional body for the error response (rendered through the app's respondTo:
     "* conventions), or nil.
     body -> { @body };
@@ -26,7 +26,7 @@ Error <- HttpError <- { | @status @body |
         "* ```
         "* (req.header:'authorization').defined?.else:{ HttpError.throw:401 }
         "* ```
-        throw: -> { |status| (HttpError.new:{ status = status }).throw };
+        throw: -> { |status| (HttpError.new:{ status = status }).throw }
         "* Throw an HttpError with a status and a body for the dispatcher to render.
         "* ```
         "* HttpError.throw:422 body:#{ 'error':'bad email' }

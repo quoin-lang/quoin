@@ -9,14 +9,14 @@ Bytes <-- {
     "* ```
     "* 'hi'.asBytes.toBase64    "* -> aGk=
     "* ```
-    toBase64 -> { Base64.encode:self };
+    toBase64 -> { Base64.encode:self }
     "* This Bytes encoded as a lowercase hex String, two digits per byte.
     "*
     "* ```
     "* 'hi'.asBytes.toHex    "* -> 6869
     "* ```
     toHex -> { Hex.encode:self }
-};
+}
 
 "* Decoding (and base64-encoding) conveniences for Strings holding encoded data.
 String <-- {
@@ -25,13 +25,13 @@ String <-- {
     "* ```
     "* 'aGk='.fromBase64.asString    "* -> hi
     "* ```
-    fromBase64 -> { Base64.decode:self };
+    fromBase64 -> { Base64.decode:self }
     "* This String, read as hex, decoded back to Bytes.
     "*
     "* ```
     "* '6869'.fromHex.asString    "* -> hi
     "* ```
-    fromHex -> { Hex.decode:self };
+    fromHex -> { Hex.decode:self }
     "* This String's UTF-8 bytes encoded as a base64 String.
     "*
     "* ```

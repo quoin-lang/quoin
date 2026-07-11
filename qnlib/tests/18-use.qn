@@ -1,6 +1,6 @@
 "* Explicit file loading via `use`. Loads qnlib/usetest/lib.qn on demand — a stdlib
 "* file in a subdir, so it is NOT auto-loaded by the startup `qnlib/*.qn` glob.
-use usetest/lib;
+use usetest/lib
 
 (TestSuite.new:{ var name = 'Use' }).add:{
     .test:

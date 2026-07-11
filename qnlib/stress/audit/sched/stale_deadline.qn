@@ -1,9 +1,9 @@
 "* ABA on (joiner slot, target slot, park_epoch): a disarmed deadline timer from a
 "* finished timeout fires on a *reused* pair of task slots with a matching epoch.
 "* Correct behavior: prints ok1 then ok2 (~1s). Buggy: t2 hits TimeoutError instantly.
-var t1 = Task.spawn:{ Async.timeout:200 do:{ Async.sleep:5; 'ok1' } };
-t1.join.print;
-var t2 = Task.spawn:{ Async.timeout:60000 do:{ Async.sleep:1000; 'ok2' } };
-var r = { t2.join }.catch:{ |e| 'BUG: ' + e.s };
-r.print;
+var t1 = Task.spawn:{ Async.timeout:200 do:{ Async.sleep:5; 'ok1' } }
+t1.join.print
+var t2 = Task.spawn:{ Async.timeout:60000 do:{ Async.sleep:1000; 'ok2' } }
+var r = { t2.join }.catch:{ |e| 'BUG: ' + e.s }
+r.print
 'done'.print

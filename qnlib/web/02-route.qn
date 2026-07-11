@@ -173,7 +173,7 @@
 
     "* Human rendering: the pattern.
     s -> { '[Web]Route(' + @pattern + ')' }
-};
+}
 
 "* Per-verb route tables with most-specific-wins dispatch. The router is pure
 "* data + matching — the [Web]App (and anyone else) drives it.

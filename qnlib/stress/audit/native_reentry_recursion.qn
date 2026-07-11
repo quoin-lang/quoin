@@ -1,11 +1,11 @@
 Evil <- { |@id @bag|
-    init: -> { |i b| @id = i; @bag = b };
-    id -> { @id };
+    init: -> { |i b| @id = i; @bag = b }
+    id -> { @id }
     #'==:' -> { |o| @bag.add:99; false }
-};
-var gset = #<>;
-var e1 = Evil.new:{ var i = 1; var b = gset };
-gset.add:e1;
-var e2 = Evil.new:{ var i = 2; var b = gset };
-gset.add:e2;
+}
+var gset = #<>
+var e1 = Evil.new:{ var i = 1; var b = gset }
+gset.add:e1
+var e2 = Evil.new:{ var i = 2; var b = gset }
+gset.add:e2
 ('count: ' + gset.count.s).print

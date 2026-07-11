@@ -5,7 +5,7 @@ name.case:{
     .when:{ |x| x.length > 20 } do:{ 'YOUR NAME IS LONG'.print };
 
     .default:{ 'Who are you and what did you do with my bagel'.print }
-};
+}
 
 'Low' == 5.case:{
     .when:1..10 do:'Low';

@@ -5,8 +5,8 @@
 "* order is preserved. Falls back to plain serial when the input is small
 "* (the pool round trip + copies beat small work), when already inside a
 "* worker (no recursive pools), or when another flight is in progress.
-[Parallel]Workers <- #();
-[Parallel]State <- #{ 'busy': false };
+[Parallel]Workers <- #()
+[Parallel]State <- #{ 'busy': false }
 
 "* Pool machinery behind the parallel List combinators (`parallelCollect:` /
 "* `parallelReduce:`): a lazily-started pool of warm worker isolates, order-
@@ -19,7 +19,7 @@ Parallel <- {
         "* (profiling/parallel-combinators/): per-item work is unknowable, so
         "* this errs high — cheap blocks stay serial, and genuinely heavy
         "* small batches can use Worker.start: directly.
-        minItems -> { 2048 };
+        minItems -> { 2048 }
 
         "* The warm pool: one worker per compute thread, capped at 4 — the
         "* measured sweet spot for interpreter-bound work on this class of
@@ -28,50 +28,50 @@ Parallel <- {
         "* first use; process exit ends them; a nil job stops one explicitly.
         pool -> {
             ([Parallel]Workers.count == 0).if:{
-                var n = (VM.stats.at:'compute').at:'threads';
-                (n < 1).if:{ n = 1 };
-                (n > 4).if:{ n = 4 };
+                var n = (VM.stats.at:'compute').at:'threads'
+                (n < 1).if:{ n = 1 }
+                (n > 4).if:{ n = 4 }
                 (0..n).each:{ |i|
                     [Parallel]Workers.add:(Worker.start:{
-                        var running = true;
+                        var running = true
                         { running }.whileDo:{
-                            var job = Worker.receive;
+                            var job = Worker.receive
                             (job == nil).if:{ running = false } else:{ Worker.send:(job.value) }
-                        };
+                        }
                         0
                     })
                 }
-            };
+            }
             [Parallel]Workers
-        };
+        }
 
         "* One flight at a time: the pool lanes have no per-job addressing
         "* yet, so a second concurrent flight falls back to serial (correct,
         "* just not parallel). Cooperative scheduling makes check-then-set
         "* atomic between awaits.
         enter -> {
-            (([Parallel]State.at:'busy') == true).if:{ ^^false };
-            [Parallel]State.at:'busy' put:true;
+            (([Parallel]State.at:'busy') == true).if:{ ^^false }
+            [Parallel]State.at:'busy' put:true
             true
-        };
+        }
         "* Release the single parallel flight claimed by `enter`. The
         "* combinators call it on the success and failure paths alike, so the
         "* gate cannot stay wedged after an error.
-        exit -> { [Parallel]State.at:'busy' put:false };
+        exit -> { [Parallel]State.at:'busy' put:false }
 
         "* Split a list into up to `k` contiguous chunks, in order.
         chunk:into: -> { |items k|
-            var n = items.count;
-            (k > n).if:{ k = n };
-            var chunks = #();
-            (0..k).each:{ |i| chunks.add:#() };
-            var i = 0;
+            var n = items.count
+            (k > n).if:{ k = n }
+            var chunks = #()
+            (0..k).each:{ |i| chunks.add:#() }
+            var i = 0
             items.each:{ |x|
-                (chunks.at:((i * k) / n)).add:x;
+                (chunks.at:((i * k) / n)).add:x
                 i = i + 1
-            };
+            }
             chunks
-        };
+        }
 
         "* Dynamic dispatch over the pool: one feeder task per worker pulls
         "* the next chunk off a shared cursor, ships `job.value:chunk` as a
@@ -81,32 +81,32 @@ Parallel <- {
         "* pinned: spilled sibling-cluster threads run at ~1/3 frequency;
         "* profiling/worker-scaling/notes.md). Order-preserving.
         drain:over:with: -> { |chunks ws job|
-            var m = chunks.count;
-            var results = #();
-            (0..m).each:{ |i| results.add:nil };
-            var cursor = #{ 'next': 0 };
+            var m = chunks.count
+            var results = #()
+            (0..m).each:{ |i| results.add:nil }
+            var cursor = #{ 'next': 0 }
             var feeders = ws.collect:{ |w|
-                var wk = w;
+                var wk = w
                 {
-                    var running = true;
+                    var running = true
                     { running }.whileDo:{
-                        var k = cursor.at:'next';
+                        var k = cursor.at:'next'
                         (k >= m).if:{ running = false }
                         else:{
-                            cursor.at:'next' put:(k + 1);
-                            wk.send:(job.valueWithSelfOrArg:(chunks.at:k));
+                            cursor.at:'next' put:(k + 1)
+                            wk.send:(job.valueWithSelfOrArg:(chunks.at:k))
                             results.at:k put:(wk.receive)
                         }
-                    };
+                    }
                     0
                 }
-            };
-            Async.gather:feeders;
+            }
+            Async.gather:feeders
             results
         }
     };
     .sealed!
-};
+}
 
 "* Parallel combinators on List: `parallelCollect:` / `parallelReduce:` map
 "* and fold across the shared `Parallel` worker pool, preserving order.
