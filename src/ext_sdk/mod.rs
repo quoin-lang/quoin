@@ -31,7 +31,6 @@
 
 use gc_arena::lock::RefLock;
 use gc_arena::{Gc, Mutation};
-use indexmap::IndexMap;
 use std::any::Any;
 
 use crate::error::QuoinError;
@@ -86,7 +85,7 @@ pub trait Host<'gc> {
     fn new_bytes(&self, bytes: Vec<u8>) -> Value<'gc>;
     fn new_symbol(&self, name: String) -> Value<'gc>;
     fn new_list(&self, list: Vec<Value<'gc>>) -> Value<'gc>;
-    fn new_map(&self, map: IndexMap<String, Value<'gc>>) -> Value<'gc>;
+    fn new_map(&self, map: Vec<(String, Value<'gc>)>) -> Value<'gc>;
     /// A fresh instance of `class` (fields nil-initialized), wrapped as a `Value`.
     fn new_object(&self, class: ClassHandle<'gc>) -> Value<'gc>;
     /// The dyn-safe core of native-state construction. Prefer the generic
@@ -236,7 +235,7 @@ impl<'gc> Host<'gc> for HostCtx<'_, 'gc> {
     fn new_list(&self, list: Vec<Value<'gc>>) -> Value<'gc> {
         self.vm.new_list(self.mc, list)
     }
-    fn new_map(&self, map: IndexMap<String, Value<'gc>>) -> Value<'gc> {
+    fn new_map(&self, map: Vec<(String, Value<'gc>)>) -> Value<'gc> {
         self.vm.new_map(self.mc, map)
     }
     fn new_object(&self, class: ClassHandle<'gc>) -> Value<'gc> {

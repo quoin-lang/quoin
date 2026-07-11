@@ -8,7 +8,6 @@ use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
-use indexmap::IndexMap;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
 use serde_json::Value as Json;
@@ -129,9 +128,9 @@ fn json_to_value<'gc>(j: &Json, host: &dyn Host<'gc>) -> Result<Value<'gc>, Quoi
             Ok(host.new_list(items))
         }
         Json::Object(obj) => {
-            let mut map = IndexMap::with_capacity(obj.len());
+            let mut map = Vec::with_capacity(obj.len());
             for (k, val) in obj {
-                map.insert(k.clone(), json_to_value(val, host)?);
+                map.push((k.clone(), json_to_value(val, host)?));
             }
             Ok(host.new_map(map))
         }

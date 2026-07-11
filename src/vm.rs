@@ -24,7 +24,6 @@ use std::sync::Arc;
 
 use gc_arena::metrics::Pacing;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
-use indexmap::IndexMap;
 use regex::Regex;
 use rustc_hash::FxHashMap;
 use std::collections::{HashMap, VecDeque};
@@ -1343,15 +1342,20 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
-    pub fn new_map(&self, mc: &Mutation<'gc>, map: IndexMap<String, Value<'gc>>) -> Value<'gc> {
+    pub fn new_map(&self, mc: &Mutation<'gc>, pairs: Vec<(String, Value<'gc>)>) -> Value<'gc> {
         let class = self.builtin_cache.borrow().map_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Map"));
-        // Convenience constructor for the string-shaped native callers
-        // (JSON/wire/CSV/stats): builds a full any-key map internally.
+        // Constructor for the string-shaped native callers (JSON/wire/CSV/
+        // stats): ordered pairs straight into the any-key storage, duplicate
+        // keys last-wins (what the IndexMap intermediary this replaced did —
+        // it cost a second hash of every key, plus SipHash and a table build
+        // per map, measured on the json bench).
         let mut state = NativeMapState::new_empty();
-        for (k, v) in map {
-            let h = crate::value::hash_bytes(k.as_bytes());
-            state.append(h, self.new_string(mc, k), v);
+        for (k, v) in pairs {
+            let k = self.new_string(mc, k);
+            state
+                .insert_scalar(k, v)
+                .expect("String keys are native-exact");
         }
         let boxed_state: Box<dyn AnyCollect> = Box::new(state);
         Value::Object(gcl!(
@@ -6105,7 +6109,7 @@ impl<'gc> VmState<'gc> {
                 // in place on the VM stack, the fresh map rides on top, and
                 // each insert re-reads through the stack.
                 {
-                    let map_val = self.new_map(mc, IndexMap::new());
+                    let map_val = self.new_map(mc, Vec::new());
                     self.push(map_val);
                 }
                 let base = self.stack.len() - 1 - 2 * n;

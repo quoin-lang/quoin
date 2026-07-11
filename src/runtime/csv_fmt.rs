@@ -5,8 +5,6 @@ use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
-use indexmap::IndexMap;
-
 /// `CSV` — tabular text (RFC 4180) via the `csv` crate. CSV is untyped, so `parse` yields strings;
 /// `generate` stringifies each field via its `.s`. Both positional rows (List of Lists) and
 /// header-keyed rows (List of Maps) are supported.
@@ -71,10 +69,10 @@ pub fn build_csv_class() -> NativeClassBuilder {
             for result in reader.records() {
                 let record = result
                     .map_err(|e| QuoinError::ParseError(format!("CSV.parseWithHeaders:: {e}")))?;
-                let mut map = IndexMap::with_capacity(headers.len());
+                let mut map = Vec::with_capacity(headers.len());
                 for (i, header) in headers.iter().enumerate() {
                     let field = record.get(i).unwrap_or("");
-                    map.insert(header.clone(), host.new_string(field.to_string()));
+                    map.push((header.clone(), host.new_string(field.to_string())));
                 }
                 rows.push(host.new_map(map));
             }
