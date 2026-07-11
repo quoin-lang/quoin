@@ -403,6 +403,9 @@ fn value_native_shape<'gc>(value: Value<'gc>, cname: &str) -> Option<PpShape<'gc
         "KeyValuePair" => value
             .with_native_state::<NativeKeyValuePairState, _, _>(|s| s.pp_shape())
             .ok(),
+        "Match" => value
+            .with_native_state::<crate::runtime::regex::NativeMatchState, _, _>(|s| s.pp_shape())
+            .ok(),
         // Scalar value-like natives: each decomposes its own state into a structural `Record`.
         "DateTime" => value
             .with_native_state::<NativeDateTime, _, _>(|s| s.pp_shape())
