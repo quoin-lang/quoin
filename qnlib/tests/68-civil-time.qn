@@ -1,0 +1,110 @@
+"* The civil (calendar) types — Date, Time, Span (src/runtime/civil.rs, span.rs) — and
+"* their DateTime bridge. Calendar edge cases on purpose: end-of-month clamping, leap
+"* years, midnight wrap-around, fieldwise Span equality, and the refusal to convert
+"* calendar units into fixed time.
+(TestSuite.new:{ var name = 'CivilTime' }).add:{
+    .test:
+    dateConstructionAndComponents -> {
+        var d = Date.year:2026 month:7 day:11;
+        .is:{ d.s } equalTo:'2026-07-11';
+        .is:{ d.year } equalTo:2026;
+        .is:{ d.month } equalTo:7;
+        .is:{ d.day } equalTo:11;
+        .is:{ d.weekday } equalTo:'Saturday';
+        .is:{ d.dayOfYear } equalTo:192;
+        .is:{ Date.parse:'2026-07-11' } equalTo:d;
+        "* Nonexistent dates refuse rather than normalize.
+        .does:{ Date.year:2024 month:2 day:30 } throw:ValueError;
+        .does:{ Date.year:2026 month:13 day:1 } throw:ValueError;
+        .does:{ Date.parse:'not a date' } throw:ValueError;
+        "* Leap-year awareness.
+        .is:{ (Date.parse:'2024-02-10').daysInMonth } equalTo:29;
+        .isTrue:{ (Date.parse:'2024-02-10').leapYear? };
+        .isFalse:{ (Date.parse:'2026-02-10').leapYear? };
+    };
+
+    .test:
+    dateArithmetic -> {
+        "* Month arithmetic clamps to the end of a shorter month.
+        .is:{ (Date.year:2024 month:1 day:31) + (Span.months:1) }
+            equalTo:(Date.parse:'2024-02-29');
+        .is:{ (Date.year:2026 month:1 day:31) + (Span.months:1) }
+            equalTo:(Date.parse:'2026-02-28');
+        .is:{ (Date.parse:'2026-07-11') - (Span.parse:'P1Y2M') }
+            equalTo:(Date.parse:'2025-05-11');
+        "* until: answers a CALENDAR Span, negative when the argument is earlier.
+        .is:{ ((Date.parse:'2024-01-15').until:(Date.parse:'2026-03-18')).s }
+            equalTo:'2y 2mo 3d';
+        .is:{ ((Date.parse:'2026-03-18').until:(Date.parse:'2024-01-15')).s }
+            equalTo:'2y 2mo 3d ago';
+        .is:{ ((Date.parse:'2026-07-11').until:(Date.parse:'2026-07-11')).s } equalTo:'0s';
+        "* Ordering; equality treats a non-Date as simply unequal.
+        .isTrue:{ (Date.parse:'2026-07-10') < (Date.parse:'2026-07-11') };
+        .isFalse:{ (Date.parse:'2026-07-11') == '2026-07-11' };
+    };
+
+    .test:
+    timeOfDay -> {
+        var t = Time.hour:9 minute:40;
+        .is:{ t.s } equalTo:'09:40:00';
+        .is:{ t.hour } equalTo:9;
+        .is:{ t.minute } equalTo:40;
+        .is:{ (Time.hour:9 minute:40 second:30).second } equalTo:30;
+        .is:{ Time.midnight.s } equalTo:'00:00:00';
+        .is:{ Time.parse:'09:40:00' } equalTo:t;
+        .does:{ Time.hour:24 minute:0 } throw:ValueError;
+        "* Duration arithmetic WRAPS around midnight (a zoneless clock).
+        .is:{ ((Time.hour:23 minute:30) + (Duration.hours:1)).s } equalTo:'00:30:00';
+        .is:{ (Time.midnight - (Duration.minutes:15)).s } equalTo:'23:45:00';
+        "* until: reads within one day — nothing wraps, so it can be negative.
+        .is:{ ((Time.hour:9 minute:0).until:(Time.hour:17 minute:30)).s } equalTo:'8h 30m';
+        .is:{ ((Time.hour:23 minute:0).until:(Time.hour:1 minute:0)).s } equalTo:'22h ago';
+        .isTrue:{ Time.midnight < (Time.hour:23 minute:59) };
+    };
+
+    .test:
+    spanFields -> {
+        "* Both parse forms; s is friendly, iso8601 canonical.
+        .is:{ (Span.parse:'P1Y2M3D').s } equalTo:'1y 2mo 3d';
+        .is:{ (Span.parse:'1h 30m').iso8601 } equalTo:'PT1H30M';
+        .is:{ (Span.parse:'P1Y2M3D').days } equalTo:3;
+        .does:{ Span.parse:'one year' } throw:ValueError;
+        "* +:/-: combine FIELD-WISE — units never convert into each other.
+        .is:{ ((Span.years:1) + (Span.months:2)).iso8601 } equalTo:'P1Y2M';
+        .is:{ ((Span.hours:1) + (Span.minutes:60)).iso8601 } equalTo:'PT1H60M';
+        "* A unit combined away to zero drops out of the rendering entirely.
+        .is:{ ((Span.parse:'P1Y2M') - (Span.months:2)).iso8601 } equalTo:'P1Y';
+        .is:{ (Span.parse:'P1Y2M').negate.iso8601 } equalTo:'-P1Y2M';
+        "* Fieldwise equality: 1h is NOT 60m (that depends on a calendar).
+        .isFalse:{ (Span.hours:1) == (Span.minutes:60) };
+        .isTrue:{ (Span.hours:1) == (Span.hours:1) };
+        "* asDuration: time-only spans convert; calendar units refuse.
+        .is:{ (Span.parse:'PT1H30M').asDuration } equalTo:(Duration.minutes:90);
+        .does:{ (Span.days:1).asDuration } throw:ValueError;
+    };
+
+    .test:
+    dateTimeBridge -> {
+        var dt = DateTime.parse:'2024-01-31T12:00:00+00:00[UTC]';
+        "* Mixed-unit Span arithmetic on DateTime (clamp, then carry on).
+        .is:{ (dt + (Span.parse:'P1M1D')).s } equalTo:'2024-03-01T12:00:00+00:00[UTC]';
+        .is:{ (dt - (Span.years:1)).s } equalTo:'2023-01-31T12:00:00+00:00[UTC]';
+        "* Civil extraction is the LOCAL view.
+        .is:{ dt.date } equalTo:(Date.parse:'2024-01-31');
+        .is:{ dt.time } equalTo:(Time.hour:12 minute:0);
+        "* Calendar diff between instants.
+        .is:{ (dt.until:(DateTime.parse:'2026-03-18T12:00:00+00:00[UTC]')).s }
+            equalTo:'2y 1mo 18d';
+        "* Civil -> zone-aware.
+        .is:{ ((Date.parse:'2026-07-11').atTime:(Time.hour:9 minute:40) zone:(TimeZone.of:'UTC')).s }
+            equalTo:'2026-07-11T09:40:00+00:00[UTC]';
+        .is:{ ((Date.parse:'2026-07-11').inZone:(TimeZone.of:'UTC')).s }
+            equalTo:'2026-07-11T00:00:00+00:00[UTC]';
+        "* A DST gap resolves per the compatible rule instead of erroring: 02:30 does
+        "* not exist on this night in New York — it lands at 03:30.
+        .is:{
+            ((Date.parse:'2024-03-10').atTime:(Time.hour:2 minute:30)
+                zone:(TimeZone.of:'America/New_York')).time
+        } equalTo:(Time.hour:3 minute:30);
+    };
+}

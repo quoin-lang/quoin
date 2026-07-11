@@ -10,7 +10,7 @@ use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use gc_arena::collect::Trace;
 use jiff::civil::Weekday;
 use jiff::tz::TimeZone;
-use jiff::{Span, Timestamp, Zoned};
+use jiff::{Span, Timestamp, Unit, Zoned, ZonedDifference};
 use std::any::Any;
 
 /// Native backing state for a `DateTime`: a zone-aware date+time (jiff `Zoned` — an instant plus
@@ -83,7 +83,7 @@ pub fn make_date_time<'gc>(host: &dyn Host<'gc>, z: Zoned) -> Value<'gc> {
     host.new_native_state(class, NativeDateTime(z))
 }
 
-fn weekday_name(w: Weekday) -> &'static str {
+pub(crate) fn weekday_name(w: Weekday) -> &'static str {
     match w {
         Weekday::Monday => "Monday",
         Weekday::Tuesday => "Tuesday",
@@ -404,6 +404,62 @@ pub fn build_date_time_class() -> NativeClassBuilder {
          ```\n\
          ((DateTime.parse:'2024-01-01T12:00:00+00:00[UTC]').inZone:(TimeZone.of:'Asia/Tokyo')).s\n\
          \"* -> 2024-01-01T21:00:00+09:00[Asia/Tokyo]\n\
+         ```",
+    )
+    // The civil bridge: mixed-unit Span arithmetic (the general form of the plus…/minus…
+    // family), calendar diffs, and the civil-component extractors.
+    .sdk_typed_instance_method("+:", &["Span"], |host, receiver, args| {
+        let span = crate::runtime::span::span_of(args[0], "+:")?;
+        shift(host, receiver, span, false, "+:")
+    })
+    .doc(
+        "The DateTime a calendar Span later — DST- and end-of-month-aware, like the \
+         `plus…` family but mixed-unit.\n\n\
+         ```\n\
+         ((DateTime.parse:'2024-01-31T12:00:00+00:00[UTC]') + (Span.parse:'P1M1D')).s\n\
+         \"* -> 2024-03-01T12:00:00+00:00[UTC]\n\
+         ```",
+    )
+    .sdk_typed_instance_method("-:", &["Span"], |host, receiver, args| {
+        let span = crate::runtime::span::span_of(args[0], "-:")?;
+        shift(host, receiver, span, true, "-:")
+    })
+    .doc("The DateTime a calendar Span earlier — `+:` (Span) in reverse.")
+    .sdk_typed_instance_method("until:", &["DateTime"], |host, receiver, args| {
+        let a = zoned_of(receiver, "until:")?;
+        let b = zoned_of(args[0], "until:")?;
+        a.until(ZonedDifference::new(&b).largest(Unit::Year))
+            .map(|s| crate::runtime::span::make_span(host, s))
+            .map_err(|e| QuoinError::ArithmeticError(format!("DateTime until: {e}")))
+    })
+    .doc(
+        "The calendar Span from the receiver to the argument (negative when the argument \
+         is earlier), in years/months/days/hours/… — zone-aware, so a day across a DST \
+         change counts as one day. The absolute-time diff is `-:` (→ Duration).\n\n\
+         ```\n\
+         ((DateTime.parse:'2024-01-15T00:00:00+00:00[UTC]').until:(DateTime.parse:'2026-03-18T00:00:00+00:00[UTC]')).s\n\
+         \"* -> 2y 2mo 3d\n\
+         ```",
+    )
+    .sdk_instance_method("date", |host, receiver, _args| {
+        let z = zoned_of(receiver, "date")?;
+        Ok(crate::runtime::civil::make_date(host, z.date()))
+    })
+    .doc(
+        "The civil calendar Date of this DateTime's local components (the zone-dependent \
+         view: the same instant is a different date in Tokyo and Honolulu).\n\n\
+         ```\n\
+         (DateTime.parse:'2026-07-11T09:40:00+00:00[UTC]').date.s     \"* -> 2026-07-11\n\
+         ```",
+    )
+    .sdk_instance_method("time", |host, receiver, _args| {
+        let z = zoned_of(receiver, "time")?;
+        Ok(crate::runtime::civil::make_time(host, z.time()))
+    })
+    .doc(
+        "The wall-clock Time of this DateTime's local components.\n\n\
+         ```\n\
+         (DateTime.parse:'2026-07-11T09:40:00+00:00[UTC]').time.s     \"* -> 09:40:00\n\
          ```",
     )
 }

@@ -78,7 +78,7 @@ protocol, not a separate toolkit: any Iterate-able of numbers has `mean`,
 
 ### Time
 
-Four types, split by job so each can be exactly right: **Instant** is the
+Split by job so each type can be exactly right: **Instant** is the
 monotonic clock — for measuring elapsed time, immune to wall-clock adjustments,
 meaningless across processes; **Timestamp** is absolute UTC wall-clock time;
 **DateTime** is a Timestamp plus its **TimeZone** (IANA zones), which is what
@@ -86,10 +86,27 @@ makes calendar arithmetic, DST, and offsets come out right; **Duration** is a
 signed span with nanosecond precision. **Timer** is the one-selector stopwatch:
 `Timer.time:aBlock` answers the block's elapsed whole microseconds.
 
+The civil types drop what doesn't apply: **Date** is a calendar date with no
+time and no zone (birthdays, deadlines — "March 3rd" everywhere), **Time** a
+wall-clock time of day with no date (its `Duration` arithmetic *wraps* around
+midnight). And **Span** is the calendar-aware duration — years, months, weeks,
+days, and time units held as *separate fields*, so "1 month" stays 1 month
+until it meets a date, where `+`/`-` apply it correctly (end-of-month clamping,
+DST). `Span` parses ISO 8601 (`'P1Y2M'`) and the friendly form (`'1y 2mo'`);
+its equality is *fieldwise* (`1h` ≠ `60m` — whether they match depends on a
+calendar), and `asDuration` converts only pure-time spans, refusing calendar
+units rather than guessing. Diffs go the other way with `until:` — a calendar
+Span (`'2y 2mo 3d'`) on `Date` and `DateTime`, where subtraction answers an
+absolute `Duration`. Civil and zone-aware meet through `date.atTime:zone:` /
+`date.inZone:` (→ DateTime) and `DateTime#date` / `#time` (→ civil).
+
 ```quoin
 (Duration.minutes:2) + (Duration.seconds:30)    "* -> 2m 30s
 (Timestamp.parse:'2026-07-09T12:00:00Z').inZone:(TimeZone.of:'Asia/Tokyo')
 "* -> 2026-07-09T21:00:00+09:00[Asia/Tokyo]
+(Date.year:2024 month:1 day:31) + (Span.months:1)      "* -> 2024-02-29
+(Date.parse:'2024-01-15').until:(Date.parse:'2026-03-18')    "* -> 2y 2mo 3d
+((Time.hour:23 minute:30) + (Duration.hours:1)).s      "* -> '00:30:00'
 ```
 
 ### Data formats

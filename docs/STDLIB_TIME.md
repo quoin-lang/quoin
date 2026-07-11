@@ -88,9 +88,29 @@ Three native value types (`src/runtime/{time_zone,timestamp,date_time}.rs`):
   jiff `Span` — end-of-month clamping and DST-correct "+1 day" (counts guarded against jiff's `Span`
   range so an absurd value errors rather than panicking). Tests: `qnlib/tests/30-datetime.qn`.
 
-**Deferred to its own TODO item:** civil `Date`/`Time` types, and a first-class `Span`/`Period`
-value type (ISO 8601 duration parsing like `P1Y2M`, mixed-unit arithmetic, calendar *diffs*). The
-`plus…`/`minus…` methods cover the common calendar-arithmetic case without that surface.
+**Phase 3 (shipped 2026-07-11):** the civil types and the first-class span.
+
+- **`Date`** (jiff `civil::Date`, `src/runtime/civil.rs`) — calendar date, no time, no zone:
+  `year:month:day:` (nonexistent dates → ValueError, never normalized), `parse:` (ISO), `today` /
+  `todayIn:`; components (`year`/`month`/`day`/`weekday`/`dayOfYear`/`daysInMonth`/`leapYear?`);
+  `± Span` (end-of-month clamped), `until:` → calendar `Span` (largest unit years), `<:`/`==:`.
+  No `plusDays:` family — `+ Span.days:n` is the idiom now that Span exists.
+- **`Time`** (jiff `civil::Time`) — wall-clock time of day: `hour:minute:` /
+  `hour:minute:second:` / `parse:` / `midnight`; components; `± Duration` **wraps around
+  midnight** (a zoneless clock); `until:` → signed `Duration` read within one day (nothing wraps).
+- **`Span`** (jiff `Span`, `src/runtime/span.rs`) — mixed-unit calendar-aware duration:
+  `parse:` accepts ISO 8601 (`P1Y2M`) *and* the friendly form (`1y 2mo`); single-unit
+  constructors; `+:`/`-:` combine **field-wise** (units never convert — `1h + 60m` stays
+  `1h 60m`; per-unit range overflow → ArithmeticError via jiff's `try_*` setters); equality is
+  **fieldwise** (`fieldwise()` — jiff has no natural Span equality) and there is no `<:`;
+  `asDuration` converts pure-time spans and refuses calendar units (ValueError).
+- **Bridges:** `DateTime ± Span` (the mixed-unit general form of `plus…`/`minus…`, which stays),
+  `DateTime#until:` → calendar Span (`ZonedDifference`, largest Year), `DateTime#date`/`#time`;
+  `Date#atTime:zone:` / `Date#inZone:` → DateTime (DST gaps resolve per jiff's compatible rule).
+
+Tests: `qnlib/tests/68-civil-time.qn` (clamping, leap years, wrap-around, fieldwise equality,
+the DST-gap resolution). Deferred from this phase: strftime-style formatting, week-of-year /
+quarter accessors, `Date` range iteration (`d1..d2`) — recorded in QUOIN_TODO.
 
 ---
 

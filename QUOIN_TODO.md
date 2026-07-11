@@ -547,12 +547,22 @@ deferred `Mirror` in `## REPL`.
 - [ ] **Logging** — leveled logger (`debug`/`info`/`warn`/`error`), formatting, pluggable sinks,
   defaulting to `[IO]Stderr`.
 
-**Time** — Phases 1+2 shipped (`docs/STDLIB_TIME.md`); the civil-types residual remains.
+**Time** — Phases 1+2+3 shipped (`docs/STDLIB_TIME.md`).
 - [x] **DateTime** — zone-aware instants, RFC 3339, components, arithmetic (`jiff`).
 - [x] **Duration & monotonic clock** — `Duration` value type + `Instant.now`/elapsed.
-- [ ] **Civil `Date`/`Time` + first-class `Span`/`Period`** — ISO-8601 duration parsing
-  (`P1Y2M…`), mixed-unit arithmetic, calendar diffs (the `plus…`/`minus…` methods cover the
-  common case today; see `docs/STDLIB_TIME.md` deferred).
+- [x] **Civil `Date`/`Time` + first-class `Span`** — `Date` (calendar date, no zone;
+  nonexistent dates refuse; `± Span` end-of-month clamped; `until:` → calendar Span) +
+  `Time` (wall-clock; `± Duration` WRAPS around midnight; `until:` → signed Duration) +
+  `Span` (parses ISO `P1Y2M` and friendly `1y 2mo`; `+:`/`-:` FIELD-WISE, units never
+  convert; FIELDWISE `==:`, no `<:`; `asDuration` refuses calendar units) + the DateTime
+  bridges (`± Span`, `until:`, `date`/`time`, `Date#atTime:zone:`/`inZone:`).
+  `src/runtime/civil.rs` + `span.rs`; tests `qnlib/tests/68-civil-time.qn`; book §44;
+  full as-built spec in `docs/STDLIB_TIME.md` Phase 3. Named `Span` (jiff's term), not
+  `Period`.
+  - [ ] Deferred from v1: strftime-style custom parse/format (`format:`/`parseFormat:`),
+    week-of-year / quarter accessors, `Date` range iteration (`d1..d2` riding the range
+    protocol), `Span` rounding/normalization (`round:`/`total:` — needs a relative-date
+    anchor design), and `DateTime#nearest:`-style snapping.
 
 **Crypto & hashing**
 - [x] ⭐ **Digests** — `[Crypto]Digest` class methods `sha256:`/`sha512:`/`sha1:`/`md5:`/`blake3:`
