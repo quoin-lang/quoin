@@ -225,6 +225,9 @@ pub struct AotEntry {
     /// The compiled template's id (the registry key), so the dispatch arm can
     /// tombstone a mispredicting speculation.
     pub template_id: u32,
+    /// The candidate's selector (`block@<tid>` for block templates) — the
+    /// handle `VM.aotCompiled` and the tier-shape pins identify entries by.
+    pub selector: String,
     /// Speculated entry kind preconditions (S1): checked by the dispatch arm
     /// BEFORE `invoke` — a mismatching arg Bails to the interpreted body.
     /// Empty for classic annotated entries.
@@ -772,6 +775,18 @@ pub fn record_refusal(selector: &str, kind: RefusalKind, why: &str) {
 }
 
 /// A deduplicated snapshot of the refusal/skip log (see [`REFUSAL_LOG`]).
+/// The currently-registered compiled entries as `(selector, role)` — the
+/// positive mirror of `refusal_snapshot`, behind `VM.aotCompiled`. Reflects
+/// LIVE state: a tombstoned entry drops out, exactly as it stopped being
+/// dispatched to.
+pub fn compiled_snapshot() -> Vec<(String, AotRole)> {
+    let reg = registry().read().unwrap();
+    let mut out: Vec<(String, AotRole)> =
+        reg.values().map(|e| (e.selector.clone(), e.role)).collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 pub fn refusal_snapshot() -> Vec<RefusalRecord> {
     let log = REFUSAL_LOG.lock().unwrap();
     let mut seen = HashSet::new();

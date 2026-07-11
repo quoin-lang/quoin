@@ -701,6 +701,7 @@ fn compile_group(
                 needs_list_self,
                 role: m.role,
                 template_id: tid,
+                selector: m.selector.clone(),
                 param_preconditions: m.spec_preconditions.clone().into_boxed_slice(),
                 spec_bails: std::sync::atomic::AtomicU32::new(0),
                 direct_self,

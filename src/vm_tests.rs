@@ -2230,3 +2230,87 @@ fn value_layout_facts() {
     assert_eq!(crate::codegen::helpers_kind_int(), 0);
     assert_eq!(crate::codegen::helpers_kind_nil(), 3);
 }
+
+/// Tier-shape pins (the AOT gallery's Rust-side twins — see
+/// qnlib/tests/65-aot-gallery.qn): block-argument speculation compiles a
+/// monomorphic-scalar block's param into a guarded lane, the identity block
+/// deliberately does NOT speculate (the lane costs more than it saves with
+/// nothing to devirt — measured +12%), and the interpreted fused-`each:`
+/// guard routes to the send path exactly for speculated templates.
+#[test]
+fn block_speculation_tier_shapes() {
+    use crate::codegen::{self, AotKind, AotRole};
+
+    let mut arena =
+        Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, VmOptions::default()));
+    arena.mutate_root(|_mc, vm| {
+        let src = "var f = { |x| (x * 3) + 1 };\nvar g = { |x| x };\n";
+        let ast = crate::parser::try_parse_quoin_string_named(src, "<tier-pin>").expect("parse");
+        let crate::parser::NodeValue::Program(p) = &ast.value else {
+            panic!("not a program");
+        };
+        let mut compiler = crate::compiler::Compiler::new()
+            .with_template_ids()
+            .with_aot();
+        compiler.compile_program(p).expect("compile");
+        let cands = compiler.take_aot_candidates();
+        let mut tids: Vec<u32> = cands
+            .iter()
+            .filter(|c| c.role == AotRole::BlockTemplate)
+            .map(|c| c.block.template_id.unwrap())
+            .collect();
+        tids.sort_unstable();
+        let [arith_tid, ident_tid] = tids[..] else {
+            panic!("expected exactly the two block candidates, got {tids:?}");
+        };
+        vm.register_aot_candidates(cands);
+
+        // Warm both blocks with Integer arguments well past any threshold.
+        let warm = |vm: &mut VmState, tid| {
+            let mut entry = None;
+            for i in 0..64 {
+                entry = codegen::block_entry_for(vm, tid, Value::Int(i));
+                if entry.is_some() {
+                    break;
+                }
+            }
+            entry.expect("a warm block template compiles")
+        };
+        let arith = warm(vm, arith_tid);
+        let ident = warm(vm, ident_tid);
+
+        // R2: the arithmetic block speculated its argument into an Int lane.
+        assert_eq!(
+            arith.param_preconditions.first().copied().flatten(),
+            Some(AotKind::Int),
+            "a monomorphic-Int block with scalar-op sends must speculate its param"
+        );
+        // R3: the identity block must NOT speculate (nothing to devirt).
+        assert!(
+            ident.param_preconditions.iter().all(|p| p.is_none()),
+            "an identity block must stay a slot-resident Obj param"
+        );
+
+        // R4b: the fused-site routing truth table — send path exactly for
+        // the SPECULATED template; the identity block stays spliced; an
+        // unknown/refused template stays spliced.
+        assert!(codegen::fused_site_prefers_send(
+            vm,
+            arith_tid,
+            5,
+            Some(Value::Int(1))
+        ));
+        assert!(!codegen::fused_site_prefers_send(
+            vm,
+            ident_tid,
+            5,
+            Some(Value::Int(1))
+        ));
+        assert!(!codegen::fused_site_prefers_send(
+            vm,
+            u32::MAX,
+            5,
+            Some(Value::Int(1))
+        ));
+    });
+}

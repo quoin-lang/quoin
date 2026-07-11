@@ -1,0 +1,91 @@
+"* The AOT tier-shape gallery: pins that representative code LANDS in the
+"* tier it is supposed to, asserting compiled SHAPE, never timings (timing
+"* assertions flake; shapes are deterministic). The philosophy mirror of
+"* qnlib/warnings.qn for the checker: when tiering changes on purpose, the
+"* pin changes in the same commit — that friction is the feature.
+"*
+"* Why this exists: tier fallout is silent. Untyped fib ran 8x slower for
+"* ~10 merges when a correctness fix evicted it from the scalar-pure set
+"* (PR #77 era, repaired alongside PR #86); `Iterate#detect:` never even
+"* became an AOT candidate until VM.aotRefusals was queried by hand. The
+"* Rust-side twins (entry ret shapes, block speculation preconditions,
+"* fused-site routing) live in src/codegen/tests.rs and src/vm_tests.rs.
+
+var aotOn = (VM.stats.at:'aot').at:'enabled';
+
+(TestSuite.new:{ var name = 'AotTierGallery' }).add:{
+    aotOn.else:{ .skip:'AOT disabled (QN_AOT=0) — no tiers to pin' };
+
+    "* Every selector here is stdlib surface real programs lean on. None may
+    "* EVER be refused at the CANDIDACY prechecks — a precheck refusal means
+    "* some gate silently swallowed the member before translation even looked
+    "* at it (the detect: cliff was exactly this: its `^T?` return ended
+    "* candidacy for months with nothing failing). Translation-time refusals
+    "* are excluded deliberately: under degraded profiles (QN_AOT_WARM=1
+    "* promotes on the first call) the translator legitimately refuses what
+    "* a ripe profile compiles — the compiled-presence pin below covers the
+    "* default path.
+    .test:pinnedStdlibSelectorsAreNeverRefused -> {
+        var pinned = #<
+            'each:'
+            'collect:'
+            'select:'
+            'reject:'
+            'sum'
+            'sum:'
+            'count:'
+            'any?:'
+            'all?:'
+            'none?:'
+            'detect:'
+            'reduce:into:'
+            'at:'
+            'at:put:'
+            'add:'
+            'contains?:'
+        >;
+        var offenders = #();
+        VM.aotRefusals.each:{ |r|
+            ((pinned.contains?:(r.at:'selector')) && (((r.at:'kind').index:'precheck') == 0)).if:{
+                offenders.add:((r.at:'selector') + ' [' + (r.at:'kind') + ': ' + (r.at:'reason') + ']')
+            }
+        };
+        .is:{ offenders } equalTo:#()
+    };
+
+    "* The hot Iterate bodies must actually COMPILE — candidacy alone is not
+    "* the tier. The suite has hammered these long before this file loads
+    "* (and this test warms them again), so absence here means promotion or
+    "* eager compilation regressed, not that they are cold.
+    .test:hotIterateFamilyIsCompiled -> {
+        var data = #();
+        var i = 0;
+        { i < 100 }.whileDo:{ data.add:i; i = i + 1 };
+        var r = 0;
+        { r < 80 }.whileDo:{
+            var doubled = data.collect:{ |x| x * 2 };
+            var evens = data.select:{ |x| (x % 2) == 0 };
+            r = r + doubled.count + evens.count - 150;
+            r = r + (data.sum) - 4950;
+            r = r + (data.count:{ |x| x > 50 }) - 49;
+            (data.any?:{ |x| x > 98 }).if:{ r = r + 1 }
+        };
+        .is:{ r } equalTo:80;
+
+        var compiled = #<>;
+        VM.aotCompiled.each:{ |e| compiled.add:(e.at:'selector') };
+        #('each:' 'collect:' 'select:' 'sum' 'sum:' 'count:' 'any?:').each:{ |sel|
+            (compiled.contains?:sel).else:{ ('not compiled: ' + sel).throw }
+        };
+        .isTrue:{ compiled.contains?:'collect:' }
+    };
+
+    "* Block templates must ride the compiled tier too: after the hot loops
+    "* above, at least one block entry is registered (the literals fed to
+    "* collect:/select: warm within their first elements).
+    .test:hotBlockTemplatesAreCompiled -> {
+        var blocks = 0;
+        VM.aotCompiled.each:{ |e| ((e.at:'role') == 'block').if:{ blocks = blocks + 1 } };
+        .isTrue:{ blocks > 0 }
+    }
+}
