@@ -43,14 +43,18 @@ anything; an Array holds one dtype, packed.
 starts a *comment* in Quoin); position-based operations count characters, not
 bytes. **Regex** is the type of `#/pattern/` literals (Rust regex syntax): test
 with the match operator `~`, split with `split:`, substitute via
-`replace:with:`. **Symbol** is an interned identifier — `#name`, or `#'quoted
+`replace:with:`, and capture with `match:` — it answers a **Match** (`nil` on a
+miss) whose groups read by index or name via `at:`, list out via `captures`,
+and destructure into a block via `bind:` (§14). **Symbol** is an interned
+identifier — `#name`, or `#'quoted
 form'` — compared by identity, so symbol comparison is a cheap pointer check;
 selectors and other names in the reflective API are symbols, a distinct type
 from String. Formatting and interpolation get their own section (§45).
 
 ```quoin
-'quoin'.upper            "* -> QUOIN
-#/[0-9]+/ ~ 'abc 123'    "* -> true
+'quoin'.upper                       "* -> QUOIN
+#/[0-9]+/ ~ 'abc 123'               "* -> true
+(#/[0-9]+/.match:'abc 123').s       "* -> '123'
 ```
 
 ### Numbers

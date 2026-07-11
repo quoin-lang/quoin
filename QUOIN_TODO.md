@@ -168,11 +168,19 @@ This document outlines the language features, compiler updates, and VM modificat
   file just builds its suite — no return-value plumbing or explicit registration. `main.qn` loads the
   suites with `use std:tests/*` and runs the registry; the per-file loader `Runtime.evalFile:` was
   removed (its only caller). A deeper rewrite of the assertion/Test/Suite class graph wasn't needed.
-- [ ] List, Regex and Map #bind:{}
+- [x] List, Regex and Map #bind:{}
   - [x] List#bind:{}
-  - [ ] Regex#bind:{}
-  - [ ] Map#bind:{}
-  - See qnlib/presentation/20-method-destructuring.qn
+  - [x] Regex#bind:{} — as `Regex#match:` → new native `Match` class (`nil` on a miss;
+    `s`/`at:`/`captures`), whose `bind:` binds a parameter named after a named capture
+    group to that group and any other parameter positionally (param i → group i+1);
+    a non-participating group binds nil. `src/runtime/regex.rs`.
+  - [x] Map#bind:{} — the lookup runs BACKWARD, parameter → key (a Map key need not be
+    an identifier, but every identifier is a candidate key): the param's name as a
+    String key first, then as a Symbol key; an absent key binds nil. `src/runtime/map.rs`.
+  - Tests `qnlib/tests/66-bind.qn`; book §14 "Destructuring into blocks".
+  - See qnlib/presentation/20-method-destructuring.qn (all three examples now run —
+    its map literal needed quoting to `#{ 'a': 1 }`: bare-identifier and symbol keys
+    don't parse in map literals, only via `at:put:`).
 - [ ] Think about a better destructuring protocol than assuming `#at:` exists.
   - use an Iterator?
 - [x] Confirm `%'string%{eval}' is working.

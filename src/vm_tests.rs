@@ -11,7 +11,7 @@ use crate::runtime::list::build_list_class;
 use crate::runtime::map::{build_key_value_pair_class, build_map_class};
 use crate::runtime::nil::build_nil_class;
 use crate::runtime::object::build_object_class;
-use crate::runtime::regex::build_regex_class;
+use crate::runtime::regex::{build_match_class, build_regex_class};
 use crate::runtime::string::build_string_class;
 use crate::value::{NativeClassBuilder, OpaqueState};
 use gc_arena::{Arena, Rootable};
@@ -136,6 +136,7 @@ where
         vm.register_native_class(mc, build_map_class());
         vm.register_native_class(mc, build_key_value_pair_class());
         vm.register_native_class(mc, build_regex_class());
+        vm.register_native_class(mc, build_match_class());
 
         for t in ["Method"] {
             vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));

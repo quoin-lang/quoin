@@ -429,6 +429,39 @@ pub fn build_map_class() -> NativeClassBuilder {
              #{'a': 1 'b': 2}.at:'a'     \"* -> 1\n\
              ```",
         )
+        .instance_method("bind:", |vm, mc, receiver, args| {
+            let block = crate::arg!(args, Block, 0);
+            // The lookup runs backward, parameter → key (a Map key need not be
+            // an identifier, but every identifier is a candidate key): the
+            // param's name as a String key first, as a Symbol key second.
+            let names: Vec<String> = block
+                .template
+                .param_syms
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect();
+            let mut block_args = Vec::with_capacity(names.len());
+            for name in names {
+                let str_key = vm.new_string(mc, name.clone());
+                let hit = match map_get_any(vm, mc, receiver, str_key)? {
+                    Some(v) => Some(v),
+                    None => {
+                        let sym_key = vm.new_symbol(mc, name);
+                        map_get_any(vm, mc, receiver, sym_key)?
+                    }
+                };
+                block_args.push(hit.unwrap_or_else(|| vm.new_nil(mc)));
+            }
+            vm.execute_block(mc, block, block_args, None)
+        })
+        .doc(
+            "Destructure into a block: each parameter is looked up as a key — the \
+             parameter's name as a String key first, then as a Symbol key — and an absent \
+             key binds nil. Answers the block's value.\n\n\
+             ```\n\
+             #{'w': 3 'h': 4}.bind:{ |w h| w * h }     \"* -> 12\n\
+             ```",
+        )
         .instance_method("at:put:", |vm, mc, receiver, args| {
             map_put_any(vm, mc, receiver, args[0], args[1])?;
             Ok(receiver)

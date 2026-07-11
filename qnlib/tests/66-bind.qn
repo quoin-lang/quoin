@@ -1,0 +1,53 @@
+"* Method destructuring — the `bind:` family: a block's parameters bound from a
+"* collection. List#bind: (positional, in 41-list.qn) got siblings: Map#bind: looks
+"* each parameter NAME up as a key (backward, parameter -> key — a Map key need not
+"* be an identifier, but every identifier is a candidate key), and Regex grew
+"* match: -> Match, whose bind: feeds capture groups positionally or by name.
+(TestSuite.new:{ var name = 'Bind' }).add:{
+    .test:
+    mapBind -> {
+        .is:{ #{ 'w': 3 'h': 4 }.bind:{ |w h| w * h } } equalTo:12;
+        "* An absent key binds nil.
+        .is:{ #{ 'a': 1 }.bind:{ |a missing| #(a missing) } } equalTo:#(1 nil);
+        "* The parameter's name as a String key first, as a Symbol key second.
+        .is:{ (#{ 'k': 'str' }.at:#k put:'sym').bind:{ |k| k } } equalTo:'str';
+        .is:{ (#{}.at:#k put:'sym').bind:{ |k| k } } equalTo:'sym';
+        "* Non-identifier keys are simply unreachable from bind: — never an error.
+        .is:{ #{ 1: 'one' }.bind:{ |one| one } } equalTo:nil;
+    };
+
+    .test:
+    regexMatch -> {
+        .is:{ (#/(\d+)-(\d+)/.match:'10-20').s } equalTo:'10-20';
+        "* No match -> nil (the nil-guard is the miss test).
+        .is:{ #/x/.match:'abc' } equalTo:nil;
+        "* at: by group index (1-based; 0 is the whole match), String name, or Symbol.
+        var m = #/(?<a>\w{3})(?<b>\w{3})/.match:'foobar!';
+        .is:{ m.at:0 } equalTo:'foobar';
+        .is:{ m.at:2 } equalTo:'bar';
+        .is:{ m.at:'a' } equalTo:'foo';
+        .is:{ m.at:#b } equalTo:'bar';
+        "* Out-of-range, unknown name -> nil; a non-key type is a TypeError.
+        .is:{ m.at:9 } equalTo:nil;
+        .is:{ m.at:'zed' } equalTo:nil;
+        .does:{ m.at:3.5 } throw:TypeError;
+        .is:{ m.captures } equalTo:#( 'foo' 'bar' );
+        "* Match is constructed through Regex match:, never new.
+        .does:{ Match.new } throw:ClassError;
+    };
+
+    .test:
+    matchBind -> {
+        "* Positional: parameter i -> capture group i+1.
+        .is:{
+            (#/(\d+)-(\d+)/.match:'10-20').bind:{ |lo hi| hi.to_integer - lo.to_integer }
+        } equalTo:10;
+        "* Named: a parameter named after a group binds that group, wherever it sits.
+        var m = #/(?<y>\d{4})-(?<m>\d{2})/.match:'2026-07';
+        .is:{ m.bind:{ |m y| %'%{m}/%{y}' } } equalTo:'07/2026';
+        "* A group that did not participate binds nil...
+        .is:{ (#/(?<a>x)|(?<b>y)/.match:'y').bind:{ |a b| #(a b) } } equalTo:#(nil 'y');
+        "* ...and so does a parameter beyond the group count.
+        .is:{ (#/(x)/.match:'x').bind:{ |a b| #(a b) } } equalTo:#( 'x' nil );
+    };
+}

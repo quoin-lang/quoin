@@ -39,6 +39,39 @@ The same `~` operator works standalone, with the matcher on the left:
 > blocks all "match" — not just equal values. Order your clauses most-specific
 > first, since the first match wins.
 
+### Destructuring into blocks — the `bind:` family
+
+> **Rules**
+> - `list.bind:{ |a b| … }` calls the block with the list's elements
+>   **positionally** — a two-parameter block gets the first two elements, a
+>   missing element binds `nil`, extras are ignored. Answers the block's value.
+> - `map.bind:{ |w h| … }` binds each parameter by **name**. The lookup runs
+>   backward, parameter → key — the parameter's name as a String key first, then
+>   as a Symbol key; an absent key binds `nil`. (A Map key need not be an
+>   identifier, but every identifier is a candidate key — so the parameters
+>   drive the lookup, never the other way around.)
+> - `regex.match:'…'` answers a **Match**, or `nil` when the pattern misses —
+>   the nil-guard is the miss test. `match.bind:{ … }` binds a parameter named
+>   after a **named capture group** (`(?<name>…)`) to that group and any other
+>   parameter **positionally** (first parameter → group 1); a group that did not
+>   participate binds `nil`.
+> - A Match also reads directly: `s` is the whole matched text, `at:` one group
+>   by index (1-based; 0 is the whole match) or by name (String or Symbol), and
+>   `captures` lists the groups in order.
+
+```quoin
+#(3 4).bind:{ |w h| w * h }                       "* -> 12
+#{'w': 5 'h': 4}.bind:{ |w h| w * h }             "* -> 20
+('1/2/3'.split:'/').bind:{ |a b c| a + c }        "* -> '13'
+
+var m = #/(?<user>\w+)@(?<host>[\w.]+)/.match:'ada@example.org'
+m.bind:{ |host user| %'%{host} gets mail for %{user}' }   "* -> 'example.org gets mail for ada'
+m.at:'user';                                      "* -> 'ada'
+m.at:2;                                           "* -> 'example.org'
+(#/(\d+)-(\d+)/.match:'10-20').bind:{ |lo hi| hi.to_integer - lo.to_integer }   "* -> 10
+#/x/.match:'abc'                                  "* -> nil
+```
+
 ---
 
 ## 15. Errors & stack traces

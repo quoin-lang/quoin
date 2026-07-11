@@ -153,6 +153,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, map::build_map_class());
     vm.register_native_class(mc, map::build_key_value_pair_class());
     vm.register_native_class(mc, regex::build_regex_class());
+    vm.register_native_class(mc, regex::build_match_class());
     vm.register_native_class(mc, fiber_class::build_fiber_class());
     vm.register_native_class(mc, extension::build_extension_class());
 }
