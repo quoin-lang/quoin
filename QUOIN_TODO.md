@@ -238,7 +238,19 @@ both under `## Misc`.)
   `repeatedKeywordSelectorIsACompileError` (`qnlib/tests/06-methods.qn`). Done as the foundation for
   type-based multi-catch (`{x}.catch:{|e:IoError| …} catch:{|e:Error| …} finally:{…}`); the native
   `catch+:`/`catch+:finally:` handlers + break-on-uncaught are the follow-on (see exception-handling).
-- [ ] Implement `...` / `???` / `!!!`.
+- [x] Implement `...` / `???` / `!!!`. DONE (feat/placeholder-statements): all
+  three are STATEMENTS only (grammar `stmt` alternatives; expression position is
+  a parse error). `...` throws a typed `NotImplementedError`, `!!!` a typed
+  `UnreachableError` (both new `Error` subclasses in bootstrap.qn — catchable by
+  type, ordinary traces); `???` prints an editor-jumpable
+  `file:line:col: warning: reached \`???\` placeholder` line to stderr (location
+  baked at compile time) and CONTINUES, statement value nil. Each desugars to
+  plain sends, so DAP capture and AOT outcalls ride along. A logger backend for
+  `???` remains future work. Found+fixed while testing: the colorized error
+  Display re-parsed trace snippets with the PANICKING parser, crashing the whole
+  interactive REPL on ANY uncaught error with a qnlib frame (latent since the
+  embedded stdlib made those filenames unreadable; NO_COLOR masked it) — the
+  snippet highlighter now degrades to plain text.
 - [ ] **Full Unicode identifiers.** Today `IDENT_PREFIX`/`IDENT_REST` are ASCII-closed
   (`[a-zA-Z_][a-zA-Z0-9?_]*`); eventually identifiers should support full Unicode (UAX #31
   `XID_Start`/`XID_Continue` or similar). **Coupling to watch:** the compiler's alpha-renaming

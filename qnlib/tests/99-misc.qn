@@ -62,11 +62,14 @@
         .does:{ TestConst = 123 } throw:'Can\'t modify global constant [/]TestConst';
     };
 
+    "* The stopgap string-throws grew real semantics: typed errors for the
+    "* throwing pair, warn-and-continue for `???`. Full contract pinned in
+    "* 07-errors.qn placeholderStatements.
     .test:
     throw3 -> {
-        .does:{ !!! } throw:'!!!';
-        .does:{ ??? } throw:'???';
-        .does:{ ... } throw:'...';
+        .does:{ !!! } throw:UnreachableError;
+        .does:{ ... } throw:NotImplementedError;
+        .is:{ { ???; 'continued' }.value } equalTo:'continued';
     };
 
     .test:

@@ -69,6 +69,28 @@ index or a type mismatch becomes a catchable `TypeError`/`IndexError`, and sendi
 an unknown selector becomes a `MessageNotUnderstood` — each with a `message` you
 can read.
 
+### Placeholder statements
+
+Three statement-only markers hold a place for code that isn't there yet — the
+`todo!()` family of Quoin. They are **statements, not expressions** (`var x = ...`
+is a parse error):
+
+> - `...` — "not written yet": throws a typed `NotImplementedError`.
+> - `!!!` — "can NEVER execute": throws a typed `UnreachableError`. Reaching one
+>   is a logic error worth crashing over.
+> - `???` — "shouldn't get here, but keep going": prints a
+>   `file:line:col: warning:` line to stderr — with the placeholder's real source
+>   location — and execution continues (its statement value is `nil`).
+
+```quoin
+{ ... }.catch:{ |e:NotImplementedError| e.message }    "* -> not implemented
+{ !!! }.catch:{ |e:UnreachableError| e.message }       "* -> reached unreachable code
+```
+
+Both throwing forms are ordinary `Error` subclasses: a plain `catch:{ |e:Error| … }`
+catches them, traces point at the placeholder, and a test can pin one with
+`.does:{ ... } throw:NotImplementedError`.
+
 > **⚠ Gotcha — `throw` accepts any value; it types by its actual class.**
 > `42.throw` is caught by `catch:{ |e:Integer| … }` (a thrown value matches by its
 > class), but **not** by `catch:{ |e:Error| … }` — `42` isn't an `Error`. Throw

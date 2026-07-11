@@ -3073,20 +3073,54 @@ impl Compiler {
                 bytecode.push(Instruction::NewList(user_list.values.len()));
                 bytecode.push(Instruction::Send(Symbol::intern("newUserList:"), 1));
             }
+            // The placeholder statements (statement-position only, by grammar).
+            // Each desugars to ordinary sends, so traces, typed `catch:`, the
+            // DAP stderr capture, and AOT outcalls all just work.
             NodeValue::Dot3 => {
-                // TODO: For now, just throw the string.
-                bytecode.push(Instruction::Push(Constant::String("...".to_string())));
-                bytecode.push(Instruction::Send(Symbol::intern("throw"), 0));
-            }
-            NodeValue::Huh3 => {
-                // TODO: For now, just throw the string.
-                bytecode.push(Instruction::Push(Constant::String("???".to_string())));
-                bytecode.push(Instruction::Send(Symbol::intern("throw"), 0));
+                // `...` — "not written yet", the todo!() of Quoin: throws a
+                // typed NotImplementedError (bootstrap.qn).
+                bytecode.push(Instruction::LoadGlobal(NamespacedName::new(
+                    Vec::new(),
+                    "NotImplementedError".to_string(),
+                )));
+                bytecode.push(Instruction::Push(Constant::String(
+                    "not implemented".to_string(),
+                )));
+                bytecode.push(Instruction::Send(Symbol::intern("throw:"), 1));
             }
             NodeValue::Bang3 => {
-                // TODO: For now, just throw the string.
-                bytecode.push(Instruction::Push(Constant::String("!!!".to_string())));
-                bytecode.push(Instruction::Send(Symbol::intern("throw"), 0));
+                // `!!!` — "can NEVER execute": throws a typed UnreachableError.
+                bytecode.push(Instruction::LoadGlobal(NamespacedName::new(
+                    Vec::new(),
+                    "UnreachableError".to_string(),
+                )));
+                bytecode.push(Instruction::Push(Constant::String(
+                    "reached unreachable code".to_string(),
+                )));
+                bytecode.push(Instruction::Send(Symbol::intern("throw:"), 1));
+            }
+            NodeValue::Huh3 => {
+                // `???` — "shouldn't get here, but keep going": a soft warning
+                // on stderr, then nil (the statement's value). The location is
+                // baked at compile time in the checker's editor-jumpable
+                // `file:line:col: warning:` shape; a logger can take over
+                // later (QUOIN_TODO). `[IO]Stderr` is native-registered in
+                // every runner mode, so the desugar has no prelude dependency.
+                let msg = match &node.source_info {
+                    Some(s) => format!(
+                        "{}:{}:{}: warning: reached `???` placeholder",
+                        s.filename,
+                        s.line,
+                        s.column + 1
+                    ),
+                    None => "warning: reached `???` placeholder".to_string(),
+                };
+                bytecode.push(Instruction::LoadGlobal(NamespacedName::new(
+                    vec!["IO".to_string()],
+                    "Stderr".to_string(),
+                )));
+                bytecode.push(Instruction::Push(Constant::String(msg)));
+                bytecode.push(Instruction::Send(Symbol::intern("writeln:"), 1));
             }
             NodeValue::Unknown => {
                 return Err("Encountered Unknown NodeValue (ast_visitor bug)".to_string());

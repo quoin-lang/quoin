@@ -207,6 +207,28 @@
         .isTrue:{ ran };
     };
 
+    "* The placeholder statements: `...` throws a typed NotImplementedError
+    "* (the todo!() of Quoin), `!!!` throws a typed UnreachableError, and
+    "* `???` warns on stderr and CONTINUES — its statement value is nil, so
+    "* code after it still runs.
+    .test:
+    placeholderStatements -> {
+        .does:{ ... } throw:NotImplementedError;
+        .is:{ { ... }.catch:{ |e:NotImplementedError| e.message } } equalTo:'not implemented';
+        .does:{ !!! } throw:UnreachableError;
+        .is:{ { !!! }.catch:{ |e:UnreachableError| e.message } } equalTo:'reached unreachable code';
+        "* both are ordinary Error subclasses — a plain Error handler catches them.
+        .is:{ { ... }.catch:{ |e:Error| e.class.name } } equalTo:'NotImplementedError';
+        "* ??? does not throw: execution continues and the block's value is the
+        "* statement after it.
+        var after = false;
+        var v = { ???; after = true; 7 }.value;
+        .is:{ v } equalTo:7;
+        .isTrue:{ after };
+        "* as the FINAL statement, ???'s own value is nil.
+        .is:{ { ??? }.value } equalTo:nil;
+    };
+
     "* A thrown primitive types by its class (`42` is an Integer); a class handler that doesn't
     "* match falls through to the catch-all.
     .test:

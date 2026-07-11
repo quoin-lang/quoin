@@ -183,6 +183,21 @@ Error <- FiberError <- {}
 "* `abstract!` one, and similar hierarchy errors (BUGS.md Finding 12).
 Error <- ClassError <- {}
 
+"* Raised by the `...` placeholder statement: the code path exists but its body
+"* hasn't been written yet (the `todo!()` of Quoin).
+"*
+"* ```
+"* { ... }.catch:{ |e:NotImplementedError| e.message }    "* -> not implemented
+"* ```
+Error <- NotImplementedError <- {}
+"* Raised by the `!!!` placeholder statement: a code path the author asserts can
+"* NEVER execute. Reaching it is a logic error worth crashing over.
+"*
+"* ```
+"* { !!! }.catch:{ |e:UnreachableError| e.message }    "* -> reached unreachable code
+"* ```
+Error <- UnreachableError <- {}
+
 "* A recursion the VM refused before it could overflow the machine stack: a block that
 "* re-enters itself (an `each:` body re-iterating its own receiver, a self-nesting
 "* `catch:`), or a custom `==:`/`hash`/comparator hook re-entering a native operation.
