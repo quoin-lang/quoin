@@ -588,12 +588,16 @@ deferred `Mirror` in `## REPL`.
 - [ ] **tar** (`tar`) and **zip** (`zip`) — archive read/write.
 
 **System & process**
-- [ ] ⭐ **Environment** — read/iterate/set process env vars (`[OS]Env`).
-- [ ] ⭐ **Path** — `join:`/`dirname`/`basename`/`extension`/`normalize`/`isAbsolute?` (string-level
-  path manipulation, separate from `[IO]File`).
+- [x] ⭐ **Environment** — `[OS]Env` read/iterate shipped (`src/runtime/os.rs`, tests
+  `58-os-env.qn`). *(Box was stale — verified 2026-07-11.)* SET is deliberately absent, with the
+  rationale recorded in the module doc: edition-2024 `set_var` is unsafe under this VM's worker
+  threads, and the real use case (configuring a child) belongs to the subprocess item below.
+- [x] ⭐ **Path** — `[OS]Path` shipped (`src/runtime/os.rs`, tests `57-os-path.qn`). *(Box was
+  stale — verified 2026-07-11.)*
 - [ ] **Process / subprocess** — spawn a command, capture stdout/stderr/exit; async-aware (parks on
   the scheduler like socket I/O).
-- [ ] ⭐ **`[IO]Stdin`** — line/byte reading. Also unblocks P3 "REPL in Quoin" (see `## REPL`).
+- [x] ⭐ **`[IO]Stdin`** — shipped (`src/runtime/io.rs` + `qnlib/core/06-io.qn`, tests
+  `59-io-stdin.qn`). *(Box was stale — verified 2026-07-11.)*
 - [ ] **CLI argument parsing** — options/flags/positionals/subcommands on top of
   `VmOptions.arguments`.
 
