@@ -1,0 +1,112 @@
+"* Leveled logging over a single replaceable sink. `Log.debug:` / `info:` / `warn:` /
+"* `error:` take a String, an ANSI value, or a Block producing one — below the level
+"* threshold the block is NEVER evaluated (and no location is captured), so a
+"* `Log.debug:{ hugeState.pp }` costs a comparison and nothing else. Every emitted
+"* entry carries its caller's source location ('file:line:col', via
+"* `Runtime.callerLocation:`), passed to the sink as a separate argument so sinks
+"* stay content-independent.
+
+"* The mutable state cell (`Log`'s globals are constants; the Map's entries are not):
+"* the threshold Symbol and the sink Block (nil = the default stderr sink).
+[Log]State <- #{ 'level': #info 'sink': nil }
+
+Log <- {
+    .meta <-- {
+        "* The rank of a level Symbol — `#debug` < `#info` < `#warn` < `#error`.
+        "* An unknown level is a ValueError, so a typo can't silently disable logging.
+        rankOf: -> { |level:Symbol ^Integer|
+            var rank = #{ 'debug': 0 'info': 1 'warn': 2 'error': 3 }.at:level.s;
+            rank.defined?.else:{ ValueError.throw:('unknown log level #%' % level.s) };
+            ^rank
+        }
+
+        "* The current threshold: entries below it are dropped without evaluating
+        "* their message block. Defaults to `#info` (debug is opt-in).
+        level -> { ^[Log]State.at:'level' }
+
+        "* Set the threshold.
+        "*
+        "* ```
+        "* Log.level:#error; Log.level    "* -> #error
+        "* Log.level:#info
+        "* ```
+        level: -> { |level:Symbol| .rankOf:level; [Log]State.at:'level' put:level }
+
+        "* Run a block with the threshold temporarily changed, restoring the previous
+        "* level afterward even when the block throws. Answers the block's value.
+        "*
+        "* ```
+        "* Log.level:#debug in:{ Log.level }    "* -> #debug
+        "* ```
+        level:in: -> { |level:Symbol block:Block|
+            var previous = .level;
+            .level:level;
+            ^{ block.value }.finally:{ .level:previous }
+        }
+
+        "* The active sink: a Block receiving `|level message location|` per entry —
+        "* `level` the Symbol, `message` the (evaluated) String or ANSI value, and
+        "* `location` the caller's 'file:line:col' String (or nil).
+        sink -> {
+            var sink = [Log]State.at:'sink';
+            ^sink.defined?.if:{ sink } else:{ .stderrSink }
+        }
+
+        "* Replace the sink. A custom sink can delegate to `Log.stderrSink` to keep
+        "* the default rendering alongside its own behavior.
+        sink: -> { |block:Block| [Log]State.at:'sink' put:block }
+
+        "* Restore the default sink.
+        resetSink -> { [Log]State.at:'sink' put:nil }
+
+        "* The default sink: one line to [IO]Stderr — dim `HH:MM:SS`, the colored
+        "* level label, the dim caller location, then the message. Rendered as ANSI
+        "* markup, so it colors on a terminal and strips everywhere else.
+        stderrSink -> {
+            ^{ |level message location|
+                var time = (DateTime.now.time.s.splitString:'.').at:0;
+                var color = #{
+                    'debug': '#808080' 'info': '#00bfff' 'warn': '#ffcc00' 'error': '#ff6961'
+                }.at:level.s;
+                var label = level.s.upper.padRight:5;
+                var line = location.defined?
+                    .if:{ #ANSI'[dim]%1[/] [%2 bold]%3[/] [dim]%4:[/] %5' % #( time color label location message ) }
+                     else:{ #ANSI'[dim]%1[/] [%2 bold]%3[/] %4' % #( time color label message ) };
+                [IO]Stderr.writeln:line
+            }
+        }
+
+        "* The four emitting methods. `messageOrBlock` may be a String, an ANSI
+        "* value, or a Block producing one (evaluated only past the threshold).
+        "*
+        "* ```
+        "* Log.level:#error in:{ Log.info:{ !!! } }    "* -> nil
+        "* ```
+        debug: -> { |messageOrBlock| .emit:#debug message:messageOrBlock }
+
+        "* See `debug:`.
+        info: -> { |messageOrBlock| .emit:#info message:messageOrBlock }
+
+        "* See `debug:`.
+        warn: -> { |messageOrBlock| .emit:#warn message:messageOrBlock }
+
+        "* See `debug:`.
+        error: -> { |messageOrBlock| .emit:#error message:messageOrBlock }
+
+        "* The shared emit path. Level check FIRST — a filtered entry evaluates
+        "* nothing and captures nothing.
+        emit:message: -> { |level messageOrBlock|
+            ((.rankOf:level) < (.rankOf:(.level))).if:{ ^^nil };
+            var message = (messageOrBlock.can?:Block)
+                .if:{ messageOrBlock.value }
+                 else:{ messageOrBlock };
+            "* Skip-by-filename, not a fixed depth: a combinator between the caller
+            "* and Log (an `each:` body, `level:in:`) then reports the caller's own
+            "* site, and an AOT-compiled Log frame (absent from the interpreter's
+            "* frame walk) can't shift the answer.
+            var location = Runtime.callerLocationSkipping:'core/13-log.qn';
+            .sink.valueWithArgs:#( level message location );
+            ^nil
+        }
+    }
+}

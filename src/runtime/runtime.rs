@@ -87,6 +87,88 @@ pub fn build_runtime_class() -> NativeClassBuilder {
              Runtime.eval:'x * 2' bindings:#{ 'x': 21 }    \"* -> 42\n\
              ```",
         )
+        .typed_class_method(
+            "callerLocation:",
+            &["Integer"],
+            |vm, mc, _receiver, args| {
+                // The current statement's location n frames up the interpreter
+                // stack — RAW frames, blocks included: n = 0 is the frame that
+                // sent callerLocation:, n = 1 its caller, and so on. Raw indexing
+                // is deliberate: a caller that must skip its own plumbing (Log
+                // does) walks outward comparing filenames, which stays correct
+                // when a frame is missing entirely (an AOT-compiled method pushes
+                // no interpreter frame) — a fixed "skip k frames" contract would
+                // silently shift. Answers 'file:line:col' (diagnostic convention:
+                // 1-based column), or nil past the top / no source info.
+                let n = arg!(args, Int, 0);
+                let Ok(n) = usize::try_from(n) else {
+                    return Err(QuoinError::ValueError(format!(
+                        "callerLocation: needs a frame count >= 0, got {n}"
+                    )));
+                };
+                let loc = vm.frames.iter().rev().nth(n).and_then(|f| {
+                    let frame_ip = f.ip.saturating_sub(1);
+                    f.block
+                        .template
+                        .source_map
+                        .get(frame_ip)
+                        .and_then(|opt| opt.as_ref())
+                        .or(f.block.template.source_info.as_ref())
+                        .map(|si| format!("{}:{}:{}", si.filename, si.line, si.column + 1))
+                });
+                Ok(match loc {
+                    Some(l) => vm.new_string(mc, l),
+                    None => vm.new_nil(mc),
+                })
+            },
+        )
+        .returns("String?")
+        .doc(
+            "The source location ('file:line:col') of the statement executing n frames up \
+             the call stack — raw frames, blocks included: 0 is the frame that sent this \
+             message, 1 its caller, and so on. Nil past the top of the stack or for a \
+             frame with no source info. A caller skipping its own plumbing should walk n \
+             upward comparing filenames rather than hard-coding a depth (an AOT-compiled \
+             frame is absent from the walk) — that is how `Log` stamps each entry.",
+        )
+        .typed_class_method(
+            "callerLocationSkipping:",
+            &["String"],
+            |vm, mc, _receiver, args| {
+                // The nearest call-site location whose FILE does not contain the
+                // fragment — the "skip my own plumbing" walk, done natively in one
+                // call because any Quoin-side loop would interpose its own frames
+                // (whileDo:/each: are stdlib methods) and poison the answer.
+                // Frames with no source info are skipped, not terminal.
+                let frag = arg!(args, String, 0);
+                let loc = vm.frames.iter().rev().find_map(|f| {
+                    let frame_ip = f.ip.saturating_sub(1);
+                    let si = f
+                        .block
+                        .template
+                        .source_map
+                        .get(frame_ip)
+                        .and_then(|opt| opt.as_ref())
+                        .or(f.block.template.source_info.as_ref())?;
+                    if si.filename.contains(&**frag) {
+                        None
+                    } else {
+                        Some(format!("{}:{}:{}", si.filename, si.line, si.column + 1))
+                    }
+                });
+                Ok(match loc {
+                    Some(l) => vm.new_string(mc, l),
+                    None => vm.new_nil(mc),
+                })
+            },
+        )
+        .returns("String?")
+        .doc(
+            "The nearest enclosing call-site location ('file:line:col') whose file does \
+             NOT contain the given fragment — how a library skips its own frames when \
+             stamping a caller (`Log` passes its own filename). Nil when every frame \
+             matches. See `callerLocation:` for the raw indexed walk.",
+        )
         .class_method("arguments", |vm, mc, _receiver, _args| {
             let args_list = vm
                 .options

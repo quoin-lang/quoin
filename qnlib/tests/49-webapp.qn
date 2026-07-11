@@ -142,7 +142,7 @@ use std:web/*
 
     .test:
     liveRoundTripThroughTheServer -> {
-        var app = [Web]App.new;
+        var app = [Web]App.new.logRequests:false;
         app.get:'/users/:id' do:{ |req| #{ 'id':(req.param:'id') 'q':(req.query:'v') } };
         app.post:'/echo' do:{ |req| [Web]Response.json:(req.json) status:201 };
         var server = app.start:'127.0.0.1:0';
@@ -166,6 +166,37 @@ use std:web/*
         server.join;
         server.close;
     };
+
+    .test:
+    requestLogging -> {
+        "* The transport hop logs each SERVED request at #info — method, target,
+        "* status, elapsed — while the pure handle: stays silent. dispatch:pool:
+        "* is that hop, callable without a socket.
+        var app = [Web]App.new;
+        app.get:'/users/:id' do:{ |req| #{ 'id':(req.param:'id') } };
+        var seen = #();
+        Log.sink:{ |level message location| seen.add:#( level message ) };
+        {
+            app.handle:([Test]WebReq.get:'/users/7');
+            .is:{ seen.count } equalTo:0;
+            app.dispatch:([Test]WebReq.get:'/users/7?v=x') pool:nil;
+            app.dispatch:([Test]WebReq.get:'/nope') pool:nil
+        }.finally:{ Log.resetSink };
+        .is:{ seen.count } equalTo:2;
+        .is:{ (seen.at:0).at:0 } equalTo:#info;
+        .isTrue:{ ((seen.at:0).at:1).starts?:'GET /users/7?v=x -> 200 (' };
+        .isTrue:{ ((seen.at:1).at:1).starts?:'GET /nope -> 404 (' };
+        "* logRequests:false silences the hop; Log.level governs it too.
+        var quiet = [Web]App.new.logRequests:false;
+        quiet.get:'/x' do:{ 'ok' };
+        var count = 0;
+        Log.sink:{ |level message location| count = count + 1 };
+        {
+            quiet.dispatch:([Test]WebReq.get:'/x') pool:nil;
+            Log.level:#warn in:{ app.dispatch:([Test]WebReq.get:'/users/7') pool:nil }
+        }.finally:{ Log.resetSink };
+        .is:{ count } equalTo:0
+    }
 }
 
 "* Handler-side fan-out composes with the concurrency library: a handler is

@@ -451,16 +451,16 @@ pub fn build_string_class() -> NativeClassBuilder {
              ```",
         )
         .instance_method("ansiEscaped", |vm, mc, receiver, _args| {
-            // Escape '$' so this text is safe to embed in an #ANSI'…' color
+            // Escape '[' so this text can never open a tag in an #ANSI'…'
             // template. Reuses the colorizer's own escape so the two can't drift.
             let s = recv!(receiver, String);
             Ok(vm.new_string(mc, crate::ansi_colorizer::escape(&s)))
         })
         .doc(
-            "A copy with each `$` doubled, so the text is safe to embed literally in an \
-             `#ANSI'…'` color template (where `$` introduces a color directive).\n\n\
+            "A copy with each `[` doubled, so the text is safe to embed literally in an \
+             `#ANSI'…'` color template (where `[…]` opens a styled span).\n\n\
              ```\n\
-             '$cost'.ansiEscaped     \"* -> $$cost\n\
+             '[red]cost'.ansiEscaped     \"* -> [[red]cost\n\
              ```",
         )
         .instance_method("contains?:", |vm, mc, receiver, args| {

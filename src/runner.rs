@@ -14,8 +14,8 @@ use crate::runtime::{
     array, async_rt, big_decimal, big_integer, block, boolean, bytes, channel, civil, class,
     codecs, crypto, csv_fmt, date_time, double, duration, extension, fiber as fiber_class, http,
     ids, instant, integer, io, json, list, map, math, method, msgpack, nil, object, os, pretty,
-    regex, runtime, set, sockets, span, streams, string, symbol, task, time_zone, timer, timestamp,
-    toml_fmt, vm_stats, yaml,
+    regex, runtime, set, sockets, span, streams, string, symbol, task, term, time_zone, timer,
+    timestamp, toml_fmt, vm_stats, yaml,
 };
 use crate::value::{EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -162,6 +162,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, regex::build_match_class());
     vm.register_native_class(mc, fiber_class::build_fiber_class());
     vm.register_native_class(mc, extension::build_extension_class());
+    vm.register_native_class(mc, term::build_term_class());
 }
 
 /// The persistent REPL arena: one `VmState` kept alive across all lines.
@@ -668,6 +669,7 @@ impl VmRunnerOptions {
                 arguments: vm_args,
                 supports_color,
                 console_width: None,
+                console_height: None,
                 // The single shared class-name accumulator for this run — cloned (Rc) into
                 // every VM and top-level compile, so units see each other's classes.
                 seen_types: crate::types::SeenTypes::with_builtins(),

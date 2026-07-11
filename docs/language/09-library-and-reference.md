@@ -176,6 +176,34 @@ create. Filesystem truth (existence, deletion, renames) lives on `[IO]File` and
 [OS]Env.at:'QN_SURELY_UNSET' ifAbsent:{ 'fallback' }    "* -> fallback
 ```
 
+### Terminal & logging
+
+**Term** answers the terminal facts — `color?` (whether styled output is on:
+the *same* detection the std-stream writers use, so true means an `#ANSI'…'`
+write will actually render), `tty?`, `width`/`height` (nil when piped) — and
+treats markup as an operation: `render:` to escape codes unconditionally,
+`strip:` to the plain text (also the honest way to measure styled width).
+`'FAIL'.styled:'bold red'` styles a computed String programmatically (markup-
+escaped, so its own brackets stay literal), and an ANSI value answers `plain`
+and `renderedLength`.
+
+**Log** is leveled logging over one replaceable sink. `Log.debug:` / `info:` /
+`warn:` / `error:` take a String, an ANSI value, or a **Block** producing one —
+below the `Log.level` threshold the block is *never evaluated*, so a debug
+entry costs a comparison. `Log.level:#debug in:{ … }` changes the threshold
+temporarily (restored even on a throw). Every emitted entry carries its
+caller's `'file:line:col'`, passed to the sink as a separate argument
+(`Log.sink:{ |level message location| … }`); the default sink writes
+`HH:MM:SS LEVEL file:line:col: message` to `[IO]Stderr`, colored on a terminal
+and plain everywhere else. The `???` placeholder statement is a plain
+`Log.warn:` — level and sink govern it like any other warning.
+
+```quoin
+Term.strip:'[red]hot[/]'                     "* -> 'hot'
+('FAIL'.styled:'bold red').plain             "* -> 'FAIL'
+Log.level:#error in:{ Log.info:{ !!! } }    "* -> nil
+```
+
 ### Unique identifiers
 
 **UUID** generates the standard 128-bit identifiers — `generateV4` (random) or
@@ -239,7 +267,8 @@ var mac = [Crypto]Hmac.sha256:'msg' key:'secret'
 >   - `%a`, `%b`, … (single letters) key into a **map** argument.
 > - **`mod` (prefix `%`)** — `%'…%{expr}…'` is inline interpolation: each `%{expr}` is evaluated over the surrounding **locals and parameters** and stringified with `.s`. Note: `self`, a leading-dot send (`%{.name}`), and instance fields (`%{@name}`) are **not** in scope inside `%{…}` — they resolve as `nil`/`MessageNotUnderstood`. Bind what you need to a local first.
 > - Values are converted with `.s` before insertion.
-> - ANSI strings are the `#ANSI'…'` literal (a user string mixing in `ActAsUserString`); `%`-formatting works on them too.
+> - ANSI strings are the `#ANSI'…'` literal (a user string mixing in `ActAsUserString`); `%`-formatting works on them too — interpolated values are markup-escaped automatically, so they can't inject styling.
+> - The markup inside `#ANSI'…'` is Rich-style: `[red bold]text[/]` opens/closes a styled span (named colors use the terminal palette; `#rrggbb` is exact; `on <color>` sets the background; styles: `bold dim italic underline strike reverse blink`). Spans **nest** — `[/]` restores the *enclosing* style. A bracket run that isn't a tag is literal text (`[IO]Stdout` needs no escaping); `[[` writes a literal `[`. On a terminal the markup renders as color; anywhere else it strips.
 
 ```quoin
 #(1 'two' #three).s                  "* -> #(1 two three)

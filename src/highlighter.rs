@@ -25,16 +25,15 @@ pub fn format_ansi(source: &str, mut spans: Vec<HighlightSpan>) -> String {
     spans.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
     spans.dedup_by(|a, b| a.start == b.start && a.end == b.end);
 
+    // Emit SGR directly from the palette specs — no markup round-trip, so the
+    // source text needs no escaping and can never collide with the markup grammar.
     let mut sb = String::new();
     for span in &spans {
-        sb.push('$');
-        sb.push_str(color_for(span.htype, span.counter));
-        sb.push('[');
-        sb.push_str(&ansi_colorizer::escape(slice(source, span.start, span.end)));
-        sb.push_str("$]");
+        sb.push_str(&ansi_colorizer::sgr(color_for(span.htype, span.counter)));
+        sb.push_str(slice(source, span.start, span.end));
+        sb.push_str(ansi_colorizer::SGR_RESET);
     }
-
-    ansi_colorizer::colorize(&sb)
+    sb
 }
 
 /// Parse (or, for incomplete input, predictively complete), highlight, and ANSI-format a

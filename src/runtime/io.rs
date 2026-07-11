@@ -436,7 +436,7 @@ fn new_native_io_handle_with_wrapper<'a>(
     )
 }
 
-fn get_io_string<'gc>(
+pub(crate) fn get_io_string<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     val: Value<'gc>,
@@ -772,7 +772,7 @@ mod tests {
             // Build and register the ANSI class
             let ansi_builder = NativeClassBuilder::new("ANSI", Some("Object"))
                 .instance_method("string", |vm, mc, _receiver, _args| {
-                    Ok(vm.new_string(mc, "$bw[bold text$]".to_string()))
+                    Ok(vm.new_string(mc, "[bold]bold text[/]".to_string()))
                 });
             vm.register_native_class(mc, ansi_builder);
             vm
@@ -789,7 +789,7 @@ mod tests {
             let ansi_instance = Value::Object(vm.new_object(mc, ansi_class));
             let s = get_io_string(vm, mc, ansi_instance).unwrap();
 
-            // colorized version of "$bw[bold text$]" starts with "\x1b[" and ends with reset code
+            // colorized version of "[bold]bold text[/]" starts with "\x1b[" and ends with reset code
             assert!(s.contains("bold text"));
             assert!(s.contains("\x1b["));
         });

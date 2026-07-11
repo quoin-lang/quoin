@@ -69,7 +69,7 @@
     throw3 -> {
         .does:{ !!! } throw:UnreachableError;
         .does:{ ... } throw:NotImplementedError;
-        .is:{ { ???; 'continued' }.value } equalTo:'continued';
+        .is:{ Log.level:#error in:{ ???; 'continued' } } equalTo:'continued';
     };
 
     .test:
@@ -113,15 +113,15 @@
 
     .test:
     ansiEscapesInterpolatedValues -> {
-        "* `String#ansiEscaped` doubles '$' so a value can't inject color codes.
-        .is:{ '$foo'.ansiEscaped } equalTo:'$$foo';
+        "* `String#ansiEscaped` doubles '[' so a value can't open a markup tag.
+        .is:{ '[red]foo'.ansiEscaped } equalTo:'[[red]foo';
         .is:{ 'plain'.ansiEscaped } equalTo:'plain';
-        "* ANSI's `%` escapes a non-ANSI argument's '$' in the underlying string,
+        "* ANSI's `%` escapes a non-ANSI argument's '[' in the underlying string,
         "* so an arbitrary value (e.g. a test-failure value) can't corrupt the
         "* color template or inject markup.
-        .is:{ (#ANSI'v=%' % '$x').string } equalTo:'v=$$x';
+        .is:{ (#ANSI'v=%' % '[red]x').string } equalTo:'v=[[red]x';
         "* ...but a nested ANSI argument is left alone, so its markup still renders.
-        .is:{ (#ANSI'v=%' % #ANSI'$#bw[hi$]').string.contains?:'$#bw[hi$]' } equalTo:true;
+        .is:{ (#ANSI'v=%' % #ANSI'[bold]hi[/]').string.contains?:'[bold]hi[/]' } equalTo:true;
     };
 
     .test:

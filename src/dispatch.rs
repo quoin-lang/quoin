@@ -930,7 +930,7 @@ impl<'gc> VmState<'gc> {
             }
             _ => {
                 if supports_color {
-                    crate::ansi_colorizer::colorize("$#808080[{...}$]")
+                    crate::ansi_colorizer::colorize("[#808080]{...}[/]")
                 } else {
                     "{...}".to_string()
                 }
@@ -971,7 +971,7 @@ impl<'gc> VmState<'gc> {
                 Some(ty) if has_colon => {
                     if supports_color {
                         out.push(crate::ansi_colorizer::colorize(&format!(
-                            "$#ab82ff[{}$]$#808080[:$]$#5fd7af[{}$]",
+                            "[#ab82ff]{}[/][#808080]:[/][#5fd7af]{}[/]",
                             keyword, ty
                         )));
                     } else {
@@ -982,7 +982,7 @@ impl<'gc> VmState<'gc> {
                     let text = part.clone();
                     if supports_color {
                         out.push(crate::ansi_colorizer::colorize(&format!(
-                            "$#ab82ff[{}$]",
+                            "[#ab82ff]{}[/]",
                             text
                         )));
                     } else {

@@ -67,12 +67,14 @@
 "* self ({ .param:'id' }); the return value is normalized by the respondTo:
 "* conventions. app.handle:req is the whole app as a pure function — request in,
 "* response out, no sockets — so apps unit-test in-process. See docs/WEB_ARCH.md.
-[Web]App <- { | @router @middleware @debug @pool @poolMain |
-    "* Internal: an empty router and middleware chain, debug off.
+[Web]App <- { | @router @middleware @debug @pool @poolMain @logRequests |
+    "* Internal: an empty router and middleware chain, debug off, request
+    "* logging on.
     init -> {
         @router = [Web]Router.new;
         @middleware = #();
-        @debug = false
+        @debug = false;
+        @logRequests = true
     };
 
     "* -- routing DSL --------------------------------------------------------
@@ -107,6 +109,13 @@
 
     "* Include error detail in 500 bodies (a development aid — off by default).
     debug: -> { |flag| @debug = flag; self };
+
+    "* Log each SERVED request through `Log.info:` (on by default): method,
+    "* target, status, elapsed time — e.g. `GET /users/7 -> 200 (1ms 200µs)`.
+    "* Lives on the transport hop, so the pure `handle:` stays silent (unit
+    "* tests don't log); `Log.level:`/`Log.sink:` govern the lines like any
+    "* other entry. `logRequests:false` turns it off; returns self.
+    logRequests: -> { |flag| @logRequests = flag; self };
 
     "* -- the pure core ------------------------------------------------------
 
@@ -246,14 +255,23 @@
 
     "* The transport-side hop: debug observability is answered HERE (the main
     "* VM — its psTree sees the whole topology: connection tasks, pool
-    "* workers, per-worker states), everything else goes to the pool or the
-    "* in-VM pipeline.
+    "* workers, per-worker states), request logging too (it sees request,
+    "* response, and elapsed time in both the in-VM and pool paths, and the
+    "* pure `handle:` stays silent for unit tests), and everything else goes
+    "* to the pool or the in-VM pipeline.
     dispatch:pool: -> { |req pool|
         (@debug && ((req.path) == '/_qn/ps')).if:{
             ^^([Web]Response.json:(VM.psTree))
         };
-        (pool == nil).if:{ ^^(.handle:req) };
-        ^pool.handle:req
+        (@logRequests == false).if:{
+            (pool == nil).if:{ ^^(.handle:req) };
+            ^^(pool.handle:req)
+        };
+        var started = Instant.now;
+        var resp = (pool == nil).if:{ .handle:req } else:{ pool.handle:req };
+        "* Lazy block: below Log's threshold nothing here is formatted.
+        Log.info:{ '%1 %2 -> %3 (%4)' % #( req.method req.target resp.status started.elapsed.s ) };
+        ^resp
     };
 
     "* The worker side of the same-unit model: verify the pool sentinel
