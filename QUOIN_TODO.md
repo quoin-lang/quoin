@@ -708,6 +708,29 @@ deferred `Mirror` in `## REPL`.
   reply) — still recurses without a bound, so a deep value built in Quoin can overflow the host
   on the way out. Cap it the same way: a depth check in `value_to_data` (or a fallible
   depth-bounded `encode_dv`) raising a catchable error.
+- [ ] **Dangling `^^` (home method already returned) silently unwinds to the top-level frame
+  and ends the program early** instead of raising. Repro:
+  `Maker <- { .meta <-- { make -> { ^{ ^^ 'RET' } } } }; var blk = Maker.make; blk.value; 55.print`
+  — `55` never prints, exit 0 (verified 2026-07-10; consistent interp↔AOT). Wrapped in a
+  `catch:`, the error is a bare `String` `'Non-local return'`, so a typed `catch:{|e:Error|}`
+  can't catch it — the one survivor of the F12 bare-String-errors fix (class-structural errors
+  became `ClassError`; the NLR escape didn't). Most languages raise here (Ruby
+  `LocalJumpError`, Smalltalk `cannotReturn:`). Design decision from the 2026-07 bug hunt,
+  moved here when BUGS.md was retired: pick raise-vs-unwind, and either way make the error a
+  typed `Error` subclass.
+- [ ] **A `sort:` comparator returning a non-Boolean silently yields an unsorted list.**
+  `#(3 1 2).sort:{ |a b| 'yes' }` → `#(2 1 3)` (verified 2026-07-10) — garbage-in, but now
+  inconsistent with the strict-Boolean family (`if:`/`whileDo:` raise on non-Bool since the
+  bug-hunt F1/F14 fixes; the comparator result is the remaining truthiness leak in a
+  documented-strict position). Minor: raise like `whileDo:` does, or document.
+- [ ] **Builder-panic parse errors leak the raw Rust panic banner to stderr** before the
+  graceful report. The F4/F7 fix converts post-pest AST-builder panics (int literal ≥ 2^63,
+  `\uD800` surrogate escape) into catchable `ParseError`s via `catch_unwind`
+  (`try_parse_quoin_string_named`), but the default panic hook still prints
+  `thread 'main' panicked at …` + the `RUST_BACKTRACE` note first — file mode and
+  `Runtime.eval:` both show it (exit codes and catchability are correct). Cosmetic: suppress
+  the hook around the `catch_unwind` (single-threaded parse path), or return `Result` from
+  the two panicking sites.
 
 ## 1. Class & Method Definition Semantics
 - [x] **Class Creation (`<-` operator)**:

@@ -444,7 +444,6 @@ aot_helpers! {
     fmod: aot_fmod as fn(f64, f64) -> f64,
     slot_set: helpers::slot_set as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
     guard_recv: helpers::guard_recv as fn(*mut c_void, *const c_void, i64, i64, i64, i64) -> u8,
-    guard_block: helpers::guard_block as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
     require_bool: helpers::require_bool as fn(*mut c_void, *const c_void, i64) -> u8,
     slot_peek: helpers::slot_peek as fn(*mut c_void, *const c_void, i64, *mut i64) -> i64,
     list_new: helpers::list_new as fn(*mut c_void, *const c_void, i64) -> u8,
@@ -1802,7 +1801,7 @@ impl<'a> Translator<'a> {
                         match *stack.last().ok_or("stack underflow")? {
                             AV::C(_, AotKind::Bool) => {}
                             _ => {
-                                let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                                let nstack = self.norm_stack(b, &fx, &stack)?;
                                 let idx = match nstack.last() {
                                     Some(AV::Dyn(i)) => *i,
                                     _ => return Err("RequireBool: top not slot-resident".into()),
@@ -2225,7 +2224,8 @@ impl<'a> Translator<'a> {
         // template directly through a FRAME-HOISTED window — the callee's
         // 3+scratch slots are this caller's own scratch, pushed once at
         // frame entry and torn down at frame exit, so the per-element cost
-        // is: guard_block + param slot_set (+ scratch re-nil per F2) + one
+        // is: the native identity guard + param slot_set (+ scratch re-nil
+        // per F2) + one
         // call_indirect + the result copy. The generic helper call is the
         // guard-miss path, exactly as before.
         let baked = self

@@ -3955,13 +3955,6 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    /// Receiver-phase probe of a D2 site cell: live epoch + receiver guard,
-    /// checked BEFORE the caller decodes any argument lanes, so a site whose
-    /// target is not compiled (a native, a polymorphic receiver) pays a few
-    /// loads and nothing else. Returns the cell BY COPY (it is `Copy`; the
-    /// `parent_env` Gc stays rooted in the traced `aot_sites` vec) for the
-    /// argument-phase check.
-    #[inline]
     /// Block-call site peek (D2-for-blocks): the identity is the block's
     /// TEMPLATE id (every closure shares the `Block` class, so the method
     /// cells' receiver-class guard would alias all of them). Returns the
@@ -3998,6 +3991,13 @@ impl<'gc> VmState<'gc> {
         cell.recv_val = Some(recv);
     }
 
+    /// Receiver-phase probe of a D2 site cell: live epoch + receiver guard,
+    /// checked BEFORE the caller decodes any argument lanes, so a site whose
+    /// target is not compiled (a native, a polymorphic receiver) pays a few
+    /// loads and nothing else. Returns the cell BY COPY (it is `Copy`; the
+    /// `parent_env` Gc stays rooted in the traced `aot_sites` vec) for the
+    /// argument-phase check.
+    #[inline]
     pub(crate) fn aot_site_peek(
         &self,
         site: usize,
