@@ -253,6 +253,7 @@ Most programs never write that: the `[Web]` framework supplies the handler.
 > - **Middleware**: `app.use:{ |req next| … }` — onion model, first `use:` outermost. Call `next.value:req` for the inner response; *returning without calling `next` short-circuits*. Either way the return value goes through `respondTo:` too.
 > - **Errors**: `HttpError.throw:401` / `HttpError.throw:422 body:#{ … }` from anywhere under a handler maps onto the response (the body rendered through `respondTo:`). Any other uncaught error becomes a bare 500 — detail leaks only with `app.debug:true` (which also serves `VM.psTree` at `GET /_qn/ps`).
 > - **`app.handle:req` is the whole app as a pure function** — middleware → router → handler → normalization → error mapping, no sockets — so apps unit-test in-process. `app.start:'host:port'` serves in the background and answers the `[HTTP]Server` handle; `app.serve:` blocks (start + join); `app.serve:':8080' workers:4` runs the pure pipeline on a pool of worker isolates (`backing:'process'` for real multicore).
+> - **Request logging** is on by default for *served* requests — one `Log.info:` line per request (`GET /users/7 -> 200 (1ms 200µs)`) from the transport hop, so the pure `handle:` stays silent and unit tests don't log. `app.logRequests:false` turns it off; `Log.level:` / `Log.sink:` govern the lines like any other entry (§44).
 
 Routing and the render conventions, driven entirely in-process — the requests are
 plain objects, fabricated with `new:{}`:

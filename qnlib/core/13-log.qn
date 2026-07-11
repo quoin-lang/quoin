@@ -80,7 +80,7 @@ Log <- {
         "* value, or a Block producing one (evaluated only past the threshold).
         "*
         "* ```
-        "* Log.level:#error in:{ Log.info:{ 1/0 } }    "* -> nil
+        "* Log.level:#error in:{ Log.info:{ !!! } }    "* -> nil
         "* ```
         debug: -> { |messageOrBlock| .emit:#debug message:messageOrBlock }
 

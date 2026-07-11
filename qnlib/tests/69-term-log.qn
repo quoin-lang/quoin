@@ -67,14 +67,15 @@
 
     .test:
     logLazyMessages -> {
-        "* Below the threshold the message block is NEVER evaluated — this 1/0
-        "* would throw if it ran.
-        var ran = false;
-        Log.level:#error in:{
-            Log.debug:{ ran = true; 1 / 0 };
-            Log.info:{ ran = true; 'x' }
-        };
-        .isFalse:{ ran };
+        "* Below the threshold the message block is NEVER evaluated — `!!!` is
+        "* exactly the marker for a path that must not run.
+        .is:{
+            Log.level:#error in:{
+                Log.debug:{ !!! };
+                Log.info:{ !!! };
+                'survived'
+            }
+        } equalTo:'survived';
         "* At or above the threshold, a block message evaluates to the message.
         var seen = #();
         Log.sink:{ |level message location| seen.add:message };

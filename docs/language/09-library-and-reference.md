@@ -201,7 +201,7 @@ and plain everywhere else. The `???` placeholder statement is a plain
 ```quoin
 Term.strip:'[red]hot[/]'                     "* -> 'hot'
 ('FAIL'.styled:'bold red').plain             "* -> 'FAIL'
-Log.level:#error in:{ Log.info:{ 1 / 0 } }   "* -> nil
+Log.level:#error in:{ Log.info:{ !!! } }    "* -> nil
 ```
 
 ### Unique identifiers
