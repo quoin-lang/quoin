@@ -22,12 +22,12 @@ fn fmt(src: &str) -> String {
 
 #[test]
 fn separates_statements_with_semicolons_but_not_the_last() {
-    assert_eq!(fmt("x = 1; y = 2; z = 3"), "x = 1;\ny = 2;\nz = 3\n");
+    assert_eq!(fmt("x = 1; y = 2; z = 3"), "x = 1\ny = 2\nz = 3\n");
 }
 
 #[test]
 fn splits_same_line_statements_onto_their_own_lines() {
-    assert_eq!(fmt("a = 1 b = 2"), "a = 1;\nb = 2\n");
+    assert_eq!(fmt("a = 1 b = 2"), "a = 1\nb = 2\n");
 }
 
 #[test]
@@ -42,17 +42,17 @@ fn preserves_a_leading_doc_comment_hugging_its_statement() {
 
 #[test]
 fn keeps_a_trailing_comment_on_the_statement_line() {
-    assert_eq!(fmt("x = 1  \"* note\ny = 2"), "x = 1;  \"* note\ny = 2\n");
+    assert_eq!(fmt("x = 1  \"* note\ny = 2"), "x = 1  \"* note\ny = 2\n");
 }
 
 #[test]
 fn keeps_one_blank_line_between_statements_that_had_one() {
-    assert_eq!(fmt("x = 1\n\ny = 2"), "x = 1;\n\ny = 2\n");
+    assert_eq!(fmt("x = 1\n\ny = 2"), "x = 1\n\ny = 2\n");
 }
 
 #[test]
 fn collapses_multiple_blank_lines_to_one() {
-    assert_eq!(fmt("x = 1\n\n\n\ny = 2"), "x = 1;\n\ny = 2\n");
+    assert_eq!(fmt("x = 1\n\n\n\ny = 2"), "x = 1\n\ny = 2\n");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn preserves_a_multiline_statement_body_verbatim() {
     let src = "Point <- { |@x @y|\n    x -> { @x }\n};\ndone = 1";
     assert_eq!(
         fmt(src),
-        "Point <- { |@x @y|\n    x -> { @x }\n};\ndone = 1\n"
+        "Point <- { |@x @y|\n    x -> { @x }\n}\ndone = 1\n"
     );
 }
 
@@ -99,14 +99,14 @@ fn method_def_body_indents_canonically() {
     let src = "C <- {\n  greet -> {\n  x = 1;\n  x\n  }\n}";
     assert_eq!(
         fmt(src),
-        "C <- {\n    greet -> {\n        x = 1;\n        x\n    }\n}\n"
+        "C <- {\n    greet -> {\n        x = 1\n        x\n    }\n}\n"
     );
 }
 
 #[test]
 fn single_keyword_send_indents_its_block_body() {
     let src = "list.each:{\n  a;\n  b\n}";
-    assert_eq!(fmt(src), "list.each:{\n    a;\n    b\n}\n");
+    assert_eq!(fmt(src), "list.each:{\n    a\n    b\n}\n");
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn multi_keyword_send_breaks_with_continuation_at_statement_base() {
     // Multi-statement block args force the blocks (and so the send) to break; `else:` drops to the
     // statement's base column, block bodies nest +4, and closing braces return to the base.
     let src = "result.if:{\n    a;\n    b\n} else:{\n    c;\n    d\n}";
-    let expected = "result.if:{\n    a;\n    b\n}\nelse:{\n    c;\n    d\n}\n";
+    let expected = "result.if:{\n    a\n    b\n}\nelse:{\n    c\n    d\n}\n";
     assert_eq!(fmt(src), expected);
 }
 
@@ -145,7 +145,7 @@ fn declaration_block_always_breaks_one_member_per_line() {
     // A class body is a member declaration block: it stays expanded even written on one line.
     assert_eq!(
         fmt("C <- { name -> { @name }; age -> { @age } }"),
-        "C <- {\n    name -> { @name };\n    age -> { @age }\n}\n"
+        "C <- {\n    name -> { @name }\n    age -> { @age }\n}\n"
     );
     // Even a single-method class body breaks (the method itself stays inline).
     assert_eq!(
@@ -167,7 +167,7 @@ fn short_multi_keyword_send_flattens_when_it_fits() {
 fn short_send_stays_flat_before_a_following_statement() {
     // Regression: the statement-separator line break after the send must not force its group to
     // break — a hard break in the trailing context only ends the line, it doesn't block flattening.
-    assert_eq!(fmt("x.foo:1 bar:2\ny = 3"), "x.foo:1 bar:2;\ny = 3\n");
+    assert_eq!(fmt("x.foo:1 bar:2\ny = 3"), "x.foo:1 bar:2\ny = 3\n");
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn receiver_break_falls_back_to_base_column_when_a_block_must_break() {
     let src = "framing = (someCondition.checkThatIsFairlyLong:'chunked').if:{\n    a;\n    b\n} else:{ 'close' }";
     let out = fmt(src);
     assert!(
-        out.starts_with("framing = (someCondition.checkThatIsFairlyLong:'chunked').if:{\n    a;\n    b\n}\nelse:{ 'close' }"),
+        out.starts_with("framing = (someCondition.checkThatIsFairlyLong:'chunked').if:{\n    a\n    b\n}\nelse:{ 'close' }"),
         "expected base-column fallback:\n{out}"
     );
 }
@@ -256,7 +256,7 @@ fn blank_line_between_two_comment_paragraphs_is_preserved() {
 fn lowers_assignment_with_a_block_rhs() {
     // The RHS is lowered (so a multi-line RHS no longer bails the enclosing block to verbatim).
     let src = "m -> {\n    x = t.time:{ work };\n    x\n}";
-    assert_eq!(fmt(src), "m -> {\n    x = t.time:{ work };\n    x\n}\n");
+    assert_eq!(fmt(src), "m -> {\n    x = t.time:{ work }\n    x\n}\n");
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn multi_line_operator_expression_lowers_instead_of_bailing() {
     let src = "m -> {\n    r = pre % #(\n        aaaa\n        bbbb\n    )\n    z = 2\n}";
     assert_eq!(
         fmt(src),
-        "m -> {\n    r = pre % #( aaaa bbbb );\n    z = 2\n}\n"
+        "m -> {\n    r = pre % #( aaaa bbbb )\n    z = 2\n}\n"
     );
 }
 
@@ -290,7 +290,7 @@ fn multi_line_send_argument_wraps_instead_of_bailing() {
     let src = "m -> {\n    r = self.addResult:Foo.new:{\n        a = 1;\n        b = 2\n    };\n    z = 2\n}";
     assert_eq!(
         fmt(src),
-        "m -> {\n    r = self.addResult:Foo.new:{\n        a = 1;\n        b = 2\n    };\n    z = 2\n}\n"
+        "m -> {\n    r = self.addResult:Foo.new:{\n        a = 1\n        b = 2\n    }\n    z = 2\n}\n"
     );
 }
 
@@ -299,14 +299,14 @@ fn postfix_bang_selector_is_not_doubled() {
     // `!` is a separate token folded into the selector name but not its span; the tail must not
     // re-append it.
     let src = "C <- {\n    .sealed!;\n    m -> { 1 }\n}";
-    assert_eq!(fmt(src), "C <- {\n    .sealed!;\n    m -> { 1 }\n}\n");
+    assert_eq!(fmt(src), "C <- {\n    .sealed!\n    m -> { 1 }\n}\n");
 }
 
 #[test]
 fn preserves_a_named_block() {
     // The `#tag` block name sits between `{` and the pipe; it must be kept.
     let src = "s.collect:{ #tag |t|\n    t.print;\n    ^t\n}";
-    assert_eq!(fmt(src), "s.collect:{ #tag |t|\n    t.print;\n    ^t\n}\n");
+    assert_eq!(fmt(src), "s.collect:{ #tag |t|\n    t.print\n    ^t\n}\n");
 }
 
 #[test]
@@ -338,7 +338,7 @@ fn single_line_multi_statement_value_block_breaks_when_long() {
     assert!(long.len() > 100);
     let out = fmt(long);
     assert!(
-        out.starts_with("x.foo:{\n    aaa = 111;\n    bbb = 222;"),
+        out.starts_with("x.foo:{\n    aaa = 111\n    bbb = 222"),
         "not expanded:\n{out}"
     );
 }
@@ -346,10 +346,7 @@ fn single_line_multi_statement_value_block_breaks_when_long() {
 #[test]
 fn hand_broken_multi_statement_value_block_stays_broken() {
     // A short body the author split across lines is left broken (not collapsed to one line).
-    assert_eq!(
-        fmt("m -> {\n    a;\n    b\n}"),
-        "m -> {\n    a;\n    b\n}\n"
-    );
+    assert_eq!(fmt("m -> {\n    a;\n    b\n}"), "m -> {\n    a\n    b\n}\n");
 }
 
 #[test]
@@ -444,4 +441,41 @@ fn block_type_annotations_round_trip() {
 
     let out = fmt("var t: Block() = { 1 }");
     assert!(out.contains("var t: Block()"), "{out}");
+}
+
+#[test]
+fn semicolons_survive_exactly_the_gluing_boundaries() {
+    // The minimal-`;` rule (needs_separator): a `;` survives a line break only
+    // where the next statement would otherwise GLUE onto the previous one —
+    // newlines are trivia to the parser. Each kept case here was probed
+    // against the live grammar; each dropped case parses as two statements.
+
+    // Operator-leading statements extend the previous expression…
+    assert_eq!(fmt("a;\n%'v %{a}'"), "a;\n%'v %{a}'\n");
+    assert_eq!(fmt("a;\n-3.print"), "a;\n-3.print\n");
+    // …and `.`-leading self-sends chain onto it.
+    assert_eq!(fmt("a;\n.print"), "a;\n.print\n");
+    // A bare identifier followed by a declaration/assignment fuses into one
+    // destructuring assignment ("undeclared local `var`").
+    assert_eq!(fmt("grade;\nvar name = 7"), "grade;\nvar name = 7\n");
+    assert_eq!(fmt("a;\nb = 9"), "a;\nb = 9\n");
+    assert_eq!(fmt("a;\n@f = 2"), "a;\n@f = 2\n");
+    // But a send before a declaration stays a statement of its own…
+    assert_eq!(fmt("x.print;\nvar y = 1"), "x.print\nvar y = 1\n");
+    // …as do ordinary sequences: sends, literals, parens, namespaces.
+    assert_eq!(fmt("a;\nb.print"), "a\nb.print\n");
+    assert_eq!(fmt("a;\n(3).print"), "a\n(3).print\n");
+    assert_eq!(fmt("a;\n#( 1 2 ).print"), "a\n#( 1 2 ).print\n");
+
+    // Class bodies: `.`-leading members (`.meta`, `.sealed!`) and `|@f|`
+    // field declarations keep their `;` — a block would absorb them —
+    // while plain member defs separate on the newline alone.
+    assert_eq!(
+        fmt("C <- { m -> { 1 }; .sealed! }"),
+        "C <- {\n    m -> { 1 };\n    .sealed!\n}\n"
+    );
+
+    // Inline (soft) blocks keep the `;` — there the separator may render as
+    // a space on one shared line, where it is always load-bearing.
+    assert_eq!(fmt("x.foo:{ a; b }"), "x.foo:{ a; b }\n");
 }

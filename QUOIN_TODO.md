@@ -3,27 +3,18 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the Quoin standard library (`qnlib`) files and test suites.
 
 ## Misc
-- [ ] **`qn fmt` should only add semicolons where the statement end is
-  ambiguous.** Today the formatter emits `;` after every non-final statement
-  (`var x = 1;` before a plain `x.print` line; `a -> { 1 };` between class
-  members) — verified 2026-07-10 with `fmt --dry-run`. Most statement boundaries
-  are unambiguous at a newline; the separator should appear only where the next
-  line would otherwise CONTINUE the current statement. The known fusion cases
-  (all hit while making doc examples runnable):
-  - a next line starting with an operator — `%'…'` interpolation being the
-    classic (`%` is an infix operator, so the line glues onto the previous
-    expression); same family as the F11 prefix-capable operators (`+` `-` `%`);
-  - a bare-identifier statement followed by a `var`/`let` line — they fuse into
-    one multi-target assignment (`grade␤var name = …` →
-    ``undeclared local `var` ``);
-  - keyword-send continuations, where the next line's leading keyword segment
-    would extend the previous send.
-  Implementation note: the formatter already re-parses its own output and
-  refuses meaning-changing writes (crates/quoin-fmt DESIGN "self-verifying"), so
-  minimal-semicolon emission gets a free backstop — decide by a next-token rule,
-  and let the reparse-equality check catch any case the rule misses. Mind the
-  docs: the book/README examples now carry defensive `;` that a minimal-`;`
-  reformat would drop; `qn doc --check` keeps them honest through any reflow.
+- [x] **`qn fmt` only adds semicolons where the statement end is ambiguous.**
+  DONE (fix/fmt-minimal-semicolons): the `;` is a separator, not a terminator —
+  on a guaranteed line break it survives only where the next statement would
+  glue onto the previous one (`needs_separator` in crates/quoin-fmt/src/format.rs,
+  each arm probed against the live grammar): an operator-/`.`-/`|`-leading next
+  statement (the `%'…'` interpolation classic, prefix `+`/`-`, self-send chains,
+  `|@f|` members), or a bare-identifier statement followed by an assignment/
+  declaration (the destructuring-targets fusion). Soft (inlineable) blocks emit
+  the `;` as a flat-only `Doc::FlatText`, so a width-forced break drops it and
+  stays idempotent on the next run. The self-verifying reparse remains the
+  backstop, and the whole tree (174 .qn files) is reformatted canonical.
+  Pinned by format_tests::semicolons_survive_exactly_the_gluing_boundaries.
 
 - [ ] **Support light terminal backgrounds in all colored output.** The ANSI palette
   (`colors_for` in `crates/quoin-syntax/src/highlight.rs`) is tuned for a dark

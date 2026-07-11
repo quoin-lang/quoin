@@ -21,6 +21,12 @@ pub enum Doc {
     Verbatim(String),
     /// A space when the enclosing group is flat; a newline + indent when broken.
     Line,
+    /// The text when the enclosing group is flat; NOTHING when broken. The
+    /// statement separator: `;` is load-bearing on a shared line and dead
+    /// weight before a line break (minimal-semicolon emission stays
+    /// idempotent through a width-forced break exactly because the broken
+    /// rendering never contains the `;` a re-format of it would omit).
+    FlatText(String),
     /// Nothing when flat; a newline + indent when broken.
     SoftLine,
     /// Always a newline + indent; also forces every enclosing group to break.
@@ -82,6 +88,7 @@ pub fn flat_width(doc: &Doc) -> Option<usize> {
     match doc {
         Doc::Nil | Doc::SoftLine => Some(0),
         Doc::Line => Some(1),
+        Doc::FlatText(s) => Some(s.chars().count()),
         Doc::Text(s) => Some(s.chars().count()),
         Doc::Verbatim(s) => (!s.contains('\n')).then(|| s.chars().count()),
         Doc::HardLine => None,
@@ -147,6 +154,12 @@ pub fn render(doc: &Doc, width: usize) -> String {
                 }
                 Mode::Break => newline(&mut out, indent, &mut col),
             },
+            Doc::FlatText(s) => {
+                if mode == Mode::Flat {
+                    out.push_str(s);
+                    col += s.chars().count();
+                }
+            }
             Doc::SoftLine => {
                 if mode == Mode::Break {
                     newline(&mut out, indent, &mut col);
@@ -236,6 +249,14 @@ fn fits(mut remaining: isize, doc: &Doc, rest: &[(usize, Mode, &Doc)]) -> bool {
                 }
                 Mode::Break => return true,
             },
+            Doc::FlatText(s) => {
+                if mode == Mode::Flat {
+                    remaining -= s.chars().count() as isize;
+                    if remaining < 0 {
+                        return false;
+                    }
+                }
+            }
             Doc::SoftLine => {
                 if mode == Mode::Break {
                     return true;
