@@ -3101,20 +3101,22 @@ impl Compiler {
             }
             NodeValue::Huh3 => {
                 // `???` — "shouldn't get here, but keep going": a soft warning
-                // on stderr, then nil (the statement's value). The location is
-                // baked at compile time in the checker's editor-jumpable
-                // `file:line:col: warning:` shape; a logger can take over
-                // later (QUOIN_TODO). `[IO]Stderr` is native-registered in
-                // every runner mode, so the desugar has no prelude dependency.
-                let msg = match &node.source_info {
-                    Some(s) => format!(
-                        "{}:{}:{}: warning: reached `???` placeholder",
-                        s.filename,
-                        s.line,
-                        s.column + 1
-                    ),
-                    None => "warning: reached `???` placeholder".to_string(),
-                };
+                // on stderr, then nil (the statement's value). Rendered by the
+                // SAME `diag_header` the checker's warnings use — one renderer,
+                // no drift — with color markup baked in; `[IO]Stderr`'s write
+                // path decolorizes when color is off, exactly like every other
+                // colored stderr line. A logger can take over later
+                // (QUOIN_TODO). `[IO]Stderr` is native-registered in every
+                // runner mode, so the desugar has no prelude dependency.
+                let msg = crate::vm::VmState::diag_header(
+                    "warning",
+                    "#ffcc00",
+                    "reached `???` placeholder",
+                    node.source_info.as_ref(),
+                    true,
+                    false,
+                );
+                let msg = msg.trim_end_matches('\n').to_string();
                 bytecode.push(Instruction::LoadGlobal(NamespacedName::new(
                     vec!["IO".to_string()],
                     "Stderr".to_string(),

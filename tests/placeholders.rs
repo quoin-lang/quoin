@@ -61,6 +61,35 @@ fn warn_placeholder_reports_its_location_and_continues() {
 }
 
 #[test]
+fn warn_placeholder_colors_like_a_checker_warning() {
+    // One renderer, no drift: the runtime `???` warning goes through the same
+    // `diag_header` as the checker's compile-time warnings — yellow `warning`,
+    // gray/cyan location — and decolorizes on non-color runs (covered by
+    // `warn_placeholder_reports_its_location_and_continues`, which asserts the
+    // plain form).
+    let path =
+        std::env::temp_dir().join(format!("quoin_placeholder_color_{}.qn", std::process::id()));
+    std::fs::write(
+        &path, "???;
+",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(&path)
+        .env("CLICOLOR_FORCE", "1")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run qn");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("\u{1b}[38;2;255;204;0mwarning"),
+        "expected the checker's yellow `warning` label\n{stderr:?}"
+    );
+}
+
+#[test]
 fn placeholders_are_statements_not_expressions() {
     for src in ["var x = ...;\n", "var x = ???;\n", "5 + !!!;\n"] {
         let out = run_script("expr", src);
