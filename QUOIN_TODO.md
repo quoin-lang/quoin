@@ -695,7 +695,16 @@ deferred `Mirror` in `## REPL`.
   Hermetic tests (`78-dns.qn`: localhost, RFC 5737 TEST-NET, RFC 2606 `.invalid`). Record-type
   queries (TXT/MX/SRV) deliberately absent — they need a real DNS client dependency
   (hickory-resolver, runtime-coupled); revisit only with a concrete use case.
-- [ ] **WebSocket** (client over the HTTP upgrade) — in progress on this branch.
+- [x] **WebSocket** — `WebSocket` RFC 6455 client, PURE QUOIN (`qnlib/net/websocket.qn`,
+  `use std:net/websocket`) over TcpSocket/TlsSocket (wss:// free, the HTTP-client story):
+  upgrade handshake reuses the native `[HTTP]Parser.parseHead:` and VERIFIES
+  Sec-WebSocket-Accept (sha1+base64 via [Crypto]); frames by `readExactly:` (16/64-bit lengths,
+  fragmentation reassembly, auto-pong, close handshake w/ closeCode/closeReason, torn
+  connection = IoError not silent nil); sends masked via new native `Bytes#maskWith:` (cycled
+  XOR, its own inverse). `WebSocket.acceptFor:key` is class-side so Quoin SERVERS can answer
+  the handshake — the in-test echo server (`79-websocket.qn`, parseRequestHead: + hand frames)
+  is the reference and pins the client's masking duty. Deferred: [Web]App server-side upgrade
+  (wants handler connection adoption), subprotocols/extra headers, permessage-deflate.
 
 **Metaprogramming**
 - [ ] **Parser / AST to Quoin** — expose the parser and a visitable AST as Quoin objects so Quoin

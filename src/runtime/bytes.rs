@@ -178,6 +178,31 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             "The bytes decoded as UTF-8 with every invalid sequence replaced by U+FFFD — \
              never throws.",
         )
+        .typed_instance_method("maskWith:", &["Bytes"], |vm, mc, receiver, args| {
+            // Cycled XOR — WebSocket's frame masking (RFC 6455 §5.3, a 4-byte
+            // key), but any key length works. Its own inverse, so masking and
+            // unmasking are the same call; a VM byte loop over megabyte frames
+            // would crawl, hence native (the crc32 story).
+            let key = arg!(args, Bytes, 0).to_vec();
+            if key.is_empty() {
+                return Err(QuoinError::ValueError(
+                    "maskWith:: the key must not be empty".to_string(),
+                ));
+            }
+            let mut out = recv!(receiver, Bytes).to_vec();
+            for (i, b) in out.iter_mut().enumerate() {
+                *b ^= key[i % key.len()];
+            }
+            Ok(vm.new_bytes(mc, out))
+        })
+        .doc(
+            "These bytes XORed with `key`, cycled — WebSocket's frame masking. Its own \
+             inverse: masking twice with the same key answers the original. An empty key \
+             throws a ValueError.\n\n\
+             ```\n\
+             ('hi'.asBytes.maskWith:(Bytes.of:#( 7 ))).maskWith:(Bytes.of:#( 7 ))     \"* -> Bytes[2] 68 69\n\
+             ```",
+        )
         .instance_method("crc32", |vm, mc, receiver, _args| {
             // flate2's table-driven CRC-32 (IEEE) — what zip stamps on every
             // entry; a pure-Quoin byte loop would crawl over megabytes.

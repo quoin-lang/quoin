@@ -18,7 +18,7 @@ connections multiplex over one program. Tasks and their handles, `Async.gather:`
 `Async.timeout:do:`, and cancellation are Part V's subject (§18–19); a CPU-bound
 handler round-robins with its siblings at scheduler boundaries rather than
 starving them (§18), but real multi-core parallelism is worker isolates (§21, or
-`serve:workers:` in §26). Sockets, listeners, and streams are **native
+`serve:workers:` in §27). Sockets, listeners, and streams are **native
 built-ins** — always available, no `use`. The HTTP layers are **pure Quoin** in
 the stdlib: `use std:net/http` loads the `[HTTP]` client, `use std:net/http_server`
 the `[HTTP]Server` transport, `use std:web/*` the `[Web]` framework, and
@@ -151,7 +151,7 @@ replies         "* -> #(AAAA BBBB)
 
 Both clients are served concurrently by one `TcpServer` — the `stop` / `join` /
 `close` tail is the standard wind-down and reappears unchanged on `[HTTP]Server`
-in §26.
+in §27.
 
 ---
 
@@ -214,7 +214,26 @@ listener.close;
 
 ---
 
-## 26. Serving HTTP: `[HTTP]Server` and `[Web]App`
+## 26. WebSocket
+
+> **Rules**
+> - `use std:net/websocket`, then `WebSocket.connect:'ws://…'` (or `wss://` — TLS, like the HTTP client, falls out for free). The upgrade handshake sends a random `Sec-WebSocket-Key` and **verifies** the response's `Sec-WebSocket-Accept`; a wrong status or token throws a catchable IoError.
+> - `receive` answers the next **message**: a String for a text frame, Bytes for binary, and `nil` once the connection has closed cleanly. Fragmented messages are reassembled and pings are ponged invisibly; `eachMessage:{ |m| … }` loops until close. Receives park the task, not the scheduler.
+> - `sendText:` / `sendBytes:` send one masked frame each (clients must mask — `Bytes#maskWith:` natively); `ping` / `ping:` probe liveness.
+> - `close` (or `close:code reason:`) runs the RFC 6455 close handshake: send a close frame, drain to the peer's reply. After close, `closeCode` / `closeReason` report the far side's; a connection torn *without* a close frame surfaces as an IoError instead of a silent nil.
+> - `WebSocket.acceptFor:key` (class-side) computes the upgrade token, so a Quoin *server* can answer the handshake too — the test suite's in-file echo server (`qnlib/tests/79-websocket.qn`) is the reference. First-class server support in `[Web]App` is future work, as are subprotocols and permessage-deflate.
+
+```quoin norun
+use std:net/websocket;
+var ws = WebSocket.connect:'wss://stream.example.org/live';
+ws.sendText:(JSON.generate:#{ 'subscribe': 'trades' });
+ws.eachMessage:{ |m| (JSON.parse:m).print };    "* until the server closes
+ws.closeCode                                    "* why it ended
+```
+
+---
+
+## 27. Serving HTTP: `[HTTP]Server` and `[Web]App`
 
 Serving splits into two layers, mirroring the client's philosophy: `[HTTP]Server`
 (`use std:net/http_server`) is the HTTP/1.1 *protocol machine* — no routing, no
@@ -348,7 +367,7 @@ app.serve:':8080' workers:8 backing:'process'   "* child processes: real multico
 
 ---
 
-## 27. End to end: a JSON service, tested in-process
+## 28. End to end: a JSON service, tested in-process
 
 The framework's testing story *is* `handle:` — build the app, then call it like a
 function. No listener, no ports, no concurrency; requests are constructed and

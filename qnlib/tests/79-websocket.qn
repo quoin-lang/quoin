@@ -1,0 +1,237 @@
+"* WebSocket (net/websocket.qn): RFC 6455 client against a hand-rolled in-test
+"* server — both ends on the same scheduler, so the suite is self-contained (the
+"* 24-server idiom). The server half is deliberately independent code (parse the
+"* upgrade with parseRequestHead:, frames by hand), so the two implementations
+"* check each other; it also PINS protocol duties: client frames must arrive
+"* masked, our accept token must verify.
+use std:net/websocket
+
+"* Answer the upgrade on a fresh connection's byte stream.
+var wsUpgrade = { |bs|
+    var head = [HTTP]Parser.parseRequestHead:(bs.readUntil:'\r\n\r\n' limit:65536)
+    var key = nil
+    (head.at:3).each:{ |pair| ((pair.at:0).lower == 'sec-websocket-key').if:{ key = pair.at:1 } }
+    var resp = 'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+    resp = resp + 'Sec-WebSocket-Accept: ' + (WebSocket.acceptFor:key) + '\r\n\r\n'
+    bs.writeAll:resp.asBytes
+}
+
+"* One client frame: #( fin op payload ), unmasked. Throws if the client broke
+"* its masking duty.
+var wsRead = { |bs|
+    var h = bs.readExactly:2
+    ((h.at:1) >= 128).else:{ ValueError.throw:'ws test server: client frame not masked' }
+    var len = (h.at:1) % 128
+    (len == 126).if:{
+        var e = bs.readExactly:2
+        len = ((e.at:0) * 256) + (e.at:1)
+    }
+    else:{
+        (len == 127).if:{
+            var e8 = bs.readExactly:8
+            len = 0
+            e8.each:{ |b| len = (len * 256) + b }
+        }
+    }
+    var key = bs.readExactly:4
+    var payload = (len == 0).if:{ Bytes.empty } else:{ (bs.readExactly:len).maskWith:key }
+    #( ((h.at:0) >= 128) ((h.at:0) % 16) payload )
+}
+
+"* One server frame (unmasked, as the RFC requires of servers).
+var wsWrite = { |bs fin op payload|
+    var h = #()
+    h.add:((fin.if:{ 128 } else:{ 0 }) + op)
+    var len = payload.count
+    (len < 126).if:{ h.add:len }
+    else:{
+        (len < 65536).if:{
+            h.add:126
+            h.add:(len / 256)
+            h.add:(len % 256)
+        }
+        else:{
+            h.add:127
+            var le = #()
+            var v = len
+            (1..9).each:{
+                le.add:(v % 256)
+                v = v / 256
+            }
+            le.reverse.each:{ |b| h.add:b }
+        }
+    }
+    bs.writeAll:((Bytes.of:h) + payload)
+}
+
+(TestSuite.new:{ var name = 'WebSocket' }).add:{
+    .test:
+    textEchoRoundTrip -> {
+        var listener = TcpListener.listen:'127.0.0.1:0';
+        var target = 'ws://127.0.0.1:' + listener.port.s + '/chat';
+        var results = Async.timeout:5000 do:{
+            Async.gather:#(
+                { listener.acceptOnce:{ |conn|
+                      var bs = conn.byteStream
+                      wsUpgrade.value:bs
+                      var f = wsRead.value:bs
+                      wsWrite.valueWithArgs:#( bs true 1 (f.at:2) )
+                      "* the client's close, echoed
+                      var c = wsRead.value:bs
+                      wsWrite.valueWithArgs:#( bs true 8 (c.at:2) )
+                  }
+                  'served' }
+                { var ws = WebSocket.connect:target
+                  ws.sendText:'hello over ws'
+                  var got = ws.receive
+                  ws.close
+                  #( got ws.closed? ws.closeCode ) }
+            )
+        };
+        listener.close;
+        .is:{ results.at:0 } equalTo:'served';
+        .is:{ (results.at:1).at:0 } equalTo:'hello over ws';
+        .isTrue:{ (results.at:1).at:1 };
+        "* our close echoed back carries our own 1000
+        .is:{ (results.at:1).at:2 } equalTo:1000;
+    };
+
+    .test:
+    binaryAndExtendedLengths -> {
+        "* 1000 bytes exercises the 16-bit length path, 70000 the 64-bit one —
+        "* on the client's ENCODE (sends) and DECODE (echoes) both.
+        var medium = Bytes.of:((0..1000).collect:{ |i| i % 256 });
+        var big = Bytes.of:((0..70000).collect:{ |i| (i * 7) % 256 });
+        var listener = TcpListener.listen:'127.0.0.1:0';
+        var target = 'ws://127.0.0.1:' + listener.port.s + '/bin';
+        var results = Async.timeout:10000 do:{
+            Async.gather:#(
+                { listener.acceptOnce:{ |conn|
+                      var bs = conn.byteStream
+                      wsUpgrade.value:bs
+                      var a = wsRead.value:bs
+                      wsWrite.valueWithArgs:#( bs true 2 (a.at:2) )
+                      var b = wsRead.value:bs
+                      wsWrite.valueWithArgs:#( bs true 2 (b.at:2) )
+                      var c = wsRead.value:bs
+                      wsWrite.valueWithArgs:#( bs true 8 (c.at:2) )
+                  }
+                  'served' }
+                { var ws = WebSocket.connect:target
+                  ws.sendBytes:medium
+                  var m = ws.receive
+                  ws.sendBytes:big
+                  var b = ws.receive
+                  ws.close
+                  #( m b ) }
+            )
+        };
+        listener.close;
+        .is:{ (results.at:1).at:0 } equalTo:medium;
+        .is:{ (results.at:1).at:1 } equalTo:big;
+    };
+
+    .test:
+    pingPongAndFragmentation -> {
+        var listener = TcpListener.listen:'127.0.0.1:0';
+        var target = 'ws://127.0.0.1:' + listener.port.s + '/frag';
+        var results = Async.timeout:5000 do:{
+            Async.gather:#(
+                { listener.acceptOnce:{ |conn|
+                      var bs = conn.byteStream
+                      wsUpgrade.value:bs
+                      "* ping the client mid-stream; it must pong invisibly...
+                      wsWrite.valueWithArgs:#( bs true 9 'p1'.asBytes )
+                      var pong = wsRead.value:bs
+                      "* ...then deliver a text message in two fragments.
+                      wsWrite.valueWithArgs:#( bs false 1 'hel'.asBytes )
+                      wsWrite.valueWithArgs:#( bs true 0 'lo'.asBytes )
+                      var c = wsRead.value:bs
+                      wsWrite.valueWithArgs:#( bs true 8 (c.at:2) )
+                      #( (pong.at:1) ((pong.at:2).asString) )
+                  } }
+                { var ws = WebSocket.connect:target
+                  var got = ws.receive
+                  ws.close
+                  got }
+            )
+        };
+        listener.close;
+        "* The pong arrived (opcode 10) echoing the ping payload...
+        .is:{ (results.at:0).at:0 } equalTo:10;
+        .is:{ (results.at:0).at:1 } equalTo:'p1';
+        "* ...and the fragments reassembled into one message.
+        .is:{ results.at:1 } equalTo:'hello';
+    };
+
+    .test:
+    serverInitiatedClose -> {
+        var listener = TcpListener.listen:'127.0.0.1:0';
+        var target = 'ws://127.0.0.1:' + listener.port.s + '/bye';
+        var results = Async.timeout:5000 do:{
+            Async.gather:#(
+                { listener.acceptOnce:{ |conn|
+                      var bs = conn.byteStream
+                      wsUpgrade.value:bs
+                      wsWrite.valueWithArgs:#(
+                          bs true 8 ((Bytes.of:#( 3 233 )) + 'going away'.asBytes)
+                      )
+                      "* the client echoes our close back
+                      var c = wsRead.value:bs
+                      (c.at:1) }
+                  }
+                { var ws = WebSocket.connect:target
+                  var got = ws.receive
+                  #( got ws.closed? ws.closeCode ws.closeReason ) }
+            )
+        };
+        listener.close;
+        .is:{ results.at:0 } equalTo:8;
+        var client = results.at:1;
+        .is:{ client.at:0 } equalTo:nil;
+        .isTrue:{ client.at:1 };
+        "* 3*256 + 233 = 1001
+        .is:{ client.at:2 } equalTo:1001;
+        .is:{ client.at:3 } equalTo:'going away';
+    };
+
+    .test:
+    handshakeRefusals -> {
+        "* Not a ws URL at all — no network involved.
+        .does:{ WebSocket.connect:'http://example.org/' } throw:ValueError;
+        "* A server that answers 200 instead of 101.
+        var l1 = TcpListener.listen:'127.0.0.1:0';
+        var t1 = 'ws://127.0.0.1:' + l1.port.s + '/';
+        var r1 = Async.timeout:5000 do:{
+            Async.gather:#(
+                { l1.acceptOnce:{ |conn|
+                      var bs = conn.byteStream
+                      bs.readUntil:'\r\n\r\n' limit:65536
+                      bs.writeAll:'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n'.asBytes
+                  }
+                  'served' }
+                { { WebSocket.connect:t1; 'connected' }.catch:{ |e:IoError| 'refused' } }
+            )
+        };
+        l1.close;
+        .is:{ r1.at:1 } equalTo:'refused';
+        "* A 101 whose accept token is wrong.
+        var l2 = TcpListener.listen:'127.0.0.1:0';
+        var t2 = 'ws://127.0.0.1:' + l2.port.s + '/';
+        var r2 = Async.timeout:5000 do:{
+            Async.gather:#(
+                { l2.acceptOnce:{ |conn|
+                      var bs = conn.byteStream
+                      bs.readUntil:'\r\n\r\n' limit:65536
+                      var resp = 'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n'
+                      resp = resp + 'Connection: Upgrade\r\nSec-WebSocket-Accept: bogus\r\n\r\n'
+                      bs.writeAll:resp.asBytes
+                  }
+                  'served' }
+                { { WebSocket.connect:t2; 'connected' }.catch:{ |e:IoError| 'refused' } }
+            )
+        };
+        l2.close;
+        .is:{ r2.at:1 } equalTo:'refused';
+    };
+}

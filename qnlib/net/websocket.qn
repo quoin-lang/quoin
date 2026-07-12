@@ -1,0 +1,266 @@
+"* ===========================================================================
+"* WebSocket — an RFC 6455 client, pure Quoin over TcpSocket/TlsSocket (so
+"* `wss://` falls out for free, exactly like the HTTP client).
+"*
+"*   use std:net/websocket;
+"*   var ws = WebSocket.connect:'wss://example.org/feed';
+"*   ws.sendText:'hello';
+"*   ws.eachMessage:{ |m| m.print };    "* until the server closes
+"*   ws.close;
+"*
+"* `receive` answers a String (text frame) or Bytes (binary frame) and nil once
+"* the connection has closed cleanly; pings are answered automatically and
+"* fragmented messages are reassembled. Sends are masked as the RFC requires
+"* (`Bytes#maskWith:` natively — cycled XOR is its own inverse). `close` runs
+"* the close handshake; `closeCode`/`closeReason` report the far side's. A
+"* connection torn without a close frame surfaces as a catchable IoError.
+"* Subprotocols, extra headers, and permessage-deflate are future work.
+
+use std:net/http
+
+WebSocket <- { |@stream @url @closed @sentClose @closeCode @closeReason|
+    .meta <-- {
+        "* Open a WebSocket to a `ws://` or `wss://` URL: connect (TLS for wss),
+        "* send the HTTP/1.1 upgrade with a random Sec-WebSocket-Key, and VERIFY
+        "* the 101 response's Sec-WebSocket-Accept (base64(sha1(key + GUID))) —
+        "* a wrong status or accept throws an IoError.
+        connect: -> { |wsUrl|
+            var parts = .parseWsUrl:wsUrl
+            var secure = parts.at:0
+            var target = (parts.at:1) + ':' + (parts.at:2)
+            var path = parts.at:3
+            var sock = secure.if:{ TlsSocket.connect:target } else:{ TcpSocket.connect:target }
+            var bs = sock.byteStream
+            var key = ([Crypto]Random.bytes:16).toBase64
+            var req = 'GET ' + path + ' HTTP/1.1\r\n'
+            req = req + 'Host: ' + target + '\r\n'
+            req = req + 'Upgrade: websocket\r\n'
+            req = req + 'Connection: Upgrade\r\n'
+            req = req + 'Sec-WebSocket-Key: ' + key + '\r\n'
+            req = req + 'Sec-WebSocket-Version: 13\r\n\r\n'
+            bs.writeAll:req.asBytes
+            "* The shared native head parser: #( status reason headLen headers ).
+            var head = [HTTP]Parser.parseHead:(bs.readUntil:'\r\n\r\n' limit:65536)
+            ((head.at:0) == 101).else:{
+                IoError.throw:('websocket: expected 101 Switching Protocols, got %' % (head.at:0))
+            }
+            var accept = nil
+            (head.at:3).each:{ |pair|
+                ((pair.at:0).lower == 'sec-websocket-accept').if:{ accept = pair.at:1 }
+            }
+            (accept == (.acceptFor:key)).else:{
+                IoError.throw:'websocket: bad Sec-WebSocket-Accept (not a WebSocket server?)'
+            }
+            ^.new:{
+                var stream = bs
+                var url = wsUrl
+            }
+        }
+
+        "* The RFC 6455 accept token for a key — what an upgrade response must
+        "* echo. Class-side so a Quoin SERVER can compute it too.
+        acceptFor: -> { |key:String ^String|
+            ^([Crypto]Digest.sha1:(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')).toBase64
+        }
+
+        "* Internal: 'ws(s)://host[:port]/path?query' -> #( secure host port path ).
+        parseWsUrl: -> { |url|
+            var afterScheme = url.splitString:'://'
+            var scheme = afterScheme.at:0
+            ((scheme == 'ws') || (scheme == 'wss')).else:{
+                ValueError.throw:('websocket: not a ws:// or wss:// URL: \'%\'' % url)
+            }
+            var secure = scheme == 'wss'
+            var rest = afterScheme.at:1
+            var restParts = rest.splitString:'/'
+            var hp = (restParts.at:0).splitString:':'
+            var port = (hp.count > 1)
+                .if:{ hp.at:1 }
+                 else:{ secure.if:{ '443' } else:{ '80' } }
+            ^#( secure (hp.at:0) port ('/' + ((restParts.drop:1).join:'/')) )
+        }
+    }
+
+    "* Internal.
+    init -> {
+        @closed = false
+        @sentClose = false
+    }
+
+    "* The URL this socket connected to.
+    url -> { @url }
+
+    "* Whether the connection has closed (cleanly or by error).
+    closed? -> { @closed }
+
+    "* The close code the far side sent (1005 when its close frame carried
+    "* none), or nil while open.
+    closeCode -> { @closeCode }
+
+    "* The close reason text (possibly ''), or nil while open.
+    closeReason -> { @closeReason }
+
+    "* Send a text message (one frame, masked). Answers self.
+    sendText: -> { |text:String|
+        .sendFrame:1 payload:text.asBytes
+        ^self
+    }
+
+    "* Send a binary message. Answers self.
+    sendBytes: -> { |bytes:Bytes|
+        .sendFrame:2 payload:bytes
+        ^self
+    }
+
+    "* Send a ping (the far side must pong; incoming pings are answered
+    "* automatically inside `receive`). Answers self.
+    ping -> { ^.ping:Bytes.empty }
+
+    "* A ping carrying a payload (`String` or `Bytes`, <= 125 bytes).
+    ping: -> { |payload|
+        var bytes = (String ~ payload).if:{ payload.asBytes } else:{ payload };
+        .sendFrame:9 payload:bytes
+        ^self
+    }
+
+    "* The next message: a String for a text frame, Bytes for binary — or nil
+    "* once the connection closes cleanly. Fragmented messages are reassembled;
+    "* pings are ponged and pongs ignored, invisibly. Parks the task while
+    "* waiting. A connection torn without a close frame throws an IoError.
+    receive -> {
+        @closed.if:{ ^^nil }
+        var msgOp = 0
+        var parts = #()
+        { true }.whileDo:{
+            var frame = .readFrame
+            var op = frame.at:1
+            (op == 9).if:{ .sendFrame:10 payload:(frame.at:2) }
+            else:{
+                (op == 10).if:{ nil }
+                else:{
+                    (op == 8).if:{ ^^.handleClose:(frame.at:2) }
+                    else:{
+                        (op == 0).else:{ msgOp = op }
+                        parts.add:(frame.at:2)
+                        (frame.at:0).if:{
+                            var whole = Bytes.empty
+                            parts.each:{ |p| whole = whole + p }
+                            ^^(msgOp == 1).if:{ whole.asString } else:{ whole }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    "* Loop `receive` into the block until the connection closes; answers self.
+    eachMessage: -> { |block|
+        { true }.whileDo:{
+            var m = .receive
+            m.defined?.else:{ ^^self }
+            block.value:m
+        }
+    }
+
+    "* Close with code 1000 (normal). See close:reason:.
+    close -> { ^.close:1000 reason:'' }
+
+    "* Run the close handshake: send a close frame, then drain incoming frames
+    "* until the far side's close reply (data still in flight is discarded).
+    "* Idempotent; a connection torn mid-handshake still ends closed. Returns nil.
+    close:reason: -> { |code:Integer reason:String|
+        @closed.if:{ ^^nil }
+        @sentClose.if:{ ^^nil }
+        var payload = (Bytes.of:#( ((code / 256) % 256) (code % 256) )) + reason.asBytes;
+        .sendFrame:8 payload:payload
+        @sentClose = true
+        var me = self
+        {
+            { me.receive.defined? }.whileDo:{ nil }
+        }.catch:{ |e:IoError|
+            @closed = true
+            @stream.close
+        }
+        nil
+    }
+
+    "* -- internals ----------------------------------------------------------
+
+    "* One frame off the wire: #( fin opcode payload ). Server frames must be
+    "* unmasked; reserved bits mean an extension we never negotiated.
+    readFrame -> {
+        var h = @stream.readExactly:2
+        var b0 = h.at:0
+        (((b0 / 16) % 8) == 0).else:{
+            ParseError.throw:'websocket: reserved bits set (no extension was negotiated)'
+        }
+        var b1 = h.at:1
+        (b1 >= 128).if:{ ParseError.throw:'websocket: the server sent a masked frame' }
+        var len = b1 % 128
+        (len == 126).if:{
+            var ext = @stream.readExactly:2
+            len = ((ext.at:0) * 256) + (ext.at:1)
+        }
+        else:{
+            (len == 127).if:{
+                var ext = @stream.readExactly:8
+                len = 0
+                ext.each:{ |b| len = (len * 256) + b }
+            }
+        }
+        var payload = (len == 0).if:{ Bytes.empty } else:{ @stream.readExactly:len }
+        ^#( (b0 >= 128) (b0 % 16) payload )
+    }
+
+    "* Mask and send one frame (fin always set — we never fragment sends).
+    sendFrame:payload: -> { |op payload:Bytes|
+        @closed.if:{ IoError.throw:'websocket: the connection is closed' kind:#closed }
+        var h = #()
+        h.add:(128 + op)
+        var len = payload.count
+        (len < 126).if:{ h.add:(128 + len) }
+        else:{
+            (len < 65536).if:{
+                h.add:(128 + 126)
+                h.add:(len / 256)
+                h.add:(len % 256)
+            }
+            else:{
+                h.add:(128 + 127)
+                var le = #()
+                var v = len
+                (1..9).each:{
+                    le.add:(v % 256)
+                    v = v / 256
+                }
+                le.reverse.each:{ |b| h.add:b }
+            }
+        }
+        var key = [Crypto]Random.bytes:4
+        @stream.writeAll:((Bytes.of:h) + key + (payload.maskWith:key))
+    }
+
+    "* A close frame arrived: record code/reason, echo the close unless we
+    "* already sent ours, and tear down. Answers nil (receive's close answer).
+    handleClose: -> { |payload|
+        (payload.count >= 2).if:{
+            @closeCode = ((payload.at:0) * 256) + (payload.at:1)
+            @closeReason = (payload.from:2 to:payload.count).asString
+        }
+        else:{
+            "* 1005: the reserved 'no status present' marker.
+            @closeCode = 1005
+            @closeReason = ''
+        }
+        @sentClose.else:{
+            "* Echo the code (not the reason) back, per the RFC's handshake.
+            .sendFrame:8 payload:(payload.from:0 to:((payload.count < 2).if:{ 0 } else:{ 2 }))
+            @sentClose = true
+        }
+        @closed = true
+        @stream.close
+        ^nil
+    }
+
+    s -> { ^'WebSocket(%1%2)' % #( @url (@closed.if:{ ', closed' } else:{ '' }) ) }
+}
