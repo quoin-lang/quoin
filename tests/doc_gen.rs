@@ -4,8 +4,10 @@
 //!   * the ONE pipeline — a single class page carries docs from both worlds: `.doc(..)` text
 //!     from a native builder and a `"*` comment block lifted from Quoin source;
 //!   * the JSON model is the contract (`version`, class/method shape);
-//!   * user units are documented alongside the stdlib;
-//!   * `--coverage` reports instead of generating.
+//!   * an explicit path documents that project (the default mode is project-first);
+//!   * `--coverage` reports instead of generating;
+//!   * PROJECT mode: provenance partition, platform-class extensions, bin/ command
+//!     sniffing, the README preamble, and --stdlib-path linking.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -29,7 +31,7 @@ fn fresh_out(name: &str) -> std::path::PathBuf {
 fn stdlib_docs_carry_both_native_and_quoin_doc_text() {
     let out_dir = fresh_out("stdlib");
     let out = run_doc(
-        &["--json", "--out", out_dir.to_str().unwrap()],
+        &["--stdlib", "--json", "--out", out_dir.to_str().unwrap()],
         Path::new(env!("CARGO_MANIFEST_DIR")),
     );
     assert!(
@@ -41,7 +43,7 @@ fn stdlib_docs_carry_both_native_and_quoin_doc_text() {
     let model: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(out_dir.join("model.json")).unwrap())
             .expect("model.json parses");
-    assert_eq!(model["version"], 1, "the model contract is versioned");
+    assert_eq!(model["version"], 2, "the model contract is versioned");
 
     let classes = model["classes"].as_array().unwrap();
     let class = |name: &str| {
@@ -156,6 +158,93 @@ fn stdlib_docs_carry_both_native_and_quoin_doc_text() {
     }
 
     let _ = std::fs::remove_dir_all(&out_dir);
+}
+
+#[test]
+fn project_mode_partitions_extensions_commands_and_readme() {
+    // A mini project with all four surfaces: a project class, a platform-class reopen
+    // (method-level provenance -> an extension group), a bin/ command with a #!qn line,
+    // and a README. The stdlib classes must NOT be documented; the extension host links
+    // through --stdlib-path.
+    let proj = fresh_out("projmode");
+    std::fs::create_dir_all(proj.join("lib")).unwrap();
+    std::fs::create_dir_all(proj.join("bin")).unwrap();
+    std::fs::create_dir_all(proj.join("tests")).unwrap();
+    std::fs::write(
+        proj.join("lib/util.qn"),
+        "\"* A tiny helper.\nHelper <- {\n\x20   \"* Twice the input.\n\x20   double: -> { |n| n * 2 }\n}\n\
+         \"* Project seasoning for a platform class.\nString <-- {\n\x20   \"* This string, shouted.\n\x20   shout -> { .upper + '!' }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("bin/tool"),
+        "#!/usr/bin/env qn\n\"* Does tool things.\n'hi'.print\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests/ignored.qn"),
+        "NotDocumented <- { x -> { 1 } }\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("README.md"), "# tooly\n\nA **great** tool.\n").unwrap();
+
+    let out = run_doc(
+        &["--json", "--stdlib-path", "../ref", "--out", "docs-out"],
+        &proj,
+    );
+    assert!(
+        out.status.success(),
+        "qn doc failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let model: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(proj.join("docs-out/model.json")).unwrap())
+            .unwrap();
+    assert_eq!(model["version"], 2);
+    assert_eq!(model["project"], true);
+    let classes = model["classes"].as_array().unwrap();
+    assert!(
+        classes.iter().any(|c| c["name"] == "Helper"),
+        "the project class is the subject"
+    );
+    assert!(
+        !classes.iter().any(|c| c["name"] == "String"),
+        "platform classes are background, not subjects"
+    );
+    assert!(
+        !classes.iter().any(|c| c["name"] == "NotDocumented"),
+        "tests/ is not API"
+    );
+    let exts = model["extensions"].as_array().unwrap();
+    assert_eq!(exts.len(), 1, "one extended platform class");
+    assert_eq!(exts[0]["host"], "String");
+    assert_eq!(
+        exts[0]["instance_methods"].as_array().unwrap().len(),
+        1,
+        "only the project's method documents"
+    );
+    let commands = model["commands"].as_array().unwrap();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0]["name"], "tool");
+    assert_eq!(commands[0]["doc"], "Does tool things.");
+
+    // The index: README preamble (its own h1 wins; bold renders), the command, and the
+    // extension listing. The extension page links its host through --stdlib-path.
+    let index = std::fs::read_to_string(proj.join("docs-out/index.html")).unwrap();
+    assert!(index.contains("<h1>tooly</h1>"), "README h1 is the title");
+    assert!(
+        index.contains("<strong>great</strong>"),
+        "README bold renders"
+    );
+    assert!(index.contains("bin/tool"), "the command lists");
+    assert!(index.contains("ext.String.html"), "the extension lists");
+    let ext_page = std::fs::read_to_string(proj.join("docs-out/ext.String.html")).unwrap();
+    assert!(
+        ext_page.contains("href=\"../ref/String.html\""),
+        "the host links through --stdlib-path"
+    );
+    assert!(ext_page.contains("This string, shouted."));
+    let _ = std::fs::remove_dir_all(&proj);
 }
 
 #[test]
@@ -285,7 +374,7 @@ fn highlight_html_shares_the_doc_generator_styles() {
 fn coverage_reports_and_emits_nothing() {
     let out_dir = fresh_out("cov");
     let out = run_doc(
-        &["--coverage", "--out", out_dir.to_str().unwrap()],
+        &["--stdlib", "--coverage", "--out", out_dir.to_str().unwrap()],
         Path::new(env!("CARGO_MANIFEST_DIR")),
     );
     assert!(out.status.success());

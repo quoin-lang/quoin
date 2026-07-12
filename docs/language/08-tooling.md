@@ -336,22 +336,36 @@ by the formatter's own test suite.
 
 ---
 
-## 41. The API reference — `qn doc`
+## 41. Documenting a project — `qn doc`
 
 > **Rules**
-> - `qn doc [PATH…]` generates the API reference for the stdlib **plus any of
->   your own units** into `qn-docs/` (`--out DIR` to change): one HTML page per
->   class and a namespace-grouped index. `--json` also writes the raw doc
->   model as `model.json` (`{"version": 1, …}`) for other renderers.
+> - `qn doc` documents **the current directory's project**: it loads the
+>   tree's `.qn` units (skipping `tests/`, `bin/`, hidden directories, and
+>   shebang scripts — a command's top level *is* the program) and generates
+>   one HTML page per class plus an index into `qn-docs/` (`--out DIR`).
+>   `PATH…` narrows the roots. `--json` also writes the raw model as
+>   `model.json` (`{"version": 2, …}`) for other renderers.
 > - **Docs are comments**: a contiguous run of `"*` lines *immediately* above
 >   a definition — method, class, or class extension — is that definition's
 >   documentation. A blank line detaches it. The first line is the summary.
+> - **Your extensions are API.** Methods your project adds to platform
+>   classes (`[OS]Process <-- { … }`) document under your project as
+>   "Extensions to …" — provenance is per method, so the platform's own
+>   surface never bleeds in.
+> - The index opens with your `README.md` (headers, lists, links, and
+>   `quoin`-tagged fences render), and lists `bin/` entries whose `#!` line
+>   mentions `qn` as the project's commands.
+> - A discovered unit that doesn't load standalone (a `Quernfile.qn`-style
+>   config script) is skipped with a warning; files you name explicitly fail
+>   hard. Well-formed library files `use` what they need, so loading them
+>   standalone just works.
 > - The same docs answer `$doc` in the REPL and `doc`/`docFor:` in code.
-> - `--coverage` lists every public class/selector with no doc and the overall
->   percentage. It is a report, not a gate — exit `0` either way.
+> - `--coverage` lists every class/selector of *yours* with no doc and the
+>   overall percentage. It is a report, not a gate — exit `0` either way.
 > - `--check` runs the documentation's **examples** instead of generating:
 >   with PATHs, fenced blocks tagged `quoin` in markdown files/dirs; without,
->   the annotated examples inside the stdlib's own doc comments. Exit `1` if
+>   the annotated examples inside your own doc comments — with the project
+>   preloaded, so examples needn't `use` the code they document. Exit `1` if
 >   any fail.
 
 Documenting your own code is just commenting it (Part I's `"*` line comment),
@@ -369,11 +383,12 @@ Circle <- { |@radius|
 ```
 
 ```
-$ qn doc shapes.qn --out shapedocs
-qn doc: 111 classes -> shapedocs
-$ qn doc --coverage shapes.qn
+$ qn doc
+qn doc: skipping Quernfile.qn (does not load standalone): undefined name `Quern` — …
+qn doc: 8 classes, 1 extended classes, 1 commands -> qn-docs
+$ qn doc --coverage
 undocumented: Circle diameter
-doc coverage: 1077/1078 (99.9%)
+doc coverage: 73/74 (98.6%)
 ```
 
 The coverage report is the safety net for the adjacency rule: a blank line
@@ -402,8 +417,9 @@ qn doc --check: 5 examples, 2 annotations checked, 0 failed
 The chapter you are reading — all of `docs/language/` — is checked exactly this
 way in CI, which is why its examples can promise their annotations are true.
 Run bare (`qn doc --check`, no paths), the same engine executes the annotated
-examples inside the stdlib's own doc comments, so the generated API reference
-is held to the same standard.
+examples inside your project's own doc comments — doc-tested libraries for
+free. (The stdlib's reference is generated and checked with the same tool; the
+publishing flags it uses aren't part of the everyday surface.)
 
 ---
 
