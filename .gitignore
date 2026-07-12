@@ -4,3 +4,4 @@ crates/*/target
 profile.json.gz
 /profiling/*
 !/profiling/analyze.py
+__pycache__/
