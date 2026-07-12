@@ -225,6 +225,8 @@ pub struct VmRunnerOptions {
     pub highlight_html: bool,
     /// `qn doc --check`: run the documentation's fenced examples instead of generating.
     pub doc_check: bool,
+    /// `qn doc --md`: render markdown paths to HTML pages with Quoin highlighting.
+    pub doc_md: bool,
     /// `qn doc --stdlib` (hidden): document the shipped stdlib instead of a project.
     pub doc_stdlib: bool,
     /// `qn doc --stdlib-path PREFIX` (hidden): link prefix (relative path or URL) for
@@ -401,6 +403,10 @@ enum Cmd {
         /// markdown files/dirs (blocks tagged `quoin`); without, the project's doc examples
         #[arg(long)]
         check: bool,
+        /// Render markdown PATHs (files or directories) to HTML pages instead —
+        /// fenced `quoin` blocks through the syntax highlighter
+        #[arg(long)]
+        md: bool,
         /// Document the shipped stdlib instead of a project (the reference-publishing
         /// mode this repository uses) — not an end-user flag
         #[arg(long, hide = true)]
@@ -628,6 +634,7 @@ impl VmRunnerOptions {
         let mut doc_json = false;
         let mut doc_coverage = false;
         let mut doc_check = false;
+        let mut doc_md = false;
         let mut doc_stdlib = false;
         let mut doc_stdlib_path = None;
         let mut highlight_html = false;
@@ -652,6 +659,7 @@ impl VmRunnerOptions {
                 json,
                 coverage: cov,
                 check,
+                md,
                 stdlib,
                 stdlib_path,
             }) => {
@@ -660,6 +668,7 @@ impl VmRunnerOptions {
                 doc_json = json;
                 doc_coverage = cov;
                 doc_check = check;
+                doc_md = md;
                 doc_stdlib = stdlib;
                 doc_stdlib_path = stdlib_path;
                 VmRunnerMode::Doc
@@ -777,6 +786,7 @@ impl VmRunnerOptions {
             doc_json,
             doc_coverage,
             doc_check,
+            doc_md,
             doc_stdlib,
             doc_stdlib_path,
             highlight_html,

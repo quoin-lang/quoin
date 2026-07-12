@@ -231,7 +231,10 @@ fn project_mode_partitions_extensions_commands_and_readme() {
     // The index: README preamble (its own h1 wins; bold renders), the command, and the
     // extension listing. The extension page links its host through --stdlib-path.
     let index = std::fs::read_to_string(proj.join("docs-out/index.html")).unwrap();
-    assert!(index.contains("<h1>tooly</h1>"), "README h1 is the title");
+    assert!(
+        index.contains("<h1 id=\"tooly\">tooly</h1>"),
+        "README h1 (with its slug anchor) is the title"
+    );
     assert!(
         index.contains("<strong>great</strong>"),
         "README bold renders"
@@ -333,6 +336,58 @@ fn user_units_are_documented_alongside_the_stdlib() {
     // ...and the backticked word renders as code.
     assert!(page.contains("<code>radius</code>"));
     let _ = std::fs::remove_dir_all(&proj);
+}
+
+#[test]
+fn md_mode_renders_pages_with_quoin_highlighting() {
+    // The book build: a directory of markdown becomes HTML pages — quoin fences (norun
+    // included) through the shared highlighter, tables and rule-box blockquotes render,
+    // inter-page links rewrite, README.md becomes index.html.
+    let dir = fresh_out("mdmode");
+    std::fs::create_dir_all(dir.join("book")).unwrap();
+    std::fs::write(
+        dir.join("book/README.md"),
+        "# The Book\n\nStart at [chapter one](01-intro.md).\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("book/01-intro.md"),
+        "# One\n\nBack to the [index](README.md).\n\n> **Rules**\n> - a `x`\n>\n> ```quoin\n> var x = 1\n> ```\n\n\
+         | A | B |\n|---|---|\n| 1 | 2 |\n\n```quoin norun\nnil.bogus\n```\n",
+    )
+    .unwrap();
+    let out = run_doc(&["--md", "book", "--out", "site"], &dir);
+    assert!(
+        out.status.success(),
+        "qn doc --md failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("2 pages"), "{stdout}");
+    let index = std::fs::read_to_string(dir.join("site/index.html")).unwrap();
+    assert!(
+        index.contains("href=\"01-intro.html\""),
+        ".md links rewrite to rendered names"
+    );
+    let page = std::fs::read_to_string(dir.join("site/01-intro.html")).unwrap();
+    assert!(
+        page.contains("href=\"index.html\""),
+        "README links map to index.html"
+    );
+    assert!(page.contains("<blockquote>"), "rule boxes render");
+    assert!(
+        page.matches("qn-code").count() >= 2,
+        "quoin AND quoin norun fences highlight"
+    );
+    assert!(
+        page.contains("<th>A</th>") && page.contains("<td>2</td>"),
+        "tables render"
+    );
+    assert!(
+        page.contains("<title>One</title>"),
+        "the first h1 titles the page"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `qn highlight --html` — the other consumer of the same stylesheet and span classes.

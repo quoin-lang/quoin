@@ -124,6 +124,9 @@ impl VmRunner {
         if self.options.doc_check {
             return self.run_doc_check();
         }
+        if self.options.doc_md {
+            return self.run_doc_md();
+        }
         let out_dir = PathBuf::from(
             self.options
                 .target_path
@@ -172,6 +175,69 @@ impl VmRunner {
         crate::runner::print_or_exit(&format!(
             "qn doc: {} -> {}\n",
             parts.join(", "),
+            out_dir.display()
+        ));
+        Ok(())
+    }
+
+    /// `--md`: render markdown PATHs (files, or directories walked recursively) to HTML
+    /// pages under `--out`, fenced `quoin` blocks through the shared highlighter — the
+    /// book build, and anyone's project docs. Relative `*.md` links rewrite to the
+    /// rendered names; a directory's `README.md` becomes its `index.html`. Directory
+    /// structure under a given root is mirrored.
+    fn run_doc_md(&self) -> Result<(), QuoinError> {
+        let paths: Vec<String> = self.options.vm_options.arguments.clone();
+        if paths.is_empty() {
+            eprintln!("qn doc --md: give markdown files or directories to render");
+            exit(2);
+        }
+        let out_dir = PathBuf::from(
+            self.options
+                .target_path
+                .clone()
+                .unwrap_or_else(|| "qn-docs".to_string()),
+        );
+        // (root-relative output path, source path)
+        let mut pages: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for arg in &paths {
+            let path = Path::new(arg);
+            if path.is_dir() {
+                collect_md(path, Path::new(""), &mut pages);
+            } else {
+                let name = path.file_name().map(PathBuf::from).unwrap_or_default();
+                pages.push((name, path.to_path_buf()));
+            }
+        }
+        if pages.is_empty() {
+            eprintln!("qn doc --md: no .md files under the given paths");
+            exit(2);
+        }
+        if let Err(e) = std::fs::create_dir_all(&out_dir) {
+            eprintln!("qn doc: cannot create {}: {e}", out_dir.display());
+            exit(1);
+        }
+        for (rel, src) in &pages {
+            let Ok(text) = std::fs::read_to_string(src) else {
+                eprintln!("qn doc --md: cannot read {}", src.display());
+                exit(1);
+            };
+            let html = crate::md_html::render(&text, true);
+            let title = crate::md_html::title_of(&text).unwrap_or_else(|| {
+                rel.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
+            let out_rel = html_name(rel);
+            if let Some(parent) = out_rel.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = std::fs::create_dir_all(out_dir.join(parent));
+            }
+            write_out(&out_dir.join(&out_rel), &page(&title, &html));
+        }
+        crate::runner::print_or_exit(&format!(
+            "qn doc: {} pages -> {}\n",
+            pages.len(),
             out_dir.display()
         ));
         Ok(())
@@ -386,6 +452,40 @@ fn walk_units(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(child);
         }
     }
+}
+
+/// Every `.md` under `dir` (sorted, hidden dirs skipped), with root-relative paths.
+fn collect_md(dir: &Path, rel: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    children.sort();
+    for child in children {
+        let name = child
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if child.is_dir() {
+            if !name.starts_with('.') {
+                collect_md(&child, &rel.join(&name), out);
+            }
+        } else if name.ends_with(".md") {
+            out.push((rel.join(&name), child));
+        }
+    }
+}
+
+/// `01-foundations.md` → `01-foundations.html`; `README.md` → `index.html`.
+fn html_name(rel: &Path) -> PathBuf {
+    let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let mapped = if name == "README.md" {
+        "index.html".to_string()
+    } else {
+        format!("{}.html", name.strip_suffix(".md").unwrap_or(name))
+    };
+    rel.with_file_name(mapped)
 }
 
 fn starts_with_shebang(path: &Path) -> bool {
@@ -851,6 +951,11 @@ a.src:hover { text-decoration: underline; }
 .method > .body { margin: .3rem 0 0 1rem; }
 .badge { font-size: .75rem; color: var(--dim); border: 1px solid var(--line);
          border-radius: 4px; padding: 0 .35rem; margin-left: .5rem; vertical-align: middle; }
+blockquote { border-left: 3px solid var(--line); margin: 1rem 0; padding: .1rem 1rem;
+             color: var(--fg); background: color-mix(in srgb, var(--code-bg) 55%, var(--bg)); }
+table { border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid var(--line); padding: .3rem .6rem; text-align: left; }
+th { background: var(--code-bg); }
 ul.classlist { list-style: none; padding-left: 0; }
 ul.classlist li { margin: .15rem 0; }
 ul.classlist .summary { color: var(--dim); margin-left: .5rem; }
@@ -898,7 +1003,7 @@ fn render_index(model: &DocModel) -> String {
         format!("<h1>{}</h1>\n", esc(&model.title))
     };
     if let Some(readme) = &model.readme {
-        body.push_str(&md_html(readme));
+        body.push_str(&crate::md_html::render(readme, false));
         body.push_str("<hr>\n");
     }
     if !model.commands.is_empty() {
@@ -1015,118 +1120,6 @@ fn render_extension(group: &ExtensionGroup, model: &DocModel) -> String {
         }
     }
     page(&format!("Extensions to {}", group.host), &body)
-}
-
-/// Minimal markdown for the README preamble: ATX headers, fenced code (highlighted when
-/// tagged `quoin` or untagged-but-Quoin-looking is NOT attempted — only `quoin` fences
-/// highlight, the rest render plain), paragraphs, and the inline layer (backtick spans and
-/// `[text](url)` links). Everything else renders as prose — honest, not a full renderer.
-fn md_html(md: &str) -> String {
-    let mut out = String::new();
-    let mut para: Vec<&str> = Vec::new();
-    let mut items: Vec<String> = Vec::new();
-    let mut fence: Option<(String, Vec<&str>)> = None;
-    let flush_para = |out: &mut String, para: &mut Vec<&str>| {
-        if !para.is_empty() {
-            let _ = write!(out, "<p>{}</p>\n", inline_md(&para.join(" ")));
-            para.clear();
-        }
-    };
-    let flush_items = |out: &mut String, items: &mut Vec<String>| {
-        if !items.is_empty() {
-            out.push_str("<ul>\n");
-            for item in items.iter() {
-                let _ = write!(out, "<li>{}</li>\n", inline_md(item));
-            }
-            out.push_str("</ul>\n");
-            items.clear();
-        }
-    };
-    for line in md.lines() {
-        if let Some((tag, body)) = &mut fence {
-            if line.trim_start().starts_with("```") {
-                if tag.starts_with("quoin") {
-                    let _ = write!(
-                        out,
-                        "{}\n",
-                        crate::highlighter::highlight_to_html(&body.join("\n"))
-                    );
-                } else {
-                    let _ = write!(out, "<pre>{}</pre>\n", esc(&body.join("\n")));
-                }
-                fence = None;
-            } else {
-                body.push(line);
-            }
-        } else if let Some(info) = line.trim_start().strip_prefix("```") {
-            flush_para(&mut out, &mut para);
-            flush_items(&mut out, &mut items);
-            fence = Some((info.trim().to_string(), Vec::new()));
-        } else if let Some(rest) = line.strip_prefix('#') {
-            flush_para(&mut out, &mut para);
-            flush_items(&mut out, &mut items);
-            let level = 1 + rest.chars().take_while(|&c| c == '#').count().min(4);
-            let text = rest.trim_start_matches('#').trim();
-            let _ = write!(out, "<h{level}>{}</h{level}>\n", inline_md(text));
-        } else if let Some(item) = line.trim_start().strip_prefix("- ") {
-            flush_para(&mut out, &mut para);
-            items.push(item.to_string());
-        } else if line.trim().is_empty() {
-            flush_para(&mut out, &mut para);
-            flush_items(&mut out, &mut items);
-        } else if !items.is_empty() {
-            // A wrapped continuation of the previous bullet.
-            let last = items.len() - 1;
-            items[last].push(' ');
-            items[last].push_str(line.trim());
-        } else {
-            para.push(line);
-        }
-    }
-    if let Some((_, body)) = fence {
-        let _ = write!(out, "<pre>{}</pre>\n", esc(&body.join("\n")));
-    }
-    flush_para(&mut out, &mut para);
-    flush_items(&mut out, &mut items);
-    out
-}
-
-/// The inline layer plus `**bold**` and `[text](url)` links (applied on the escaped text,
-/// so an `&` in a URL is already `&amp;` — valid HTML).
-fn inline_md(text: &str) -> String {
-    let mut s = inline(text);
-    // **bold**: pairs only; an odd trailing ** stays literal.
-    while let Some(a) = s.find("**") {
-        let Some(b) = s[a + 2..].find("**") else {
-            break;
-        };
-        let b = a + 2 + b;
-        s = format!(
-            "{}<strong>{}</strong>{}",
-            &s[..a],
-            &s[a + 2..b],
-            &s[b + 2..]
-        );
-    }
-    let mut out = String::new();
-    let mut rest = s.as_str();
-    while let Some(open) = rest.find('[') {
-        let Some(close) = rest[open..].find("](") else {
-            break;
-        };
-        let close = open + close;
-        let Some(end) = rest[close + 2..].find(')') else {
-            break;
-        };
-        let end = close + 2 + end;
-        let label = &rest[open + 1..close];
-        let url = &rest[close + 2..end];
-        out.push_str(&rest[..open]);
-        let _ = write!(out, r#"<a href="{url}">{label}</a>"#);
-        rest = &rest[end + 1..];
-    }
-    out.push_str(rest);
-    out
 }
 
 fn render_class(class: &ClassDoc, model: &DocModel) -> String {
