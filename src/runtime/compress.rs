@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 
 use flate2::Compression;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
-use flate2::write::{GzEncoder, ZlibEncoder};
+use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
 
 pub fn gzip_decode(input: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
@@ -43,6 +43,14 @@ pub fn deflate_decode(input: &[u8]) -> Result<Vec<u8>, String> {
 /// Encode as zlib-wrapped deflate (the RFC-correct form of `Content-Encoding: deflate`).
 pub fn deflate_encode(input: &[u8]) -> Result<Vec<u8>, String> {
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(input).map_err(|e| e.to_string())?;
+    enc.finish().map_err(|e| e.to_string())
+}
+
+/// Encode as a RAW deflate stream (RFC 1951 — no zlib header or adler trailer):
+/// what zip entries carry. `deflate_decode` reads both forms back.
+pub fn deflate_encode_raw(input: &[u8]) -> Result<Vec<u8>, String> {
+    let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
     enc.write_all(input).map_err(|e| e.to_string())?;
     enc.finish().map_err(|e| e.to_string())
 }

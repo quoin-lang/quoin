@@ -1,7 +1,10 @@
-"* Streaming gunzip over registry streams (src/io_codecs.rs table + the generic
+"* Streaming gzip over registry streams (src/io_codecs.rs table + the generic
 "* IoRequest::WrapStream): `byteStream.gunzip` / `stringStream.gunzip` wrap the
-"* stream IN PLACE, so everything downstream (readAll, readLine, a future tar
-"* reader) sees decompressed bytes without materializing the whole.
+"* stream IN PLACE, so everything downstream (readAll, readLine, the tar reader)
+"* sees decompressed bytes without materializing the whole. The write side
+"* (`gzip`) is the encoder twin: `close` FINISHES it (IoRequest::FinishStream
+"* drives the poll_close that writes the trailer) — the tests below pin the
+"* trailer's presence with a strict decode and the system gzip.
 (TestSuite.new:{ var name = 'GzipStream' }).add:{
     .test:
     roundTripAcrossChunkBoundaries -> {
@@ -68,6 +71,77 @@ gamma'.asBytes.encodeGz);
         var ws = [IO]File.create:p;
         .does:{ ws.codecWrap:'gunzip' } throw:IoError;
         ws.close;
+        [IO]File.delete:p;
+    };
+
+    .test:
+    writeRoundTrip -> {
+        "* Well past the 16 KiB write buffer, so the encoder spans many drains.
+        var p = '/tmp/qn_t_gz_write.gz';
+        var payload = ((1..5000).collect:{ |i| 'line-%1-%2' % #( i (i * 3) ) }).join:',';
+        var w = ([IO]File.create:p).gzip;
+        w.writeAll:payload.asBytes;
+        w.close;
+        "* decodeGz (the materialized twin) validates the stream strictly — a
+        "* missing trailer would throw here...
+        .is:{ ([IO]File.open:p).byteStream.readAll.decodeGz.asString } equalTo:payload;
+        "* ...and the system gzip agrees the file is whole.
+        .is:{ ([OS]Process.run:#( 'gzip' '-t' p )).exitCode } equalTo:0;
+        [IO]File.delete:p;
+    };
+
+    .test:
+    textThroughStringStream -> {
+        "* The finish duty transfers through stringStream consumption: a .log.gz
+        "* written line by line.
+        var p = '/tmp/qn_t_gz_text.gz';
+        var s = ([IO]File.create:p).gzip.stringStream;
+        s.writeln:'alpha';
+        s.writeln:'beta';
+        s.close;
+        var r = ([IO]File.open:p).stringStream.gunzip;
+        .is:{ r.readLine } equalTo:'alpha';
+        .is:{ r.readLine } equalTo:'beta';
+        .is:{ r.readLine } equalTo:nil;
+        r.close;
+        [IO]File.delete:p;
+    };
+
+    .test:
+    writeGuards -> {
+        var p = '/tmp/qn_t_gz_wguard.gz';
+        "* gzip wraps only a not-yet-written file write stream...
+        var w = [IO]File.create:p;
+        w.writeAll:'x'.asBytes;
+        .does:{ w.gzip } throw:IoError;
+        w.close;
+        "* ...never a read stream (wrapping the write side would sever reads).
+        .does:{ ([IO]File.open:p).byteStream.gzip } throw:IoError;
+        "* Double close is a no-op — the finish runs once.
+        var w2 = ([IO]File.create:p).gzip;
+        w2.writeAll:'ok'.asBytes;
+        w2.close;
+        w2.close;
+        .is:{ ([IO]File.open:p).byteStream.gunzip.readAll.asString } equalTo:'ok';
+        [IO]File.delete:p;
+    };
+
+    .test:
+    scopedThrowStillFinishes -> {
+        "* The throw path can't park, so it reaps — and the driver drain FINISHES
+        "* a write-codec stream instead of dropping it. Buffered-but-unflushed
+        "* text goes down with the error by contract, so the file must come out
+        "* VALID and EMPTY, not truncated.
+        var p = '/tmp/qn_t_gz_scoped.gz';
+        {
+            StringStream.over:(([IO]File.create:p).gzip) do:{ |s|
+                s.writeln:'goes down with the error'
+                ValueError.throw:'boom'
+            }
+        }.catch:{ |e:ValueError| nil };
+        "* Parking here idles the scheduler, which drains the reap first.
+        Async.sleep:50;
+        .is:{ ([IO]File.open:p).byteStream.gunzip.readAll.count } equalTo:0;
         [IO]File.delete:p;
     };
 }

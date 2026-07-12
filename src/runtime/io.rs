@@ -347,6 +347,53 @@ pub fn build_io_file_class() -> NativeClassBuilder {
              `[IO]Folder.next` walk uses to tell the two apart). From the metadata snapshot \
              taken when the [IO]File was created.",
         )
+        .instance_method("size", |vm, mc, receiver, _args| {
+            receiver
+                .with_native_state(|io: &NativeIoFile| io.metadata.len())
+                .map_err(|e| QuoinError::Other(e.to_string()))
+                .map(|n| vm.new_int(mc, n as i64))
+        })
+        .doc(
+            "The file's length in bytes, from the metadata snapshot taken when the \
+             [IO]File was created — what a tar header (which precedes the content) or a \
+             Content-Length needs before reading.",
+        )
+        .sdk_instance_method("modified", |host, receiver, _args| {
+            let mtime = receiver
+                .with_native_state(|io: &NativeIoFile| io.metadata.modified())
+                .map_err(|e| QuoinError::Other(e.to_string()))?
+                .map_err(|e| QuoinError::from_io_error(&e.into()))?;
+            let ts = jiff::Timestamp::try_from(mtime).map_err(|e| {
+                QuoinError::ValueError(format!("[IO]File#modified: out of range: {e}"))
+            })?;
+            Ok(crate::runtime::timestamp::make_timestamp(host, ts))
+        })
+        .doc(
+            "The file's last-modification time as a Timestamp, from the metadata snapshot \
+             taken when the [IO]File was created.",
+        )
+        // randomAccess -> open the file for positioned reads (pread-style; see the
+        // RandomAccessFile class). Like byteStream, a fresh fd per call; the size
+        // comes from an open-time stat, not this [IO]File's snapshot.
+        .instance_method("randomAccess", |vm, mc, receiver, _args| {
+            let path = receiver
+                .with_native_state(|io: &NativeIoFile| io.path.clone())
+                .map_err(QuoinError::Other)?;
+            match vm.await_io(IoRequest::OpenFileRandom { path })? {
+                IoResult::Opened { id, size } => Ok(
+                    crate::runtime::random_access::make_random_access(vm, mc, id, size),
+                ),
+                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
+                other => Err(QuoinError::Other(format!(
+                    "randomAccess: unexpected I/O result {other:?}"
+                ))),
+            }
+        })
+        .doc(
+            "Open the file for positioned reads and answer a RandomAccessFile — \
+             `readAt:offset count:` anywhere in the file, no cursor. What a \
+             random-access format (zip) reads through; a fresh fd per call.",
+        )
         .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_path = receiver.with_native_state(|io: &NativeIoFile| io.path.clone())?;
             let rhs_path = args[0].with_native_state(|io: &NativeIoFile| io.path.clone());

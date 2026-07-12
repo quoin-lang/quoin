@@ -1,0 +1,68 @@
+"* The stdlib's `asData` defaults — the custom-serialization protocol's built-in half.
+"* `asData` answers a value made of the core data tree (nil, Booleans, numbers,
+"* Strings, Lists, Maps — plus Bytes where the format has it); every structured
+"* format (JSON, MessagePack, TOML, YAML) calls it when its walk reaches a value it
+"* has no representation for, and recurses on the answer. Classes are open, so any
+"* class — including one you don't own — joins the protocol with one method:
+"*
+"*   Point <-- { asData -> { #{ 'x': @x 'y': @y } } }
+"*
+"* One-way by design (no type tags — interop over magic): the reverse convention is
+"* a class-side `fromData:`, and the stdlib types below round-trip through their own
+"* `parse:`. Symbol, Block, and Regex stay UNserializable by default — silently
+"* stringifying identifiers or code is a trap; opt a class in yourself if you mean it.
+
+"* The zone-aware instant, as its RFC 9557 string ('…+09:00[Asia/Tokyo]') — lossless
+"* for Quoin (DateTime.parse: reads it back, zone and all). For bare RFC 3339
+"* interop, serialize `.timestamp` instead.
+DateTime <-- {
+    asData -> { .s }
+}
+
+"* The absolute instant, as its RFC 3339 string (Timestamp.parse: reads it back).
+Timestamp <-- {
+    asData -> { .s }
+}
+
+"* The civil date, as ISO 8601 ('2026-07-11'; Date.parse: reads it back).
+Date <-- {
+    asData -> { .s }
+}
+
+"* The wall-clock time, as ISO 8601 ('09:40:00'; Time.parse: reads it back).
+Time <-- {
+    asData -> { .s }
+}
+
+"* The calendar span, as an ISO 8601 duration ('P1Y2M'; Span.parse: reads it back).
+Span <-- {
+    asData -> { .iso8601 }
+}
+
+"* The fixed duration, as an ISO 8601 duration ('PT1H30M'; Span.parse: reads it
+"* back — as a time-only Span, `asDuration` completing the round trip).
+Duration <-- {
+    asData -> { .iso8601 }
+}
+
+"* The canonical hyphenated form (UUID.parse: reads it back).
+UUID <-- {
+    asData -> { .s }
+}
+
+"* The canonical Crockford base32 form (ULID.parse: reads it back).
+ULID <-- {
+    asData -> { .s }
+}
+
+"* A Set serializes as a List in insertion order (the formats have no set type);
+"* it comes back as a List — rebuild with Set.of: if set-ness matters.
+Set <-- {
+    asData -> { .collect:{ |e| e } }
+}
+
+"* A Map entry, as #{'key': …, 'value': …} — the values recurse through the
+"* protocol themselves.
+KeyValuePair <-- {
+    asData -> { #{ 'key': .key 'value': .value } }
+}

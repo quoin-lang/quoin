@@ -1,0 +1,192 @@
+"* [Archive]Zip (core/17-zip.qn): the random-access archive — reader over the
+"* readAt:count:+size protocol (file OR Bytes), writer onto any write stream.
+"* The shared archive is built once in setupAll: by OUR writer; the interop
+"* suite below checks it against the system zip/unzip (and self-skips where
+"* those aren't installed).
+
+"* Rebuild `bytes` with one byte changed — how the refusal tests corrupt
+"* well-formed archives surgically.
+var pokeByte = { |bytes i v|
+    var l = #()
+    bytes.each:{ |b| l.add:b }
+    l.at:i put:v
+    Bytes.of:l
+}
+
+(TestSuite.new:{ var name = 'Zip' }).add:{
+    var rep = ((1..500).collect:{ 'la' }).join:'';
+
+    .setupAll:{
+        var zip = [Archive]Zip.writeTo:([IO]File.create:'/tmp/qn_t_zip.zip')
+        zip.addFolder:'sub'
+        zip.add:'a.txt' text:'hello zip'
+        zip.add:'sub/rep.txt' text:rep
+        zip.add:'tiny.bin' bytes:(Bytes.of:#( 1 2 3 ))
+        zip.add:'sub/naïve — name.txt' text:'utf-8 name'
+        zip.close
+    };
+
+    .teardownAll:{
+        ([OS]Process.run:#(
+            'rm' '-rf' '/tmp/qn_t_zip.zip' '/tmp/qn_t_zip_out' '/tmp/qn_t_zip_evil.zip'
+        )).check;
+    };
+
+    .test:
+    writeReadRoundTrip -> {
+        var zip = [Archive]Zip.open:'/tmp/qn_t_zip.zip';
+        .is:{ zip.count } equalTo:5;
+        .is:{ (zip.at:'a.txt').text } equalTo:'hello zip';
+        .is:{ (zip.at:'sub/rep.txt').text } equalTo:rep;
+        .is:{ (zip.at:'tiny.bin').bytes } equalTo:(Bytes.of:#( 1 2 3 ));
+        .is:{ (zip.at:'sub/naïve — name.txt').text } equalTo:'utf-8 name';
+        "* Random access: entries re-read freely, in any order — unlike tar.
+        .is:{ (zip.at:'a.txt').text } equalTo:'hello zip';
+        "* Compressible content deflated, incompressible stored — whichever is
+        "* smaller, per entry.
+        .is:{ (zip.at:'sub/rep.txt').method } equalTo:#deflate;
+        .isTrue:{ (zip.at:'sub/rep.txt').compressedSize < 100 };
+        .is:{ (zip.at:'tiny.bin').method } equalTo:#stored;
+        .is:{ (zip.at:'sub/').type } equalTo:#directory;
+        zip.close;
+        "* ...and after close, content reads throw.
+        .does:{ (zip.at:'a.txt').bytes } throw:IoError;
+    };
+
+    .test:
+    sameReaderOverBytes -> {
+        "* The whole reader over an in-memory archive — the protocol's point.
+        var zip = [Archive]Zip.of:(([IO]File.open:'/tmp/qn_t_zip.zip').byteStream.readAll);
+        .is:{ (zip.at:'sub/rep.txt').text } equalTo:rep;
+        .is:{ (zip.select:{ |e| e.type == #file }).count } equalTo:4;
+    };
+
+    .test:
+    entryMetadata -> {
+        var zip = [Archive]Zip.open:'/tmp/qn_t_zip.zip';
+        var e = zip.at:'a.txt';
+        .is:{ e.size } equalTo:9;
+        "* DOS times are civil (local wall clock, no zone) — date and time.
+        .isTrue:{ e.date.year >= 2026 };
+        .is:{ e.time } a:Time;
+        zip.close;
+    };
+
+    .test:
+    extractIsConfined -> {
+        [OS]Process.run:#( 'rm' '-rf' '/tmp/qn_t_zip_out' );
+        var zip = [Archive]Zip.open:'/tmp/qn_t_zip.zip';
+        zip.extractTo:'/tmp/qn_t_zip_out';
+        zip.close;
+        .is:{ [IO]File.read:'/tmp/qn_t_zip_out/a.txt' } equalTo:'hello zip';
+        .is:{ [IO]File.read:'/tmp/qn_t_zip_out/sub/rep.txt' } equalTo:rep;
+        "* The writer happily records '../evil.txt' — the READER's extract
+        "* confines, exactly like tar's.
+        var w = [Archive]Zip.writeTo:([IO]File.create:'/tmp/qn_t_zip_evil.zip');
+        w.add:'../evil.txt' text:'gotcha';
+        w.close;
+        var evil = [Archive]Zip.open:'/tmp/qn_t_zip_evil.zip';
+        .does:{ evil.extractTo:'/tmp/qn_t_zip_out' } throw:ValueError;
+        evil.close;
+        .isFalse:{ [IO]File.exists?:'/tmp/evil.txt' };
+    };
+
+    .test:
+    refusals -> {
+        "* Not a zip at all.
+        .does:{ [Archive]Zip.of:('this is not a zip archive at all, sorry'.asBytes) }
+            throw:ParseError;
+        var good = ([IO]File.open:'/tmp/qn_t_zip.zip').byteStream.readAll;
+        "* Truncation loses the end-of-central-directory record.
+        .does:{ [Archive]Zip.of:(good.from:0 to:(good.count - 30)) } throw:ParseError;
+        "* Our writer emits no comment, so the EOCD is exactly the last 22
+        "* bytes — poke its fields to forge what v1 refuses.
+        var eocd = good.count - 22;
+        "* disk number != 0 -> multi-disk.
+        { [Archive]Zip.of:(pokeByte.valueWithArgs:#( good (eocd + 4) 1 )); !!! }
+            .catch:{ |e:ParseError| .isTrue:{ e.message.contains?:'multi-disk' } };
+        "* total entries 0xFFFF -> the zip64 marker.
+        var z64 = pokeByte.valueWithArgs:#( good (eocd + 10) 255 );
+        z64 = pokeByte.valueWithArgs:#( z64 (eocd + 11) 255 );
+        { [Archive]Zip.of:z64; !!! }
+            .catch:{ |e:ParseError| .isTrue:{ e.message.contains?:'zip64' } };
+        "* Flip a content byte -> the CRC check catches it. 'a.txt' is the
+        "* SECOND member (after 'sub/'): its LFH is at 30 + 4, its 9 stored
+        "* content bytes at that + 30 + 5.
+        var corrupt = pokeByte.valueWithArgs:#( good (30 + 4 + 30 + 5) 88 );
+        var zc = [Archive]Zip.of:corrupt;
+        { (zc.at:'a.txt').bytes; !!! }
+            .catch:{ |e:ParseError| .isTrue:{ e.message.contains?:'CRC mismatch' } };
+    };
+
+    .test:
+    emptyArchive -> {
+        var w = [Archive]Zip.writeTo:([IO]File.create:'/tmp/qn_t_zip_empty.zip');
+        w.close;
+        "* Adding after close throws; a second close is a no-op.
+        .does:{ w.add:'x.txt' text:'x' } throw:ValueError;
+        w.close;
+        var zip = [Archive]Zip.open:'/tmp/qn_t_zip_empty.zip';
+        .is:{ zip.count } equalTo:0;
+        zip.close;
+        [IO]File.delete:'/tmp/qn_t_zip_empty.zip';
+    };
+}
+
+"* System interop — the dogfood mirror. Self-skips where the system tools are
+"* missing, the way optional-extension suites do.
+(TestSuite.new:{ var name = 'ZipInterop' }).add:{
+    var rep = ((1..500).collect:{ 'la' }).join:'';
+    ((([OS]Process.run:#( 'which' 'zip' )).ok?) && (([OS]Process.run:#( 'which' 'unzip' )).ok?))
+        .else:{ .skip:'system zip/unzip not installed' };
+
+    .setupAll:{
+        var zip = [Archive]Zip.writeTo:([IO]File.create:'/tmp/qn_t_zipi.zip')
+        zip.addFolder:'sub'
+        zip.add:'a.txt' text:'interop says hello'
+        zip.add:'sub/rep.txt' text:rep
+        zip.close
+    };
+
+    .teardownAll:{
+        ([OS]Process.run:#(
+            'rm' '-rf'
+            '/tmp/qn_t_zipi.zip' '/tmp/qn_t_zipi_out' '/tmp/qn_t_zipi_sys.zip'
+            '/tmp/qn_t_zipi_enc.zip' '/tmp/qn_t_zipi_secret.txt'
+        )).check;
+    };
+
+    .test:
+    unzipExtractsOurs -> {
+        [OS]Process.run:#( 'rm' '-rf' '/tmp/qn_t_zipi_out' );
+        ([OS]Process.run:#( 'unzip' '-q' '/tmp/qn_t_zipi.zip' '-d' '/tmp/qn_t_zipi_out' )).check;
+        .is:{ [IO]File.read:'/tmp/qn_t_zipi_out/a.txt' } equalTo:'interop says hello';
+        "* ...including inflating our raw-deflate members.
+        .is:{ [IO]File.read:'/tmp/qn_t_zipi_out/sub/rep.txt' } equalTo:rep;
+    };
+
+    .test:
+    weReadSystemZips -> {
+        [OS]Process.run:#( 'rm' '-f' '/tmp/qn_t_zipi_sys.zip' );
+        ([OS]Process.run:#( 'zip' '-q' '-r' '/tmp/qn_t_zipi_sys.zip' '.' )
+            dir:'/tmp/qn_t_zipi_out').check;
+        var zip = [Archive]Zip.open:'/tmp/qn_t_zipi_sys.zip';
+        .is:{ (zip.at:'a.txt').text } equalTo:'interop says hello';
+        .is:{ (zip.at:'sub/rep.txt').size } equalTo:rep.length;
+        zip.close;
+    };
+
+    .test:
+    encryptedEntriesRefuse -> {
+        [IO]File.write:'the secret' to:'/tmp/qn_t_zipi_secret.txt';
+        ([OS]Process.run:#(
+            'zip' '-q' '-P' 'hunter2' '-j' '/tmp/qn_t_zipi_enc.zip' '/tmp/qn_t_zipi_secret.txt'
+        )).check;
+        var zip = [Archive]Zip.open:'/tmp/qn_t_zipi_enc.zip';
+        "* Listing an encrypted archive is fine; CONTENT refuses, by name.
+        .is:{ zip.count } equalTo:1;
+        { (zip.at:'qn_t_zipi_secret.txt').bytes; !!! }
+            .catch:{ |e:ParseError| .isTrue:{ e.message.contains?:'encrypted' } };
+        zip.close;
+    };
+}

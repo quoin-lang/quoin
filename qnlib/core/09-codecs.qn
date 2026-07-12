@@ -40,7 +40,7 @@ String <-- {
     toBase64 -> { Base64.encode:self.asBytes }
 }
 
-"* Streaming decompression sugar over the generic `codecWrap:` (whose codec table lives
+"* Streaming (de)compression sugar over the generic `codecWrap:` (whose codec table lives
 "* in src/io_codecs.rs — a new codec is a table entry there plus a one-liner here).
 ByteStream <-- {
     "* Wrap this (unread) stream so reads yield gunzipped bytes — the streaming twin
@@ -52,10 +52,25 @@ ByteStream <-- {
     "* ([IO]File.open:'big.tar.gz').byteStream.gunzip    "* a streaming gunzip source
     "* ```
     gunzip -> { ^.codecWrap:'gunzip' }
+
+    "* Wrap this (unwritten) file write stream so writes are gzip-compressed — the
+    "* streaming twin of `Bytes#encodeGz`, for writing `.gz`/`.tar.gz` without
+    "* materializing the compressed whole. Answers the receiver. `close` finishes
+    "* the encoder (the trailer is written there) — close the stream deliberately;
+    "* a stream the program leaks is finished for it at exit, best-effort.
+    "*
+    "* ```
+    "* ([IO]File.create:'big.tar.gz').byteStream.gzip    "* a streaming gzip sink
+    "* ```
+    gzip -> { ^.codecWrap:'gzip' }
 }
 
 StringStream <-- {
     "* As `ByteStream#gunzip`, decoding the gunzipped bytes as UTF-8 text — gzipped
     "* logs read line by line without materializing anything.
     gunzip -> { ^.codecWrap:'gunzip' }
+
+    "* As `ByteStream#gzip`, for text: `write:`/`writeln:` land gzip-compressed —
+    "* a `.log.gz` written line by line. Close deliberately (see `ByteStream#gzip`).
+    gzip -> { ^.codecWrap:'gzip' }
 }

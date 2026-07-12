@@ -14,8 +14,8 @@ use crate::runtime::{
     array, async_rt, big_decimal, big_integer, block, boolean, bytes, channel, civil, class,
     codecs, crypto, csv_fmt, date_time, double, duration, extension, fiber as fiber_class, http,
     ids, instant, integer, io, json, list, map, math, method, msgpack, nil, object, os, pretty,
-    process, regex, runtime, set, sockets, span, streams, string, symbol, task, term, time_zone,
-    timer, timestamp, toml_fmt, vm_stats, yaml,
+    process, random_access, regex, runtime, set, sockets, span, streams, string, symbol, task,
+    term, time_zone, timer, timestamp, toml_fmt, vm_stats, yaml,
 };
 use crate::value::{EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -119,6 +119,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, sockets::build_tcp_listener_class());
     vm.register_native_class(mc, http::build_http_parser_class());
     vm.register_native_class(mc, streams::build_byte_stream_class());
+    vm.register_native_class(mc, random_access::build_random_access_class());
     vm.register_native_class(mc, streams::build_string_stream_class());
     vm.register_native_class(mc, os::build_os_path_class());
     vm.register_native_class(mc, os::build_os_env_class());

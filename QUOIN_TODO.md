@@ -536,13 +536,15 @@ deferred `Mirror` in `## REPL`.
 - [x] **CSV** — read/write with quoting/escaping.
 - [x] **TOML**/**YAML** (config)
 - [x] **MessagePack** (binary, pairs with `Bytes`).
-- [ ] **Custom serialization** — a configurable way for users to serialize non-trivial types
-  (`DateTime`, `BigDecimal`, custom classes, …) into the structured formats, rather than the
-  Phase-1 behavior of erroring on anything outside the core value tree. Design a serialization
-  protocol/hook — e.g. an opt-in `toData`/`asJson`-style method, or a registry mapping a class to
-  a `DataValue` shape — so a `DateTime` serializes as an RFC 3339 string, a user class as a chosen
-  Map, etc., with control over the round-trip. (Cross-ref `docs/STDLIB_DATA_FORMATS.md` — the
-  `DataValue` bridge is the natural seam for this.)
+- [x] **Custom serialization** — the **`asData` method protocol** (a registry would duplicate
+  open-class extension): when `value_to_json`/`value_to_data` reach a no-representation value,
+  they call the class's `asData` and recurse on the answer (same depth budget → self-referential
+  asData errors catchably). Stdlib defaults in `qnlib/core/16-serialize.qn` (DateTime RFC 9557,
+  Timestamp RFC 3339, Date/Time ISO, Span/Duration iso8601, UUID/ULID, Set → List,
+  KeyValuePair), each round-tripping via the type's own `parse:`; Symbol/Block/Regex stay
+  errors by default (opt in per class). One-way/untagged; reverse convention = class-side
+  `fromData:`. The extension wire + worker frames keep strict walkers DELIBERATELY. As-built
+  in `docs/STDLIB_DATA_FORMATS.md`; tests `qnlib/tests/74-serialize.qn`; book §44.
 
 **Text & presentation**
 - [x] **Pretty-printer** — structural, width-aware rendering of nested collections/objects
@@ -605,9 +607,16 @@ deferred `Mirror` in `## REPL`.
   `IoRequest::WrapStream` + the codec factory table in `src/io_codecs.rs` — adding a codec is a
   table entry + a qnlib sugar one-liner; the async machinery never changes again (parameterized
   wraps like TLS stay bespoke). Multi-member gz decodes end to end; unread-stream precondition
-  enforced. Tests `qnlib/tests/72-gzip-stream.qn`. **Streaming WRITE deferred to tar-write**: the
-  gzip trailer is written by the encoder's close, but the reap path only DROPS fds — the close
-  path must learn to finish the encoder first, or collected handles write corrupt archives.
+  enforced. Tests `qnlib/tests/72-gzip-stream.qn`. **Streaming WRITE shipped** (2026-07-11):
+  the codec table grew a `Side` (read/write); `gzip` wraps an unwritten FILE write stream
+  (`ByteStream/StringStream#gzip`). The trailer-on-close problem is solved by one generic
+  `IoRequest::FinishStream` op driving the wrapped stream's `poll_close`, wired on every path:
+  explicit `close` parks on it (a failed finish throws there), the reap drain finishes flagged
+  ids instead of dropping (the backend records them at wrap time), and backend teardown
+  (`SmolInner::drop`) finishes whatever remains — so even "wrote a .gz and fell off the end"
+  (or `Runtime.exit:`) yields a valid file (pinned by `tests/gzip_write.rs` child-qn runs).
+  Write codecs on SOCKETS are deliberately refused: sockets are bidirectional and the encoder's
+  write-only adapter would sever reads — revisit if streaming-compressed responses ever want it.
 - [x] ⭐ **zstd** — decode via `ruzstd` (pure Rust) as `Bytes.decodeZstd`. Encode deferred (no
   pure-Rust zstd compressor — would need the C `zstd` crate). `src/runtime/compress.rs`.
 - [x] **tar READ** — `[Archive]Tar`/`[Archive]TarEntry` (`qnlib/core/15-tar.qn`, PURE QUOIN over
@@ -617,10 +626,26 @@ deferred `Mirror` in `## REPL`.
   ParseError, `extractTo:` with normalized+CONFINED paths (traversal attack pinned by a
   hand-crafted archive in `qnlib/tests/73-tar.qn`; real fixtures come from the system tar via
   [OS]Process). Book §44.
-- [ ] **tar WRITE** — wants streaming gzip ENCODE first (the trailer-on-close problem recorded
-  under the compression item); plain `.tar` write could ship earlier if needed.
-- [ ] **zip** (`zip`) — archive read/write; needs central-directory (non-streaming) reading, its
-  own design.
+- [x] **tar WRITE** — `[Archive]Tar.writeTo:stream` → `[Archive]TarWriter` (pure Quoin, in
+  `core/15-tar.qn`): `add:text:`/`add:bytes:`, `addFile:as:` (streamed in chunks; size + mtime
+  from the `[IO]File` metadata snapshot — `size`/`modified` were added natively for it),
+  `addFolder:`, `close` (zero end blocks + close through a `gzip` wrap, so `.tar.gz` is pure
+  composition). POSIX ustar headers; names > 100 bytes ride a pax `path=` extended header.
+  Verified against our own reader AND the system tar (`qnlib/tests/73-tar.qn` TarWrite suite).
+  Defaults deliberate (0644/0755, uid/gid 0, mtime now); per-member mode/mtime overrides are
+  future sugar if wanted.
+- [x] **zip** — `[Archive]Zip`/`ZipEntry`/`ZipWriter` (`qnlib/core/17-zip.qn`, PURE QUOIN) on the
+  new **random-access read protocol** (`readAt:offset count:` + `size`): `Zip.open:` reads through
+  a `RandomAccessFile` (native class over `IoRequest::OpenFileRandom`/`ReadAt`, pread-style
+  seekables registry in the backend — the listener precedent), `Zip.of:` runs the same reader over
+  in-memory Bytes. EOCD tail scan (comment-length-validated), eager CD parse, lazy CRC-verified
+  content (`Bytes#crc32` native, flate2), stored+deflate, encrypted/multi-disk/zip64 refusals by
+  name, civil DOS date/time, confined `extractTo:`. Writer streams to any write stream (LFH+data
+  per add, CD+EOCD at close), stored-or-deflated whichever is smaller via new `encodeDeflateRaw`
+  (RFC 1951 — `encodeDeflate` was documented "raw" but is and stays ZLIB-wrapped, docs fixed;
+  `decodeDeflate` reads both). Interop verified both directions vs system zip/unzip
+  (`qnlib/tests/77-zip.qn`; the interop suite self-skips without the tools). Deferred: zip64
+  (>4 GiB / >65k entries), encrypted archives, positioned WRITE on RandomAccessFile.
 
 **System & process**
 - [x] ⭐ **Environment** — `[OS]Env` read/iterate shipped (`src/runtime/os.rs`, tests
@@ -677,6 +702,21 @@ deferred `Mirror` in `## REPL`.
   deadlines, detached spawn+join — `docs/ASYNC_ARCH.md` Stage 2b).
 
 ## Bugs/Odd Behavior
+- [ ] **`qn fmt` internal error: multi-line `#( … )` as `%`'s right operand inside a parenthesized
+  argument.** The self-verification catches it (aborts, no corruption), but the file can't be
+  formatted. Minimal repro (formats fine once the list is single-line, or when the `%` expression
+  is bound to a var first — the workaround used in `core/17-zip.qn` contentFor:):
+  ```
+  Foo <- {
+      m: -> { |entry|
+          ParseError.throw:('zip: %1 method %2' % #(
+              entry.name
+              entry.methodCode
+          ))
+      }
+  }
+  ```
+  Found writing the zip reader (2026-07-11). Fix lives in `crates/quoin-fmt`.
 - [x] **`List.new` / `Map.new` / `Set.new` produce broken shells.** FIXED for the
   collections (+ `Bytes.new`): native class methods now win the hierarchy lookup before the
   generic fallback — `new` constructs the real empty native value; `new:` raises a clear

@@ -1,5 +1,7 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::vm::VmState;
+
 use crate::ext_sdk::Host;
 use crate::runtime::big_decimal::{NativeBigDecimal, make_decimal};
 use crate::runtime::big_integer::{NativeBigInteger, make_bigint};
@@ -7,6 +9,7 @@ use crate::runtime::data_value::{MAX_SERIALIZE_DEPTH, too_deep};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
+use gc_arena::Mutation;
 
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
@@ -17,7 +20,10 @@ fn unserializable(type_name: &str) -> QuoinError {
     QuoinError::TypeError {
         expected: "a JSON-serializable value".to_string(),
         got: type_name.to_string(),
-        msg: format!("cannot serialize a {type_name} to JSON"),
+        msg: format!(
+            "cannot serialize a {type_name} to JSON — define asData (e.g. Bytes → a base64 \
+             String) to give it a representation"
+        ),
     }
 }
 
@@ -26,11 +32,20 @@ fn unserializable(type_name: &str) -> QuoinError {
 /// user instance, …) error — JSON has no representation for them. A value nested past
 /// [`MAX_SERIALIZE_DEPTH`] errors too: JSON has its own `serde_json` recursion limit of 128 on the
 /// way back in, and an unbounded walk of a cyclic value would abort the process.
-fn value_to_json(v: Value) -> Result<Json, QuoinError> {
-    value_to_json_at(v, 0)
+fn value_to_json<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    v: Value<'gc>,
+) -> Result<Json, QuoinError> {
+    value_to_json_at(vm, mc, v, 0)
 }
 
-fn value_to_json_at(v: Value, depth: usize) -> Result<Json, QuoinError> {
+fn value_to_json_at<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    v: Value<'gc>,
+    depth: usize,
+) -> Result<Json, QuoinError> {
     if depth > MAX_SERIALIZE_DEPTH {
         return Err(too_deep());
     }
@@ -45,29 +60,31 @@ fn value_to_json_at(v: Value, depth: usize) -> Result<Json, QuoinError> {
             }),
         Value::Object(obj) => {
             // Payload-level types first (String / Bytes / Block / Symbol / user instance).
-            {
+            // Classify inside the borrow; the asData hook runs AFTER it drops (the hook
+            // re-enters the interpreter, which may borrow the object again).
+            let blocked: Option<String> = {
                 let borrowed = obj.borrow();
                 match &borrowed.payload {
                     ObjectPayload::String(s) => return Ok(Json::String((**s).clone())),
-                    ObjectPayload::Bytes(_) => {
-                        return Err(QuoinError::TypeError {
-                            expected: "a JSON-serializable value".to_string(),
-                            got: "Bytes".to_string(),
-                            msg: "JSON has no bytes type; encode with Base64 first".to_string(),
-                        });
-                    }
-                    ObjectPayload::Symbol(_) => return Err(unserializable("Symbol")),
-                    ObjectPayload::Block(_) => return Err(unserializable("Block")),
-                    ObjectPayload::Instance => return Err(unserializable(&borrowed.class_name())),
-                    ObjectPayload::NativeState(_) => {} // dispatched below, after dropping the borrow
+                    ObjectPayload::Bytes(_) => Some("Bytes".to_string()),
+                    ObjectPayload::Symbol(_) => Some("Symbol".to_string()),
+                    ObjectPayload::Block(_) => Some("Block".to_string()),
+                    ObjectPayload::Instance => Some(borrowed.class_name()),
+                    ObjectPayload::NativeState(_) => None, // dispatched below
                 }
+            };
+            if let Some(kind) = blocked {
+                return match crate::runtime::data_value::as_data_of(vm, mc, v) {
+                    Some(res) => value_to_json_at(vm, mc, res?, depth + 1),
+                    None => Err(unserializable(&kind)),
+                };
             }
             if let Ok(items) =
                 v.with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
             {
                 let arr = items
                     .iter()
-                    .map(|e| value_to_json_at(*e, depth + 1))
+                    .map(|e| value_to_json_at(vm, mc, *e, depth + 1))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(Json::Array(arr));
             }
@@ -84,7 +101,7 @@ fn value_to_json_at(v: Value, depth: usize) -> Result<Json, QuoinError> {
                             "JSON: Map keys must be Strings".to_string(),
                         ));
                     };
-                    obj_map.insert((**ks).clone(), value_to_json_at(val, depth + 1)?);
+                    obj_map.insert((**ks).clone(), value_to_json_at(vm, mc, val, depth + 1)?);
                 }
                 return Ok(Json::Object(obj_map));
             }
@@ -106,7 +123,11 @@ fn value_to_json_at(v: Value, depth: usize) -> Result<Json, QuoinError> {
                         QuoinError::Other("BigDecimal -> JSON number failed".to_string())
                     });
             }
-            Err(unserializable(v.type_name()))
+            // An unlisted native type: the asData protocol is its one way in.
+            match crate::runtime::data_value::as_data_of(vm, mc, v) {
+                Some(res) => value_to_json_at(vm, mc, res?, depth + 1),
+                None => Err(unserializable(&v.class_name())),
+            }
         }
         _ => Err(unserializable(v.type_name())),
     }
@@ -201,11 +222,11 @@ pub fn build_json_class() -> NativeClassBuilder {
              ```",
         )
         // JSON.generate:value → a compact JSON string.
-        .sdk_class_method("generate:", |host, _r, args| {
-            let json = value_to_json(args[0])?;
+        .class_method("generate:", |vm, mc, _r, args| {
+            let json = value_to_json(vm, mc, args[0])?;
             let s = serde_json::to_string(&json)
                 .map_err(|e| QuoinError::Other(format!("JSON.generate:: {e}")))?;
-            Ok(host.new_string(s))
+            Ok(vm.new_string(mc, s))
         })
         .doc(
             "Generate the compact (single-line) JSON string for a value. Maps, Lists, \
@@ -217,11 +238,11 @@ pub fn build_json_class() -> NativeClassBuilder {
              ```",
         )
         // JSON.generatePretty:value → an indented JSON string.
-        .sdk_class_method("generatePretty:", |host, _r, args| {
-            let json = value_to_json(args[0])?;
+        .class_method("generatePretty:", |vm, mc, _r, args| {
+            let json = value_to_json(vm, mc, args[0])?;
             let s = serde_json::to_string_pretty(&json)
                 .map_err(|e| QuoinError::Other(format!("JSON.generatePretty:: {e}")))?;
-            Ok(host.new_string(s))
+            Ok(vm.new_string(mc, s))
         })
         .doc(
             "Like `generate:`, but indented for human eyes (two spaces, one key per \

@@ -48,6 +48,14 @@ pub struct NativeStream {
     /// for the client. Only file write streams (`[IO]File.create:` / `append:`) buffer — the
     /// same split C stdio makes.
     wcap: usize,
+    /// Whether anything has ever been written through this handle — the write-side
+    /// twin of the `rbuf`-empty check in `codec_wrap`'s preconditions (a codec must
+    /// see the stream from its first byte).
+    wrote: bool,
+    /// Wrapped in a write-side codec: `close` must FINISH the stream (park on
+    /// `FinishStream`, driving the encoder's trailer-writing `poll_close`) rather
+    /// than enqueue the fd for a drop-reap.
+    needs_finish: bool,
 }
 
 impl NativeStream {
@@ -122,19 +130,28 @@ impl Drop for NativeStream {
 }
 
 /// The shared `codecWrap:` body — wrap the underlying registry stream in a named
-/// codec (io_codecs.rs), in place. Preconditions keep it honest: the stream must
-/// be open, UNREAD (read-ahead already buffered raw bytes would be silently lost
-/// to the decoder), and a read stream (write-buffered file streams have no
-/// read side to transform).
+/// codec (io_codecs.rs), in place. Preconditions keep it honest, per the codec's
+/// side. A READ codec (gunzip) wraps an open, UNREAD read stream (read-ahead
+/// already buffered raw bytes would be silently lost to the decoder; a
+/// write-buffered file stream has no read side to transform). A WRITE codec
+/// (gzip) mirrors that: an open, UNWRITTEN file write stream — sockets are
+/// refused because they are bidirectional, and wrapping the write side would
+/// sever reads through the encoder's write-only adapter.
 fn codec_wrap<'gc>(
     vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     receiver: Value<'gc>,
     args: &[Value<'gc>],
     who: &str,
 ) -> Result<Value<'gc>, QuoinError> {
     let codec = arg!(args, String, 0);
-    let (id, closed, buffered, wcap) = receiver
-        .with_native_state::<NativeStream, _, _>(|s| (s.id, s.closed, s.rbuf.len(), s.wcap))
+    // The same early lookup the backend does, here for the SIDE — so the
+    // preconditions match the codec and a typo'd name errs before any I/O.
+    let (side, _) = crate::io_codecs::lookup(&codec).map_err(|e| QuoinError::from_io_error(&e))?;
+    let (id, closed, buffered, wcap, wrote) = receiver
+        .with_native_state::<NativeStream, _, _>(|s| {
+            (s.id, s.closed, s.rbuf.len(), s.wcap, s.wrote)
+        })
         .map_err(QuoinError::Other)?;
     if closed {
         return Err(QuoinError::io(
@@ -142,23 +159,53 @@ fn codec_wrap<'gc>(
             format!("{who}: the stream is closed"),
         ));
     }
-    if wcap > 0 {
-        return Err(QuoinError::io(
-            IoErrorKind::InvalidInput,
-            format!("{who}: this is a write stream — codecs wrap read streams"),
-        ));
-    }
-    if buffered > 0 {
-        return Err(QuoinError::io(
-            IoErrorKind::InvalidInput,
-            format!("{who}: the stream has already been read — wrap it before the first read"),
-        ));
+    match side {
+        crate::io_codecs::Side::Read => {
+            if wcap > 0 {
+                return Err(QuoinError::io(
+                    IoErrorKind::InvalidInput,
+                    format!("{who}: this is a write stream — '{codec}' wraps read streams"),
+                ));
+            }
+            if buffered > 0 {
+                return Err(QuoinError::io(
+                    IoErrorKind::InvalidInput,
+                    format!(
+                        "{who}: the stream has already been read — wrap it before the first read"
+                    ),
+                ));
+            }
+        }
+        crate::io_codecs::Side::Write => {
+            if wcap == 0 {
+                return Err(QuoinError::io(
+                    IoErrorKind::InvalidInput,
+                    format!("{who}: '{codec}' wraps file write streams ([IO]File.create:/append:)"),
+                ));
+            }
+            if wrote {
+                return Err(QuoinError::io(
+                    IoErrorKind::InvalidInput,
+                    format!(
+                        "{who}: the stream has already been written — wrap it before the first \
+                         write"
+                    ),
+                ));
+            }
+        }
     }
     match vm.await_io(IoRequest::WrapStream {
         id,
         codec: codec.to_string(),
     })? {
-        IoResult::Connected(_) => Ok(receiver),
+        IoResult::Connected(_) => {
+            if side == crate::io_codecs::Side::Write {
+                receiver
+                    .with_native_state_mut::<NativeStream, _, _>(mc, |s| s.needs_finish = true)
+                    .map_err(QuoinError::Other)?;
+            }
+            Ok(receiver)
+        }
         IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
         other => Err(QuoinError::Other(format!(
             "{who}: unexpected io result {other:?}"
@@ -243,6 +290,8 @@ fn make_byte_stream_with<'gc>(
             rbuf: Vec::new(),
             wbuf: Vec::new(),
             wcap,
+            wrote: false,
+            needs_finish: false,
         },
     )
 }
@@ -375,13 +424,15 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
              memory — for bounded reading of long streams use `read:` or `readUntil:limit:` \
              in a loop.",
         )
-        .typed_instance_method("codecWrap:", &["String"], |vm, _mc, receiver, args| {
-            codec_wrap(vm, receiver, &args, "codecWrap:")
+        .typed_instance_method("codecWrap:", &["String"], |vm, mc, receiver, args| {
+            codec_wrap(vm, mc, receiver, &args, "codecWrap:")
         })
         .doc(
-            "Wrap the stream in a named codec (see io_codecs.rs) IN PLACE — every later \
-             read yields the transformed bytes; answers the receiver. Prefer the sugar \
-             (`gunzip`). The stream must be open and UNREAD. An unknown codec throws an \
+            "Wrap the stream in a named codec (see io_codecs.rs) IN PLACE — a read codec \
+             transforms every later read, a write codec every later write; answers the \
+             receiver. Prefer the sugar (`gunzip` / `gzip`). A read codec needs an open, \
+             unread read stream; a write codec an open, unwritten file write stream (its \
+             `close` then finishes the encoder). An unknown codec throws an \
              IoError.\n\n\
              ```\n\
              ([IO]File.open:'logs.gz').byteStream.gunzip.readAll    \"* the decompressed bytes\n\
@@ -434,15 +485,15 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         // close -> close the stream (idempotent); its fd is reaped next scheduler turn and
         // any buffered-but-unread bytes are discarded. Further ops throw.
         .instance_method("close", |vm, mc, receiver, _args| {
-            stream_flush(vm, mc, receiver)?;
-            vm.untrack_write_stream(mc, receiver);
-            reap_stream_handle(vm, mc, receiver);
+            close_stream(vm, mc, receiver)?;
             Ok(vm.new_nil(mc))
         })
         .doc(
             "Flush any buffered writes and close the stream (idempotent — a second close is \
-             a no-op). Unread buffered bytes are discarded and further operations throw. \
-             Returns nil.",
+             a no-op). On a write-codec stream (`gzip`) this also FINISHES the encoder — \
+             the trailer that makes the output valid is written here, so close such a \
+             stream deliberately; a failed finish throws. Unread buffered bytes are \
+             discarded and further operations throw. Returns nil.",
         )
         // closed? -> whether the stream has been closed (or consumed by a higher layer).
         .instance_method("closed?", |vm, mc, receiver, _args| {
@@ -538,6 +589,8 @@ pub fn make_string_stream<'gc>(
             rbuf,
             wbuf: Vec::new(),
             wcap: 0,
+            wrote: false,
+            needs_finish: false,
         },
     )
 }
@@ -624,13 +677,13 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
              [IO]File.delete:'/tmp/notes.txt'\n\
              ```",
         )
-        .typed_instance_method("codecWrap:", &["String"], |vm, _mc, receiver, args| {
-            codec_wrap(vm, receiver, &args, "codecWrap:")
+        .typed_instance_method("codecWrap:", &["String"], |vm, mc, receiver, args| {
+            codec_wrap(vm, mc, receiver, &args, "codecWrap:")
         })
         .doc(
             "Wrap the stream in a named codec IN PLACE (see the ByteStream twin) — later \
-             reads decode the transformed bytes as UTF-8; answers the receiver. Prefer \
-             the sugar (`gunzip`); the stream must be open and unread.",
+             reads decode the transformed bytes as UTF-8, later writes go through the \
+             transform; answers the receiver. Prefer the sugar (`gunzip` / `gzip`).",
         )
         // write:text -> the String's UTF-8 bytes. Buffered on a file stream, straight through
         // on a socket. Returns nil.
@@ -665,14 +718,13 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
              (socket) stream. Returns nil.",
         )
         .instance_method("close", |vm, mc, receiver, _args| {
-            stream_flush(vm, mc, receiver)?;
-            vm.untrack_write_stream(mc, receiver);
-            reap_stream_handle(vm, mc, receiver);
+            close_stream(vm, mc, receiver)?;
             Ok(vm.new_nil(mc))
         })
         .doc(
-            "Flush any buffered writes and close the stream (idempotent). Further \
-             operations throw. Returns nil.",
+            "Flush any buffered writes and close the stream (idempotent). On a \
+             write-codec stream (`gzip`) this also finishes the encoder (writing the \
+             trailer); a failed finish throws. Further operations throw. Returns nil.",
         )
         .instance_method("closed?", |vm, mc, receiver, _args| {
             let closed = receiver
@@ -743,6 +795,8 @@ pub struct StreamParts {
     rbuf: Vec<u8>,
     wbuf: Vec<u8>,
     wcap: usize,
+    wrote: bool,
+    needs_finish: bool,
 }
 
 /// Consume a `ByteStream`, returning its parts and leaving it closed (the fd and the buffers
@@ -762,6 +816,8 @@ fn consume_stream<'gc>(
                     rbuf: std::mem::take(&mut s.rbuf), // hand the read-ahead upward
                     wbuf: std::mem::take(&mut s.wbuf), // ...and any undrained writes
                     wcap: s.wcap,
+                    wrote: s.wrote,
+                    needs_finish: s.needs_finish, // the finish duty transfers too
                 };
                 s.mark_closed(); // no reap: the fd moves into the string stream
                 Some(parts)
@@ -800,6 +856,8 @@ fn make_string_stream_from<'gc>(
             rbuf: parts.rbuf,
             wbuf: parts.wbuf,
             wcap: parts.wcap,
+            wrote: parts.wrote,
+            needs_finish: parts.needs_finish,
         },
     )
 }
@@ -837,7 +895,10 @@ fn stream_write<'gc>(
 ) -> Result<(), QuoinError> {
     let id = open_stream_id(receiver)?;
     let cap = receiver
-        .with_native_state::<NativeStream, _, _>(|s| s.wcap)
+        .with_native_state_mut::<NativeStream, _, _>(mc, |s| {
+            s.wrote = true; // seen by codec_wrap's write-side precondition
+            s.wcap
+        })
         .map_err(QuoinError::Other)?;
 
     if cap == 0 {
@@ -970,8 +1031,23 @@ fn scope_stream<'gc>(
     block: Gc<'gc, Block<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
     let result = vm.execute_block(mc, block, vec![handle], None);
-    reap_stream_handle(vm, mc, handle);
-    result
+    match result {
+        // The normal exit gets the full close — flush, and finish a write codec
+        // (its trailer error surfaces here rather than being swallowed).
+        Ok(v) => {
+            close_stream(vm, mc, handle)?;
+            Ok(v)
+        }
+        // The throw/cancel path must not park again: enqueue the drop-reap as
+        // before. The driver's drain still FINISHES a write-codec id (it asks
+        // the backend), so even this path yields a valid archive — only bytes
+        // still in the handle's write buffer go down with the error.
+        Err(e) => {
+            vm.untrack_write_stream(mc, handle);
+            reap_stream_handle(vm, mc, handle);
+            Err(e)
+        }
+    }
 }
 
 /// Drive `block` over each line of `receiver` to EOF (the body of `eachLine:`).
@@ -1046,6 +1122,42 @@ fn find_subsequence<'gc>(receiver: Value<'gc>, delim: &[u8]) -> Result<Option<us
                 .map(|pos| pos + delim.len())
         })
         .map_err(QuoinError::Other)
+}
+
+/// The full explicit close: flush buffered writes, untrack from the exit-flush
+/// registry, then release the fd — by parking on `FinishStream` when the stream
+/// was wrapped in a write-side codec (the encoder's `poll_close` writes its
+/// trailer; a drop would truncate the output), by the ordinary drop-reap
+/// otherwise. The one place `close` can throw is that finish — a trailer that
+/// cannot be written IS data loss, and it surfaces here, once.
+fn close_stream<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+) -> Result<(), QuoinError> {
+    stream_flush(vm, mc, receiver)?;
+    vm.untrack_write_stream(mc, receiver);
+    let finish = receiver
+        .with_native_state::<NativeStream, _, _>(|s| {
+            (!s.is_closed() && s.needs_finish).then(|| s.id())
+        })
+        .map_err(QuoinError::Other)?;
+    let Some(id) = finish else {
+        reap_stream_handle(vm, mc, receiver);
+        return Ok(());
+    };
+    // Mark closed BEFORE parking, so further sends throw and the handle's Drop
+    // won't re-enqueue the id; the op owns the stream from here.
+    receiver
+        .with_native_state_mut::<NativeStream, _, _>(mc, |s| {
+            s.mark_closed();
+        })
+        .map_err(QuoinError::Other)?;
+    match vm.await_io(IoRequest::FinishStream { id })? {
+        IoResult::Closed => Ok(()),
+        IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
+        other => Err(unexpected("close", other)),
+    }
 }
 
 /// Mark a stream closed (idempotent) and enqueue its fd for the driver to reap.

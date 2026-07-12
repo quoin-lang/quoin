@@ -119,6 +119,26 @@ the binary equivalent (`pack:` to Bytes, `unpack:` back), and **Base64** /
 **Hex** encode between Bytes and text — with conveniences hung directly on the
 values (`'hi'.asBytes.toBase64`, `aString.fromBase64`).
 
+Anything beyond the core value tree serializes through the **`asData`
+protocol**: when a generator's walk reaches a value it has no representation
+for, it calls the class's `asData` — which answers a core-tree value — and
+recurses on the result. One method opts any class into *every* format, and
+because classes are open, that includes classes you don't own. The stdlib
+defaults are already wired: `DateTime` (RFC 9557), `Timestamp` (RFC 3339),
+`Date`/`Time` (ISO), `Span`/`Duration` (ISO durations), `UUID`/`ULID`, `Set`
+(→ List), `KeyValuePair` — each chosen to parse back via the type's own
+`parse:`. Deliberately one-way and untagged (interop over magic); the reverse
+convention is a class-side `fromData:`. `Symbol`, `Block`, and `Regex` stay
+unserializable unless you opt them in — silently stringifying identifiers or
+code is a trap. A self-referential `asData` spends the same 128-level depth
+budget as any value, so it errors catchably instead of hanging.
+
+```quoin
+JSON.generate:(Date.parse:'2026-07-11')     "* -> '"2026-07-11"'
+Point <- { |@x @y| asData -> { #{ 'x': @x 'y': @y } } };
+JSON.generate:(Point.new:{ var x = 1; var y = 2 })    "* -> '{"x":1,"y":2}'
+```
+
 ```quoin
 JSON.parse:'[1, 2, 3]'      "* -> #(1 2 3)
 JSON.generate:#{ 'a':1 }    "* -> {"a":1}
@@ -130,23 +150,51 @@ JSON.generate:#{ 'a':1 }    "* -> {"a":1}
 **Bytes** is immutable binary data. Text crosses the boundary *explicitly* —
 `'…'.asBytes` encodes, `asString` decodes (UTF-8) — so there is never a
 question of which encoding applied. Compression is built in as Bytes codecs:
-gzip and deflate both ways (`encodeGz`/`decodeGz`, `encodeDeflate`/
-`decodeDeflate`), zstandard decode (`decodeZstd`); malformed input raises a
-catchable `ParseError`. Decompression also *streams*: `gunzip` on an unread
-`ByteStream`/`StringStream` wraps it in place, so a `.gz` file — or the `.gz`
-half of a `.tar.gz` — reads incrementally through the ordinary stream methods
-(`readAll`, `readLine`, `eachLine:`), nothing materialized. Concatenated gzip
-members decode end to end; corrupt input is a catchable `IoError` on read.
+gzip and deflate both ways (`encodeGz`/`decodeGz`, `encodeDeflate` — HTTP's
+zlib-wrapped form — plus `encodeDeflateRaw` for the bare RFC 1951 stream zip
+carries; `decodeDeflate` reads both), zstandard decode (`decodeZstd`);
+malformed input raises a catchable `ParseError`. `crc32` is the matching
+integrity stamp (zip's per-entry checksum). Compression also *streams*, both ways: `gunzip` on an
+unread `ByteStream`/`StringStream` wraps it in place, so a `.gz` file — or the
+`.gz` half of a `.tar.gz` — reads incrementally through the ordinary stream
+methods (`readAll`, `readLine`, `eachLine:`), nothing materialized; `gzip` on
+an unwritten file write stream is the encoder twin, so a `.log.gz` writes line
+by line. Concatenated gzip members decode end to end; corrupt input is a
+catchable `IoError` on read. One discipline on the write side: **`close`
+finishes the encoder** — the trailer that makes the file valid is written
+there. Close deliberately; a stream the program leaks or leaves open at exit
+is still finished for it, best-effort, on the way out.
 
-**[Archive]Tar** reads tar archives as a *stream* of entries — pure Quoin over
+**[Archive]Tar** treats tar as a *stream* in both directions — pure Quoin over
 any ByteStream, so `.tar.gz` is just composition: `[Archive]Tar.over:(handle
-.byteStream.gunzip)`. Entries arrive in order and are consumed once (`each:`
-carries the whole Iterate vocabulary; a passed entry's content is skipped in
-chunks, never materialized); ustar prefixes, GNU long names, and pax `path=`
-headers all resolve, and header checksums are verified. `extractTo:` writes
-files and directories under a target — with member paths normalized and
-**confined**: an absolute or `../`-escaping path throws before anything lands
-outside. Writing archives is a coming slice (it wants streaming gzip *encode*).
+.byteStream.gunzip)` to read, `[Archive]Tar.writeTo:(([IO]File.create:'x.tar.gz')
+.gzip)` to write. Reading: entries arrive in order and are consumed once
+(`each:` carries the whole Iterate vocabulary; a passed entry's content is
+skipped in chunks, never materialized); ustar prefixes, GNU long names, and
+pax `path=` headers all resolve, and header checksums are verified.
+`extractTo:` writes files and directories under a target — with member paths
+normalized and **confined**: an absolute or `../`-escaping path throws before
+anything lands outside. Writing: the `writeTo:` writer takes `add:text:` /
+`add:bytes:`, `addFile:as:` (streamed from disk, size and mtime from the
+metadata snapshot), and `addFolder:`; names over 100 bytes ride a pax `path=`
+header, and `close` writes the end blocks and closes the stream through the
+codec — system tar reads the result directly.
+
+**[Archive]Zip** is the random-access archive, and its reader is shaped by the
+format: a zip's truth is the *central directory at the end of the file*
+(trusting the local headers a streaming reader meets first is a classic
+correctness and security trap), so `Zip.open:` reads through a
+`RandomAccessFile` — the directory once, each member lazily by offset, nothing
+loaded whole — and `Zip.of:` runs the same reader over in-memory `Bytes` (a
+downloaded archive). Entries are a real `List`: the whole Iterate vocabulary,
+`at:'name'` addressing, contents re-readable in any order — no one-pass
+constraint. Every content read is CRC-32-verified; stored and deflated members
+both decode; encrypted, multi-disk, and zip64 archives refuse with a
+`ParseError` naming the reason; timestamps come back as civil `date` / `time`
+(that is what DOS times are — local wall clock, no zone). `extractTo:`
+confines exactly like tar's. Writing streams naturally (data first, directory
+at `close`), so `Zip.writeTo:` takes any write stream; each member is stored
+or deflated, whichever is smaller — what real zip tools do.
 
 ```quoin
 'hello'.asBytes.encodeGz.decodeGz.asString    "* -> hello
@@ -165,6 +213,15 @@ stream as a **StringStream**, the UTF-8 text view (`readLine`, `eachLine:`,
 `writeln:`). These two stream classes are the *single* reading/writing surface
 over every conduit — files, sockets, and standard input all hand you the same
 streams, so code written against a stream doesn't care what's underneath.
+An `[IO]File` value from `open:` also carries a metadata snapshot: `size` in
+bytes and `modified` as a Timestamp — what a tar header or a Content-Length
+needs before any content is read.
+For random-access *formats*, `randomAccess` opens the file for positioned
+reads instead: a **RandomAccessFile** answers `readAt:offset count:` and
+`size` — pread-style, no cursor, reads independent and repeatable. That pair
+is the informal random-access read protocol; `Bytes` speaks it too, which is
+how `[Archive]Zip` reads a file on disk and a downloaded buffer with the same
+code.
 `[IO]Stdout` / `[IO]Stderr` are writable handles, `[IO]Stdin` reads without
 blocking other tasks, and **[IO]Folder** is an Iterate-able directory listing.
 

@@ -1,14 +1,16 @@
-"* Streaming tar reading, pure Quoin over a ByteStream — tar is 512-byte headers with
+"* Streaming tar, pure Quoin over a ByteStream — tar is 512-byte headers with
 "* octal fields, which is exactly what `readExactly:` was made for. Because the source
-"* is any ByteStream, `.tar.gz` reads by composing with `gunzip`:
+"* is any ByteStream, `.tar.gz` reads by composing with `gunzip` (and writes by
+"* composing with `gzip`):
 "*
 "*   [Archive]Tar.over:(([IO]File.open:'x.tar.gz').byteStream.gunzip)
+"*   [Archive]Tar.writeTo:(([IO]File.create:'x.tar.gz').gzip)
 "*
-"* Entries stream in order and are consumed ONCE: read an entry's `bytes` before
-"* advancing (a passed entry's content is skipped, in chunks, never materialized).
-"* Handles ustar name prefixes, GNU long names ('L'), and pax extended headers
-"* ('x' path= overrides); header checksums are verified (mismatch → ParseError).
-"* Writing tar archives is a separate slice (it wants streaming gzip ENCODE).
+"* Reading: entries stream in order and are consumed ONCE: read an entry's `bytes`
+"* before advancing (a passed entry's content is skipped, in chunks, never
+"* materialized). Handles ustar name prefixes, GNU long names ('L'), and pax
+"* extended headers ('x' path= overrides); header checksums are verified
+"* (mismatch → ParseError). Writing: `writeTo:` answers an [Archive]TarWriter.
 
 "* One archive member: metadata is plain fields; `bytes` pulls the content from the
 "* archive stream (only while this entry is the current one).
@@ -53,6 +55,10 @@
         "* A reader over a ByteStream — a file's, a socket's, or a `gunzip`-wrapped
         "* one for `.tar.gz`.
         over: -> { |stream| ^.new:{ var stream = stream } }
+
+        "* A writer onto a ByteStream — `[IO]File.create:`'s, a socket's, or a
+        "* `gzip`-wrapped one for `.tar.gz`. See [Archive]TarWriter.
+        writeTo: -> { |stream| ^[Archive]TarWriter.new:{ var stream = stream } }
     }
 
     "* Internal.
@@ -281,5 +287,174 @@
                 [IO]Folder.create:current
             }
         }
+    }
+}
+
+"* The streaming writer, from [Archive]Tar.writeTo:. Members are written in call
+"* order as POSIX ustar; a name longer than 100 bytes gets a pax `path=` extended
+"* header (what the reader above and every system tar understand). Defaults are
+"* deliberate: mode 0644 (dirs 0755), uid/gid 0, mtime now (`addFile:as:` keeps
+"* the source file's). `close` writes the two zero end blocks and closes the
+"* stream — through the codec when it is `gzip`-wrapped, so `.tar.gz` needs no
+"* extra step. Close deliberately; an unclosed archive is missing its end marker.
+"*
+"* ```
+"* var tar = [Archive]Tar.writeTo:(([IO]File.create:'backup.tar.gz').gzip)
+"* tar.add:'notes/today.txt' text:'ship the writer'
+"* tar.addFile:'/var/log/build.log' as:'logs/build.log'
+"* tar.close
+"* ```
+[Archive]TarWriter <- { |@stream @closed @paxSeq|
+    "* Internal.
+    init -> {
+        @closed = false
+        @paxSeq = 0
+    }
+
+    "* Add one file member with the given content (`bytes` or, via `add:text:`,
+    "* a UTF-8 String). Answers self.
+    add:bytes: -> { |name content:Bytes|
+        .header:name size:content.count type:48 mode:420 mtime:Timestamp.now.asUnixSeconds
+        @stream.writeAll:content;
+        .pad:content.count
+        ^self
+    }
+
+    "* `add:bytes:` for text: the content is the String's UTF-8 bytes.
+    add:text: -> { |name text:String| ^.add:name bytes:text.asBytes }
+
+    "* Add a directory member (a trailing '/' is added if missing). Answers self.
+    addFolder: -> { |name|
+        var dirName = (name.ends?:'/').if:{ name } else:{ name + '/' };
+        .header:dirName size:0 type:53 mode:493 mtime:Timestamp.now.asUnixSeconds
+        ^self
+    }
+
+    "* Add a file from disk under the archive name `name`, streamed in chunks —
+    "* the content never materializes whole. Size and mtime come from the file's
+    "* metadata snapshot; a file that proves shorter than its snapshot throws.
+    "* Answers self.
+    addFile:as: -> { |path name|
+        var f = [IO]File.open:path
+        var size = f.size;
+        .header:name size:size type:48 mode:420 mtime:f.modified.asUnixSeconds
+        var src = f.byteStream
+        var left = size
+        { left > 0 }.whileDo:{
+            var chunk = src.readExactly:((left < 65536).if:{ left } else:{ 65536 })
+            @stream.writeAll:chunk
+            left = left - chunk.count
+        }
+        src.close;
+        .pad:size
+        ^self
+    }
+
+    "* End the archive: the two 512-byte zero end blocks, then close the stream
+    "* (finishing a `gzip` wrap — the whole `.tar.gz` becomes valid here).
+    "* Idempotent. Returns nil.
+    close -> {
+        @closed.if:{ ^^nil }
+        @closed = true
+        @stream.writeAll:(Bytes.of:((0..1024).collect:{ 0 }))
+        @stream.close
+    }
+
+    "* -- internals ----------------------------------------------------------
+
+    "* Write one 512-byte ustar header; a name over 100 bytes is carried in a
+    "* pax `path=` extended header first, with the ustar field truncated.
+    header:size:type:mode:mtime: -> { |name size type mode mtime|
+        @closed.if:{ ValueError.throw:'tar: the writer is closed' }
+        var nameBytes = name.asBytes
+        (nameBytes.count > 100).if:{
+            @paxSeq = @paxSeq + 1;
+            .paxPath:name
+            "* The in-header name is a truncated stand-in; pax path= wins on read.
+            nameBytes = (nameBytes.from:0 to:100)
+        }
+        var header = (0..512).collect:{ 0 };
+        .put:header string:nameBytes at:0;
+        .put:header octal:mode at:100 width:8;
+        .put:header octal:0 at:108 width:8;
+        .put:header octal:0 at:116 width:8;
+        .put:header octal:size at:124 width:12;
+        .put:header octal:mtime at:136 width:12
+        header.at:156 put:type;
+        .put:header string:'ustar'.asBytes at:257
+        header.at:263 put:48
+        header.at:264 put:48;
+        .checksum:header
+        @stream.writeAll:(Bytes.of:header)
+    }
+
+    "* The pax extended header ('x') whose one record overrides the next
+    "* member's path: '<len> path=<value>\n', len counting the whole record.
+    paxPath: -> { |name|
+        var value = name.asBytes
+        "* len is self-referential: it counts its own digits. Fixed point in <=2 steps.
+        var base = 1 + 5 + value.count + 1
+        var len = base + 1
+        { len != (base + len.s.length) }.whileDo:{ len = base + len.s.length }
+        var record = (len.s + ' path=').asBytes + value + (Bytes.of:#( 10 ));
+        .header:('PaxHeaders.%/name' % @paxSeq)
+         size:record.count
+         type:120
+         mode:420
+         mtime:Timestamp.now.asUnixSeconds
+        @stream.writeAll:record;
+        .pad:record.count
+    }
+
+    "* Pad the last content block out to 512 bytes.
+    pad: -> { |size|
+        var rem = size % 512
+        (rem > 0).if:{ @stream.writeAll:(Bytes.of:((0..(512 - rem)).collect:{ 0 })) }
+    }
+
+    "* Copy `bytes` into the header list at `at`.
+    put:string:at: -> { |header bytes at|
+        var i = 0
+        { i < bytes.count }.whileDo:{
+            header.at:(at + i) put:(bytes.at:i)
+            i = i + 1
+        }
+    }
+
+    "* A right-aligned, zero-padded, NUL-terminated octal field.
+    put:octal:at:width: -> { |header value at width|
+        var digits = #()
+        var v = value
+        { v > 0 }.whileDo:{
+            digits.add:(v % 8)
+            v = v / 8
+        }
+        (digits.count == 0).if:{ digits.add:0 }
+        var pad = width - 1 - digits.count
+        var i = 0
+        { i < pad }.whileDo:{
+            header.at:(at + i) put:48
+            i = i + 1
+        }
+        var j = 0
+        { j < digits.count }.whileDo:{
+            header.at:(at + pad + (digits.count - 1 - j)) put:(48 + (digits.at:j))
+            j = j + 1
+        }
+    }
+
+    "* Sum the header with the checksum field as spaces, then write the sum as
+    "* six octal digits, NUL, space — the traditional encoding.
+    checksum: -> { |header|
+        var i = 148
+        { i < 156 }.whileDo:{
+            header.at:i put:32
+            i = i + 1
+        }
+        var sum = 0
+        header.each:{ |b| sum = sum + b };
+        .put:header octal:sum at:148 width:7
+        header.at:154 put:0
+        header.at:155 put:32
     }
 }

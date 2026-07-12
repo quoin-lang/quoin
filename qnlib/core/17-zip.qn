@@ -1,0 +1,449 @@
+"* Zip archives, pure Quoin — random access, not streaming, by construction: the
+"* truth about a zip is the CENTRAL DIRECTORY at the END of the file (trusting
+"* the local headers a streaming reader sees first is a classic correctness and
+"* security trap). The reader therefore runs on the random-access read protocol
+"* — anything answering `readAt:offset count:` and `size`:
+"*
+"*   [Archive]Zip.open:'x.zip'          "* a RandomAccessFile — nothing loaded whole
+"*   [Archive]Zip.of:downloadedBytes    "* the same reader over in-memory bytes
+"*
+"* Unlike tar, entries are a real List: the whole Iterate vocabulary with no
+"* one-pass constraint, plus `at:'name'` addressing; content is fetched lazily
+"* by offset and CRC-verified on every read. Writing streams naturally (data
+"* first, directory at close), so `writeTo:` takes any write stream.
+
+"* The in-memory half of the random-access protocol: with this (plus the native
+"* `size` it already has), Bytes answers the same two messages as
+"* RandomAccessFile — clamped at the end, the same contract — so the zip reader
+"* works over a file on disk and a downloaded buffer alike.
+Bytes <-- {
+    "* Up to `count` bytes from byte `offset`; short only at the end.
+    readAt:count: -> { |offset count|
+        (offset >= .count).if:{ ^^Bytes.empty }
+        var end = offset + count
+        (end > .count).if:{ end = .count }
+        ^.from:offset to:end
+    }
+}
+
+"* One archive member, from the central directory. Metadata is plain fields;
+"* `bytes` fetches and verifies the content lazily (any time — entries are
+"* random-access, not consumed).
+[Archive]ZipEntry <- { |@name @size @compressedSize @methodCode @crc @offset @flags @dosDate @dosTime @zip|
+    "* The member's path, exactly as recorded (extractTo: is the safe way to
+    "* turn it into a filesystem path).
+    name -> { @name }
+
+    "* The UNcompressed content length in bytes.
+    size -> { @size }
+
+    "* The compressed length as stored in the archive.
+    compressedSize -> { @compressedSize }
+
+    "* `#file` or `#directory` (the universal trailing-'/' convention).
+    type -> { (@name.ends?:'/').if:{ #directory } else:{ #file } }
+
+    "* `#stored`, `#deflate`, or `#other` (an unsupported method — `bytes` will
+    "* throw a ParseError naming its code).
+    method -> {
+        (@methodCode == 0).if:{ ^^#stored }
+        (@methodCode == 8).if:{ ^^#deflate }
+        ^#other
+    }
+
+    "* The recorded modification DATE — civil, because that is what the zip
+    "* field is: DOS local wall-clock, no zone (pretending otherwise would
+    "* fabricate one). Zeroed components clamp to 1 (some tools write 0).
+    date -> {
+        var m = (@dosDate / 32) % 16
+        var d = @dosDate % 32
+        (m == 0).if:{ m = 1 }
+        (d == 0).if:{ d = 1 }
+        ^Date.year:(1980 + (@dosDate / 512)) month:m day:d
+    }
+
+    "* The recorded modification TIME (2-second resolution — the format's).
+    time -> {
+        ^Time.hour:(@dosTime / 2048) minute:((@dosTime / 32) % 64) second:((@dosTime % 32) * 2)
+    }
+
+    "* The member's content, decompressed and CRC-verified. Readable at any
+    "* time, repeatedly — zip is random-access.
+    bytes -> { ^@zip.contentFor:self }
+
+    "* The content decoded as UTF-8 text.
+    text -> { ^.bytes.asString }
+
+    "* -- internals the reader's contentFor: needs -----------------------------
+    methodCode -> { @methodCode }
+    crc -> { @crc }
+    offset -> { @offset }
+    flags -> { @flags }
+
+    s -> { ^'[Archive]ZipEntry(%1, %2 bytes)' % #( @name @size ) }
+}
+
+"* The reader. Construction parses the end-of-central-directory record and the
+"* central directory eagerly (they are small); content stays on the source
+"* until asked for.
+"*
+"* ```
+"* var zip = [Archive]Zip.open:'backup.zip'
+"* zip.each:{ |e| ('%1  %2' % #( e.size e.name )).print }
+"* (zip.at:'notes/today.txt').text
+"* zip.close
+"* ```
+[Archive]Zip <- { |@src @entries @byName|
+    .mix:Iterate;
+
+    .meta <-- {
+        "* A reader over any random-access source — something answering
+        "* `readAt:offset count:` and `size` (a RandomAccessFile, or Bytes).
+        of: -> { |source| ^.new:{ var src = source } }
+
+        "* A reader over the file at `path`, via `randomAccess` — the central
+        "* directory and each entry read by offset; nothing loaded whole.
+        open: -> { |path| ^.of:(([IO]File.open:path).randomAccess) }
+
+        "* A writer onto a ByteStream — `[IO]File.create:`'s, or a socket's.
+        "* See [Archive]ZipWriter.
+        writeTo: -> { |stream| ^[Archive]ZipWriter.new:{ var stream = stream } }
+    }
+
+    "* Internal: locate the EOCD (scan the tail window backward — it ends with
+    "* a variable-length comment), refuse what v1 doesn't speak (multi-disk,
+    "* zip64), then walk the central directory into the entry list.
+    init -> {
+        @entries = #()
+        @byName = #{}
+        var size = @src.size
+        (size < 22).if:{ ParseError.throw:'zip: not a zip archive (too small)' }
+        var windowLen = (size < 65557).if:{ size } else:{ 65557 }
+        var tail = .read:(size - windowLen) count:windowLen
+        var eocd = 0 - 1
+        var pos = windowLen - 22
+        { (pos >= 0) && (eocd < 0) }.whileDo:{
+            (.eocd?:tail at:pos windowLen:windowLen).if:{ eocd = pos } else:{ pos = pos - 1 }
+        }
+        (eocd < 0).if:{ ParseError.throw:'zip: no end-of-central-directory record (not a zip?)' }
+        (((.u16:tail at:(eocd + 4)) != 0) || ((.u16:tail at:(eocd + 6)) != 0)).if:{
+            ParseError.throw:'zip: multi-disk archives are unsupported'
+        }
+        var total = .u16:tail at:(eocd + 10)
+        var cdSize = .u32:tail at:(eocd + 12)
+        var cdOffset = .u32:tail at:(eocd + 16)
+        ((total == 65535) || (cdSize == 4294967295) || (cdOffset == 4294967295)).if:{
+            ParseError.throw:'zip: zip64 archives are unsupported'
+        }
+        var cd = .read:cdOffset count:cdSize
+        var p = 0
+        var n = 0
+        { n < total }.whileDo:{
+            ((.u32:cd at:p) == 33639248).else:{ ParseError.throw:'zip: corrupt central directory' }
+            var nameLen = .u16:cd at:(p + 28)
+            var extraLen = .u16:cd at:(p + 30)
+            var commentLen = .u16:cd at:(p + 32)
+            var eName = (cd.from:(p + 46) to:(p + 46 + nameLen)).asString
+            var eCsize = .u32:cd at:(p + 20)
+            var eUsize = .u32:cd at:(p + 24)
+            var eOffset = .u32:cd at:(p + 42)
+            ((eCsize == 4294967295) || (eUsize == 4294967295) || (eOffset == 4294967295)).if:{
+                ParseError.throw:'zip: zip64 archives are unsupported'
+            }
+            var eFlags = .u16:cd at:(p + 8)
+            var eMethod = .u16:cd at:(p + 10)
+            var eTime = .u16:cd at:(p + 12)
+            var eDate = .u16:cd at:(p + 14)
+            var eCrc = .u32:cd at:(p + 16)
+            var me = self
+            var entry = [Archive]ZipEntry.new:{
+                var name = eName
+                var size = eUsize
+                var compressedSize = eCsize
+                var methodCode = eMethod
+                var crc = eCrc
+                var offset = eOffset
+                var flags = eFlags
+                var dosDate = eDate
+                var dosTime = eTime
+                var zip = me
+            }
+            @entries.add:entry
+            @byName.at:eName put:entry
+            p = p + 46 + nameLen + extraLen + commentLen
+            n = n + 1
+        }
+    }
+
+    "* Every member, in central-directory order. A plain List — address freely.
+    entries -> { @entries }
+
+    "* The member count.
+    count -> { @entries.count }
+
+    "* The entry named exactly `name`, or nil.
+    at: -> { |name| ^@byName.at:name }
+
+    "* Yield each entry in order; answers self. The Iterate vocabulary
+    "* (`select:`, `collect:`, `detect:`, …) rides on this.
+    each: -> { |block|
+        @entries.each:block
+        ^self
+    }
+
+    "* Close the underlying source (a no-op over Bytes). Entries' `bytes`
+    "* throw after this.
+    close -> { (@src.can?:#close).if:{ @src.close } }
+
+    "* Extract every FILE and DIRECTORY member under `dir` (specials are
+    "* skipped — zip has none to speak of). Member paths are normalized and
+    "* confined exactly as [Archive]Tar's: an absolute path or one escaping
+    "* `dir` throws a ValueError before anything lands outside.
+    extractTo: -> { |dir|
+        var me = self;
+        .each:{ |entry|
+            var norm = [OS]Path.normalize:(entry.name)
+            ((norm.starts?:'/') || (norm == '..') || (norm.starts?:'../')).if:{
+                ValueError.throw:('zip: refusing unsafe path \'%\'' % entry.name)
+            }
+            ((norm == '.') || (norm == '')).else:{
+                var target = [OS]Path.join:#( dir norm )
+                (entry.type == #directory).if:{ me.mkdirs:target }
+                else:{
+                    me.mkdirs:([OS]Path.dirname:target)
+                    var w = [IO]File.create:target
+                    w.writeAll:(entry.bytes)
+                    w.close
+                }
+            }
+        }
+        self
+    }
+
+    "* -- internals ----------------------------------------------------------
+
+    "* The current entry's content: local header re-read for the true data
+    "* offset (its extra field can differ from the central directory's),
+    "* decompress, verify.
+    contentFor: -> { |entry|
+        ((entry.flags % 2) == 1).if:{
+            ParseError.throw:('zip: \'%\' is encrypted — unsupported' % entry.name)
+        }
+        var lfh = .read:(entry.offset) count:30
+        ((.u32:lfh at:0) == 67324752).else:{
+            ParseError.throw:('zip: corrupt local header for \'%\'' % entry.name)
+        }
+        var dataAt = (entry.offset) + 30 + (.u16:lfh at:26) + (.u16:lfh at:28)
+        var data = (entry.compressedSize == 0)
+            .if:{ Bytes.empty }
+             else:{ .read:dataAt count:(entry.compressedSize) }
+        var out = nil
+        (entry.methodCode == 0).if:{ out = data }
+        else:{
+            (entry.methodCode == 8).if:{ out = data.decodeDeflate }
+            else:{
+                var msg = 'zip: \'%1\' uses unsupported compression method %2' % #(
+                    entry.name
+                    entry.methodCode
+                )
+                ParseError.throw:msg
+            }
+        }
+        (out.crc32 == entry.crc).else:{
+            ParseError.throw:('zip: CRC mismatch in \'%\' (corrupt archive)' % entry.name)
+        }
+        ^out
+    }
+
+    "* Exact read through the random-access protocol; short means truncated.
+    read:count: -> { |offset count|
+        var b = @src.readAt:offset count:count
+        (b.count == count).else:{ ParseError.throw:'zip: truncated archive' }
+        ^b
+    }
+
+    "* Little-endian fields.
+    u16:at: -> { |b i ^Integer| (b.at:i) + ((b.at:(i + 1)) * 256) }
+    u32:at: -> { |b i ^Integer|
+        var lo = (b.at:i) + ((b.at:(i + 1)) * 256)
+        ^lo + ((b.at:(i + 2)) * 65536) + ((b.at:(i + 3)) * 16777216)
+    }
+
+    "* An EOCD candidate at `pos`: signature PK 05 06, and its comment-length
+    "* field must run exactly to the end of the file — the disambiguator when
+    "* the signature bytes happen to appear in a comment.
+    eocd?:at:windowLen: -> { |tail pos windowLen ^Boolean|
+        ((tail.at:pos) == 80).else:{ ^^false }
+        ((tail.at:(pos + 1)) == 75).else:{ ^^false }
+        ((tail.at:(pos + 2)) == 5).else:{ ^^false }
+        ((tail.at:(pos + 3)) == 6).else:{ ^^false }
+        ^(pos + 22 + (.u16:tail at:(pos + 20))) == windowLen
+    }
+
+    "* mkdir -p (the tar reader's twin).
+    mkdirs: -> { |path|
+        var current = ''
+        (path.split:'/').each:{ |part|
+            (part == '').else:{
+                current = (current == '')
+                    .if:{ (path.starts?:'/').if:{ '/' + part } else:{ part } }
+                     else:{ current + '/' + part }
+                [IO]Folder.create:current
+            }
+        }
+    }
+}
+
+"* The writer, from [Archive]Zip.writeTo:. Writing streams naturally — each
+"* member's local header + data go out as it is added (sizes and CRC are known
+"* up front, so no data descriptors), and `close` writes the central directory
+"* and end record, then closes the stream. Each member is stored or deflated,
+"* whichever is smaller — what real zip tools do. Timestamps are the current
+"* local wall clock (DOS times have no zone). Close deliberately; an unclosed
+"* archive has no directory and no reader will accept it.
+"*
+"* ```
+"* var zip = [Archive]Zip.writeTo:([IO]File.create:'backup.zip')
+"* zip.add:'notes/today.txt' text:'ship the writer'
+"* zip.addFile:'/var/log/build.log' as:'logs/build.log'
+"* zip.close
+"* ```
+[Archive]ZipWriter <- { |@stream @records @offset @closed|
+    "* Internal.
+    init -> {
+        @records = #()
+        @offset = 0
+        @closed = false
+    }
+
+    "* Add one file member with the given content (`bytes` or, via `add:text:`,
+    "* a UTF-8 String). Answers self.
+    add:bytes: -> { |name content:Bytes| ^.add:name data:content dir:false }
+
+    "* `add:bytes:` for text: the content is the String's UTF-8 bytes.
+    add:text: -> { |name text:String| ^.add:name bytes:text.asBytes }
+
+    "* Add a directory member (a trailing '/' is added if missing). Answers self.
+    addFolder: -> { |name|
+        var dirName = (name.ends?:'/').if:{ name } else:{ name + '/' }
+        ^.add:dirName data:Bytes.empty dir:true
+    }
+
+    "* Add a file from disk under the archive name `name`. Zip needs the CRC
+    "* and sizes before the data, so the content is read whole. Answers self.
+    addFile:as: -> { |path name| ^.add:name bytes:(([IO]File.open:path).byteStream.readAll) }
+
+    "* End the archive: central directory, end record, close the stream.
+    "* Idempotent. Returns nil.
+    close -> {
+        @closed.if:{ ^^nil }
+        @closed = true
+        var cdStart = @offset
+        var me = self
+        @records.each:{ |r|
+            var h = #()
+            me.le32:33639248 into:h
+            me.le16:20 into:h  "* version made by
+            me.le16:20 into:h  "* version needed
+            me.le16:2048 into:h  "* flags: UTF-8 names
+            me.le16:(r.at:'method') into:h
+            me.le16:(r.at:'dosTime') into:h
+            me.le16:(r.at:'dosDate') into:h
+            me.le32:(r.at:'crc') into:h
+            me.le32:(r.at:'csize') into:h
+            me.le32:(r.at:'usize') into:h
+            me.le16:((r.at:'name').count) into:h
+            me.le16:0 into:h  "* extra
+            me.le16:0 into:h  "* comment
+            me.le16:0 into:h  "* disk
+            me.le16:0 into:h  "* internal attrs
+            me.le32:((r.at:'dir').if:{ 16 } else:{ 0 }) into:h  "* external: FAT dir bit
+            me.le32:(r.at:'offset') into:h
+            (r.at:'name').each:{ |b| h.add:b }
+            me.write:h
+        }
+        var cdSize = @offset - cdStart
+        var e = #()
+        me.le32:101010256 into:e
+        me.le16:0 into:e
+        me.le16:0 into:e
+        me.le16:@records.count into:e
+        me.le16:@records.count into:e
+        me.le32:cdSize into:e
+        me.le32:cdStart into:e
+        me.le16:0 into:e
+        me.write:e
+        @stream.close
+    }
+
+    "* -- internals ----------------------------------------------------------
+
+    "* Write one member: local header + data now, a central-directory record
+    "* remembered for close.
+    add:data:dir: -> { |name content dir|
+        @closed.if:{ ValueError.throw:'zip: the writer is closed' }
+        var nameBytes = name.asBytes
+        var crc = content.crc32
+        var usize = content.count
+        var deflated = content.encodeDeflateRaw
+        var method = 8
+        var data = deflated
+        (deflated.count >= usize).if:{
+            method = 0
+            data = content
+        }
+        var now = DateTime.now
+        var dosDate = ((now.date.year - 1980) * 512) + (now.date.month * 32) + now.date.day
+        var dosTime = (now.time.hour * 2048) + (now.time.minute * 32) + (now.time.second / 2)
+        var lfhOffset = @offset
+        var h = #();
+        .le32:67324752 into:h;
+        .le16:20 into:h;  "* version needed
+        .le16:2048 into:h;  "* flags: UTF-8 names
+        .le16:method into:h;
+        .le16:dosTime into:h;
+        .le16:dosDate into:h;
+        .le32:crc into:h;
+        .le32:data.count into:h;
+        .le32:usize into:h;
+        .le16:nameBytes.count into:h;
+        .le16:0 into:h  "* extra
+        nameBytes.each:{ |b| h.add:b };
+        .write:h
+        @stream.writeAll:data
+        @offset = @offset + data.count
+        (@offset > 4294967295).if:{
+            ValueError.throw:'zip: archive exceeds 4 GiB (zip64 unsupported)'
+        }
+        @records.add:#{
+            'name': nameBytes
+            'crc': crc
+            'csize': data.count
+            'usize': usize
+            'method': method
+            'dosDate': dosDate
+            'dosTime': dosTime
+            'dir': dir
+            'offset': lfhOffset
+        }
+        ^self
+    }
+
+    "* Emit a byte list and advance the offset.
+    write: -> { |list|
+        @stream.writeAll:(Bytes.of:list)
+        @offset = @offset + list.count
+    }
+
+    "* Little-endian emitters.
+    le16:into: -> { |v list|
+        list.add:(v % 256)
+        list.add:((v / 256) % 256)
+    }
+    le32:into: -> { |v list|
+        list.add:(v % 256)
+        list.add:((v / 256) % 256)
+        list.add:((v / 65536) % 256)
+        list.add:((v / 16777216) % 256)
+    }
+}

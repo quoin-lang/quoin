@@ -1,0 +1,64 @@
+"* RandomAccessFile (src/runtime/random_access.rs + IoRequest::OpenFileRandom/
+"* ReadAt): positioned reads, pread-style — no cursor, so reads are independent
+"* and repeatable. Together with `size` this is the random-access read protocol
+"* the zip reader runs on; Bytes speaks it too (core/17-zip.qn).
+
+(TestSuite.new:{ var name = 'RandomAccess' }).add:{
+    .setupAll:{
+        var w = [IO]File.create:'/tmp/qn_t_ra.bin'
+        w.writeAll:'0123456789abcdef'.asBytes
+        w.close
+    };
+
+    .teardownAll:{
+        [IO]File.delete:'/tmp/qn_t_ra.bin';
+    };
+
+    .test:
+    positionedReads -> {
+        var f = ([IO]File.open:'/tmp/qn_t_ra.bin').randomAccess;
+        .is:{ f.size } equalTo:16;
+        .is:{ (f.readAt:3 count:4).asString } equalTo:'3456';
+        "* No cursor: earlier offsets after later ones, and repeats, all work.
+        .is:{ (f.readAt:0 count:3).asString } equalTo:'012';
+        .is:{ (f.readAt:0 count:3).asString } equalTo:'012';
+        .is:{ (f.readAt:15 count:1).asString } equalTo:'f';
+        f.close;
+    };
+
+    .test:
+    eofClamps -> {
+        var f = ([IO]File.open:'/tmp/qn_t_ra.bin').randomAccess;
+        "* Short only at the end; at or past the end answers empty, no throw.
+        .is:{ (f.readAt:14 count:100).asString } equalTo:'ef';
+        .is:{ (f.readAt:16 count:4).count } equalTo:0;
+        .is:{ (f.readAt:9999 count:4).count } equalTo:0;
+        .is:{ (f.readAt:3 count:0).count } equalTo:0;
+        f.close;
+    };
+
+    .test:
+    guards -> {
+        var f = ([IO]File.open:'/tmp/qn_t_ra.bin').randomAccess;
+        .does:{ f.readAt:(0 - 1) count:1 } throw:ValueError;
+        .does:{ f.readAt:0 count:(0 - 1) } throw:ValueError;
+        .isFalse:{ f.closed? };
+        f.close;
+        .isTrue:{ f.closed? };
+        .does:{ f.readAt:0 count:1 } throw:IoError;
+        "* A second close is a no-op.
+        f.close;
+        "* A missing file throws on open, catchably.
+        .does:{ ([IO]File.open:'/tmp/qn_t_ra_missing.bin').randomAccess } throw:IoError;
+    };
+
+    .test:
+    bytesSpeakTheProtocol -> {
+        "* The in-memory half: same two messages, same clamping contract.
+        var b = 'hello world'.asBytes;
+        .is:{ b.size } equalTo:11;
+        .is:{ (b.readAt:6 count:5).asString } equalTo:'world';
+        .is:{ (b.readAt:6 count:99).asString } equalTo:'world';
+        .is:{ (b.readAt:99 count:1).count } equalTo:0;
+    };
+}

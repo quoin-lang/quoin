@@ -178,6 +178,24 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             "The bytes decoded as UTF-8 with every invalid sequence replaced by U+FFFD — \
              never throws.",
         )
+        .instance_method("crc32", |vm, mc, receiver, _args| {
+            // flate2's table-driven CRC-32 (IEEE) — what zip stamps on every
+            // entry; a pure-Quoin byte loop would crawl over megabytes.
+            let sum = {
+                let bytes = recv!(receiver, Bytes);
+                let mut crc = flate2::Crc::new();
+                crc.update(&bytes);
+                crc.sum()
+            };
+            Ok(vm.new_int(mc, sum as i64))
+        })
+        .doc(
+            "The CRC-32 (IEEE) checksum of these bytes, as a non-negative Integer — \
+             the per-entry integrity stamp of the zip format.\n\n\
+             ```\n\
+             'hi'.asBytes.crc32     \"* -> 3633523372\n\
+             ```",
+        )
         // Content-Encoding (de)compression — gzip + deflate (flate2/miniz_oxide) and zstd
         // decode (ruzstd), all pure Rust. Malformed input throws a catchable ParseError.
         // zstd encode is intentionally absent (no pure-Rust compressor; see compress.rs).
@@ -217,8 +235,22 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             run_codec(vm, mc, receiver, "encodeDeflate", compress::deflate_encode)
         })
         .doc(
-            "Compress into a raw deflate stream (a new Bytes) — gzip's body format without \
-             its header and trailer.",
+            "Compress into ZLIB-WRAPPED deflate (a new Bytes) — the RFC-correct form of \
+             HTTP's `Content-Encoding: deflate`. For the raw RFC 1951 stream (what zip \
+             entries carry), use `encodeDeflateRaw`; `decodeDeflate` reads both back.",
+        )
+        .instance_method("encodeDeflateRaw", |vm, mc, receiver, _args| {
+            run_codec(
+                vm,
+                mc,
+                receiver,
+                "encodeDeflateRaw",
+                compress::deflate_encode_raw,
+            )
+        })
+        .doc(
+            "Compress into a RAW deflate stream (RFC 1951 — no zlib header or trailer): \
+             gzip's body format, and what zip entries carry. `decodeDeflate` reads it back.",
         )
         .instance_method("decodeZstd", |vm, mc, receiver, _args| {
             run_codec(vm, mc, receiver, "decodeZstd", compress::zstd_decode)

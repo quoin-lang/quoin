@@ -1,0 +1,49 @@
+"* The suite lifecycle hooks (test.qn): setup:/teardown: bracket EACH test,
+"* setupAll:/teardownAll: bracket the whole suite; setups run in declaration
+"* order, teardowns in REVERSE declaration order. Hooks share state with tests
+"* by closure capture — here, a log the hooks append markers to. Suites run in
+"* registration order, so the trailing suites can assert what the earlier
+"* ones' teardowns did (and that a skipped suite's hooks never ran).
+
+var log = #()
+
+(TestSuite.new:{ var name = 'Hooks' }).add:{
+    .setupAll:{ log.add:'SA1' };
+    .setupAll:{ log.add:'SA2' };
+    .setup:{ log.add:'s1' };
+    .setup:{ log.add:'s2' };
+    .teardown:{ log.add:'t1' };
+    .teardown:{ log.add:'t2' };
+    .teardownAll:{ log.add:'TA1' };
+    .teardownAll:{ log.add:'TA2' };
+
+    .test:
+    setupAllOnceThenSetupsInOrder -> {
+        .is:{ log.join:' ' } equalTo:'SA1 SA2 s1 s2';
+    };
+
+    .test:
+    teardownsReversedBetweenTests -> {
+        "* The first test's teardowns ran last-declared-first, then this
+        "* test's setups — and the setupAll markers did NOT repeat.
+        .is:{ log.join:' ' } equalTo:'SA1 SA2 s1 s2 t2 t1 s1 s2';
+    };
+}
+
+"* A skipped suite runs no hooks — any of these firing would poison the log
+"* the HooksAfter suite checks.
+(TestSuite.new:{ var name = 'HooksSkipped' }).add:{
+    .skip:'pinning that a skipped suite runs no lifecycle hooks';
+    .setupAll:{ log.add:'POISON' };
+    .setup:{ log.add:'POISON' };
+    .teardown:{ log.add:'POISON' };
+    .teardownAll:{ log.add:'POISON' };
+
+    .test:neverRuns -> { !!! }
+}
+
+(TestSuite.new:{ var name = 'HooksAfter' }).add:{
+    .test:teardownAllRanReversedAndSkippedStayedSilent -> {
+        .is:{ log.join:' ' } equalTo:'SA1 SA2 s1 s2 t2 t1 s1 s2 t2 t1 TA2 TA1'
+    }
+}

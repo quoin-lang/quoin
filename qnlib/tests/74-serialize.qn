@@ -1,0 +1,91 @@
+"* The asData protocol (src/runtime/data_value.rs::as_data_of + core/16-serialize.qn):
+"* when a serializer walk reaches a value it has no representation for, it calls the
+"* class's `asData` and recurses on the answer — one method opts any class into every
+"* structured format. One-way, untagged; the stdlib defaults round-trip via `parse:`.
+
+"* A user class in the protocol, nesting another.
+[Test]SerPoint <- { |@x @y|
+    .meta <-- {
+        x:y: -> { |x y|
+            ^.new:{
+                var x = x
+                var y = y
+            }
+        }
+    }
+    asData -> { #{ 'x': @x 'y': @y } }
+}
+
+[Test]SerSegment <- { |@from @to|
+    .meta <-- {
+        from:to: -> { |a b|
+            ^.new:{
+                var from = a
+                var to = b
+            }
+        }
+    }
+    asData -> { #{ 'from': @from 'to': @to } }
+}
+
+(TestSuite.new:{ var name = 'Serialize' }).add:{
+    .test:
+    stdlibDefaults -> {
+        .is:{ JSON.generate:(Date.parse:'2026-07-11') } equalTo:'"2026-07-11"';
+        .is:{ JSON.generate:(Time.hour:9 minute:40) } equalTo:'"09:40:00"';
+        .is:{ JSON.generate:(Duration.minutes:90) } equalTo:'"PT1H30M"';
+        .is:{ JSON.generate:(Span.parse:'P1Y2M') } equalTo:'"P1Y2M"';
+        .is:{ JSON.generate:(Timestamp.fromUnixSeconds:0) } equalTo:'"1970-01-01T00:00:00Z"';
+        .is:{ JSON.generate:(UUID.parse:'6ba7b810-9dad-11d1-80b4-00c04fd430c8') }
+            equalTo:'"6ba7b810-9dad-11d1-80b4-00c04fd430c8"';
+        "* Sets flatten to Lists in insertion order.
+        .is:{ JSON.generate:#<3 1 2> } equalTo:'[3,1,2]';
+        "* KeyValuePair as an explicit two-field map.
+        .is:{ JSON.generate:(KeyValuePair.new:{ var key = 'k'; var value = 7 }) }
+            equalTo:'{"key":"k","value":7}';
+    };
+
+    .test:
+    roundTrips -> {
+        "* The defaults were CHOSEN to parse back — pin the loop, not just the text.
+        var dt = DateTime.parse:'2024-01-01T12:00:00+09:00[Asia/Tokyo]';
+        .is:{ DateTime.parse:(JSON.parse:(JSON.generate:dt)) } equalTo:dt;
+        var d = Date.parse:'2026-07-11';
+        .is:{ Date.parse:(JSON.parse:(JSON.generate:d)) } equalTo:d;
+        .is:{ (Span.parse:(JSON.parse:(JSON.generate:(Duration.minutes:90)))).asDuration }
+            equalTo:(Duration.minutes:90);
+    };
+
+    .test:
+    userClassesAcrossFormats -> {
+        var seg = [Test]SerSegment.from:([Test]SerPoint.x:1 y:2) to:([Test]SerPoint.x:3 y:4);
+        "* asData answers recurse through the protocol — nested custom objects work.
+        .is:{ JSON.generate:seg } equalTo:'{"from":{"x":1,"y":2},"to":{"x":3,"y":4}}';
+        "* The same protocol backs every format.
+        .is:{ (MessagePack.unpack:(MessagePack.pack:([Test]SerPoint.x:7 y:8))).at:'x' }
+            equalTo:7;
+        .is:{ (YAML.parse:(YAML.generate:([Test]SerPoint.x:1 y:2))).at:'y' } equalTo:2;
+        .is:{ (TOML.parse:(TOML.generate:([Test]SerPoint.x:1 y:2))).at:'x' } equalTo:1;
+        "* ...including inside collections.
+        .is:{ JSON.generate:#( ([Test]SerPoint.x:0 y:0) ) } equalTo:'[{"x":0,"y":0}]';
+        .is:{ JSON.generate:#{ 'p': ([Test]SerPoint.x:5 y:6) } } equalTo:'{"p":{"x":5,"y":6}}';
+    };
+
+    .test:
+    protocolEdges -> {
+        "* No asData -> the typed error now names the protocol.
+        { JSON.generate:#/rx/; !!! }
+            .catch:{ |e:TypeError| .isTrue:{ e.message.contains?:'define asData' } };
+        { MessagePack.pack:{ 1 }; !!! }
+            .catch:{ |e:TypeError| .isTrue:{ e.message.contains?:'define asData' } };
+        "* Symbols stay unserializable by default (identifiers don't silently stringify).
+        .does:{ JSON.generate:#sym } throw:TypeError;
+        "* A self-referential asData spends the depth budget -> catchable, not a hang.
+        [Test]SerOuro <- { asData -> { #{ 'me': self } } };
+        { JSON.generate:([Test]SerOuro.new); !!! }
+            .catch:{ |e:ValueError| .isTrue:{ e.message.contains?:'nesting exceeds' } };
+        "* An asData answering another protocol-less value still errors cleanly.
+        [Test]SerBad <- { asData -> { #/nope/ } };
+        .does:{ JSON.generate:([Test]SerBad.new) } throw:TypeError;
+    };
+}
