@@ -2,7 +2,7 @@
 
 Status: **SHIPPED through extension-backed classes** — Tier 0 (gc-free `Host` trait),
 Tier 1 (UDS transport, structured values, host reach, crash/timeout isolation), and
-extension-backed classes with Rust + Python SDKs at parity (PRs #17-#22 and follow-ons; see
+extension-backed classes with Rust + Python SDKs at parity (PRs 17-22 and follow-ons; see
 `QUOIN_TODO.md` `## Networking & Async I/O` for the live remaining-refinements list).
 Packaging has since shipped too — an extension is a `use`-able folder with an `extension.toml`
 (`docs/internal/EXT_PACKAGING.md`), and `quoin_packages/adbc` + `quoin_packages/numpy` ship as real
@@ -433,7 +433,7 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
   handle to **retained (global)** to hold it across calls, then releases it explicitly (batched onto
   a later call). Alloc is implicit (any host op returning a value mints a handle). Peer crash →
   bulk-release the dead peer's handles (host Values drop their roots; ext resources reap via the
-  reap queue, §7). This is what enables the callback protocol (#3 — an ext retains a host block).
+  reap queue, §7). This is what enables the callback protocol (next bullet — an ext retains a host block).
 - **Callback / re-entrancy protocol: batched.** An extension invokes a retained (global) host-block
   handle via a request on the socket *during* an in-flight call — re-entrant request/response
   interleaving the host services while parked on the reply (LSP-style). The hot-path primitive is
@@ -443,7 +443,7 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
 - **Bulk array / dataframe Value type: a native-state (`AnyCollect`) handle type.** A native object
   (like `List`/`Map`/`Socket`) holding one contiguous Arrow-layout buffer behind a handle —
   GC-integrated via `trace_gc`, reaped via the reap queue, **no `Value`-enum change**. Copy-backed
-  at baseline (shared-buffer-backed only if #2's deferred fd-passing lands); whole-array ops keep it
+  at baseline (shared-buffer-backed only if the deferred `SCM_RIGHTS` fd-passing lands); whole-array ops keep it
   resident extension-side (§8). The columnar data plane and the "array type for NumPy-in-QN" are the
   same type (§7) — distinct from ordinary objects, never exploded into per-element `Value`s.
 - Reuse the **plain-data waist, the reactor (extension-call-as-parked-fiber on the socket fd),

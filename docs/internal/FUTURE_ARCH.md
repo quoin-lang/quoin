@@ -16,9 +16,9 @@ The prior version of this doc (Jun 2026) argued that "types don't make a VM fast
 fib/sieve) and unboxed struct nodes (for trees), de-risked by a ceiling-screen first. **That bet was
 taken and largely shipped:**
 
-- The **typed-devirt tier** (PR #31) — sealed value types, compile-time type propagation, devirtualized
+- The **typed-devirt tier** (PR 31) — sealed value types, compile-time type propagation, devirtualized
   `Int`/`List` ops, control-flow inlining, step-batching. See `docs/internal/TYPED_DEVIRT_ARCH.md`.
-- The **cheap-dispatch work** (PR #32, slices a1/b1/b2) — fused `Int` superinstructions, a flat inner
+- The **cheap-dispatch work** (PR 32, slices a1/b1/b2) — fused `Int` superinstructions, a flat inner
   dispatch loop, and an `ip`-register hoist.
 
 Net effect: cross-language parity went from ~9–44× CPython (that doc's starting point) to **~2.4–5.8×

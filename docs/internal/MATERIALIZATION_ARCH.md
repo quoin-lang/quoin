@@ -1,7 +1,7 @@
 # Cheap materialization: fusion first, thin closures second
 
 *Status: ARC COMPLETE — M1 + M2 + M3 SHIPPED on
-`perf/cheap-materialization` (stacked on `perf/alloc-churn`, PR #59).
+`perf/cheap-materialization` (stacked on `perf/alloc-churn`, PR 59).
 M1 (alpha-renamed fusion): btrees −31.8%, richards −14.4%, json −2.6%.
 M2 (fused instantiation): btrees a further −34.6%. M3 (cold-span gate
 lift): combinators −16.3%. Arc cumulative: **btrees 2.31×,

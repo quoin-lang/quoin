@@ -16,7 +16,7 @@ Arrow record batches, not row-by-row). Its object model is a lifecycle chain:
 That chain maps almost 1:1 onto Phase-3 **extension-backed classes**: the live ADBC handles live in
 the SDK's object table, and `Database → connect → Connection → prepare: → Statement → execute →
 ResultSet` are all **cross-class returns**, with SQL + bind params as **richer args** — exactly the
-features the SDK gained in PR #24.
+features the SDK gained in PR 24.
 
 ## 2. Crate & dependencies
 

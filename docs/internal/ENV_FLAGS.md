@@ -70,7 +70,7 @@ from offloading, so inputs under `QN_COMPUTE_MIN` run inline
 ### `QN_AOT`
 **`0` disables; anything else (or unset) leaves it on.** Read in
 `src/tuning.rs` (`aot_enabled`). The kill switch for the whole native tier
-(docs/internal/AOT_ARCH.md), default ON since v0.3 (PR #52). The interpreter path is
+(docs/internal/AOT_ARCH.md), default ON since v0.3 (PR 52). The interpreter path is
 untouched either way — the compiled registry is a pure overlay — so disabling
 is always safe, and `QN_AOT=0` vs default is the standing parity axis the
 corpus runs under.
@@ -177,7 +177,7 @@ harness lives in `profiling/batch-sweep/`.
 ### `QN_GC_SLEEP`
 **Float, default 4.0.** Read in `src/vm.rs` (`gc_pacing`). gc-arena pacing
 `sleep_factor` — how much allocation headroom the collector grants between
-collection work (PR #37). Higher = fewer collections, more memory; the default
+collection work (PR 37). Higher = fewer collections, more memory; the default
 was chosen by measurement. Ignored under `QN_GC_STRESS` (see above).
 
 ### `QN_BATCH_STATS`

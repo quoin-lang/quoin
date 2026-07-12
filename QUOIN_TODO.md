@@ -293,7 +293,7 @@ both under `## Misc`.)
   embedded stdlib made those filenames unreadable; NO_COLOR masked it) — the
   snippet highlighter now degrades to plain text.
 - [ ] **Full Unicode identifiers.** Today `IDENT_PREFIX`/`IDENT_REST` are ASCII-closed
-  (`[a-zA-Z_][a-zA-Z0-9?_]*`); eventually identifiers should support full Unicode (UAX #31
+  (`[a-zA-Z_][a-zA-Z0-9?_]*`); eventually identifiers should support full Unicode ([UAX #31](https://www.unicode.org/reports/tr31/)
   `XID_Start`/`XID_Continue` or similar). **Coupling to watch:** the compiler's alpha-renaming
   for control-flow fusion (docs/internal/MATERIALIZATION_ARCH.md, M1) mints *source-unspellable* local
   names by using a character outside the identifier charset (e.g. `·` U+00B7) — the
@@ -305,7 +305,7 @@ both under `## Misc`.)
 
 ## Networking & Async I/O
 
-The async-networking stack (Stages 0–7) shipped on `main` (PR #1; design + as-built notes in
+The async-networking stack (Stages 0–7) shipped on `main` (PR 1; design + as-built notes in
 `docs/internal/ASYNC_ARCH.md`): cooperative tasks/cancellation, `TcpSocket`/`TlsSocket`,
 `Async.timeout:`, the `[HTTP]` client (incl. chunked), `ByteStream`/`StringStream`, file
 streams, and `TcpListener` servers. These are the deferred refinements — none blocks the
@@ -391,7 +391,7 @@ Quoin over the current sockets/streams).
   Phase-3 residue — a fuller Arrow C Data Interface for columnar interchange — is tracked
   where its forcing function lives: `crates/adbc/DESIGN.md` §7 (the columnar `Table` value).
   Remaining refinements below.
-  - [ ] **Extension calls: fair queuing instead of a busy error.** *(audit follow-up, PR #48;
+  - [ ] **Extension calls: fair queuing instead of a busy error.** *(audit follow-up, PR 48;
     DUG 2026-07-07 — settled fix design: a waiter queue on `NativeExtension` mirroring the
     channel park model exactly — `(TaskId, park_epoch)` FIFO with park-identity staleness
     (all machinery exists and is battle-tested), same-task re-entry still errors (track the
@@ -407,7 +407,7 @@ Quoin over the current sockets/streams).
     (mirrors the channel park model in `src/runtime/channel.rs`). Same-task re-entry (the
     extension re-entering itself through a host block) must still error — only cross-task
     contention queues.
-  - [ ] **Extension socket files leak on abnormal *host* exit.** *(audit follow-up, PR #48.)* An
+  - [ ] **Extension socket files leak on abnormal *host* exit.** *(audit follow-up, PR 48.)* An
     extension's socket file (`/tmp/quoin-ext-*.sock`) and child are torn down by
     `NativeExtension::drop` (and promptly on a timeout via `kill_now`), but if the *host* crashes
     or is killed, `Drop` never runs and the socket file persists. Add a startup sweep of stale
@@ -710,7 +710,7 @@ deferred `Mirror` in `## REPL`.
 
 **Networking** (built on the async arc — see `## Networking & Async I/O`)
 - [x] **HTTP client (high-level)** — `[HTTP]Client.get:`/`post:`/`request:` builder over
-  sockets + parser + TLS (`qnlib/net/http.qn`, PR #14: content-encoding, unified body/JSON,
+  sockets + parser + TLS (`qnlib/net/http.qn`, PR 14: content-encoding, unified body/JSON,
   streaming, redirects). Remaining refinements (keep-alive pooling, cookies) tracked under
   `## Networking & Async I/O`.
 - [x] ⭐ **URL** — `[Web]Url` parse/build + percent/query/form codecs (`qnlib/web/`,
@@ -750,7 +750,7 @@ deferred `Mirror` in `## REPL`.
 
 **Concurrency** (on the async scheduler)
 - [x] **Channels** — buffered/unbuffered async queues with scheduler park/wake
-  (`src/runtime/channel.rs`, PR #10; the extension fair-queuing item above mirrors its park
+  (`src/runtime/channel.rs`, PR 10; the extension fair-queuing item above mirrors its park
   model). Remaining in this family: the structured-concurrency API itself (nurseries,
   deadlines, detached spawn+join — `docs/internal/ASYNC_ARCH.md` Stage 2b).
 
@@ -828,7 +828,7 @@ deferred `Mirror` in `## REPL`.
   median −0.03%, slower in 7/15 paired runs against a 2.4 ms stdev. (A first, *sequential* sweep
   showed all six benches 2-3% *faster* — drift, not a result; interleaving fixed it.) Tests:
   `qnlib/tests/56-stack-reentry.qn`; repros `each_reenter.qn` / `catch_reenter.qn` now exit 0.
-  Original report follows. *(audit follow-up, PR #48; DUG 2026-07-07 — confirmed live, repros
+  Original report follows. *(audit follow-up, PR 48; DUG 2026-07-07 — confirmed live, repros
   `qnlib/stress/audit/each_reenter.qn` + `catch_reenter.qn`, both exit 138. The dig NARROWED
   the surface: plain `b = { b.value }` self-recursion is SAFE (flat interpreted frames), and
   the sort-comparator shape is already caught by the >12 cap — the live hole is the
@@ -866,7 +866,7 @@ deferred `Mirror` in `## REPL`.
   `quoin_ext_proto::MAX_DV_DEPTH` = 64 (a hostile-peer bound on bytes arriving from a peer).
   Tests: `qnlib/tests/55-serialize-depth.qn`; repro `qnlib/stress/audit/serialize_cycle.qn`
   now exits 0. Original report follows.
-  *(audit follow-up, PR #48; DUG 2026-07-07 — repro `qnlib/stress/audit/serialize_cycle.qn`.
+  *(audit follow-up, PR 48; DUG 2026-07-07 — repro `qnlib/stress/audit/serialize_cycle.qn`.
   A CYCLIC value (`var l = #(); l.add:l`) or a ~500k-deep one SIGBUSes uncatchably through
   EVERY serializer, no extension involved: `JSON.generate:` (its own `value_to_json` walk,
   `src/runtime/json.rs:27`), `MessagePack.pack:`/TOML/YAML/extension `call:…data:` (the

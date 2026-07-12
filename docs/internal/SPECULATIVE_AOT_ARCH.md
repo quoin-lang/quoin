@@ -332,7 +332,7 @@ Obj-param compiled block stays spliced: routing those measured +23% on
 maps). While pending, the guard feeds warmth by element count and samples
 the first element's kind. each-arith 102 → 54ns/element.
 
-**The F1 purity blind spot (fixed).** PR #77's strict-Boolean guard puts a
+**The F1 purity blind spot (fixed).** PR 77's strict-Boolean guard puts a
 `BranchIfNotBool` + materialized arm blocks + an `if:else:` send into every
 not-statically-Bool conditional. The syntactic `scalar_pure_set` scan is
 reachability-blind, so that dynamically-dead cold span evicted untyped fib

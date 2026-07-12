@@ -199,7 +199,7 @@ richards, combinators, strings, maps, json) and an A/B runner
 (`bench/run.py`). See `bench/README.md`.
 
 Still missing, next in line: an HTTP/web macro-benchmark once the web
-framework (PR #46) merges — that's the workload users will actually feel —
+framework (PR 46) merges — that's the workload users will actually feel —
 and cross-language ports (Python/Ruby) of the six new benches to re-baseline
 the "vs CPython" multiplier beyond fib.
 

@@ -74,7 +74,7 @@ been starving them). The per-element cost ladder that scoped the arc is
 now permanent (`bench/micro/`, `run.py` interleaves two binaries).
 
 **fib_untyped 0.077 → 0.021** — not an arc win but a repair: the F1
-strict-Boolean fix (PR #77) had silently evicted every untyped
+strict-Boolean fix (PR 77) had silently evicted every untyped
 conditional-bearing method from the scalar-pure set (the syntactic scan
 is reachability-blind and saw the guard's dead cold span), which killed
 direct self-recursion and demoted the speculated scalar return to Obj —
@@ -84,7 +84,7 @@ guarded-conditional cold spans.
 The 07-06 "drift" is now fully accounted (era binaries rebuilt at
 `80a209b` and measured in the same build flavor):
 
-1. **json's +21% was real** — bisected to PR #71 (map-any-keys), whose
+1. **json's +21% was real** — bisected to PR 71 (map-any-keys), whose
    validation checked `maps.qn` steady-state but never ran json. Fixed on
    this branch: a small-collection linear tier for Map and Set (≤16 entries
    scan the cached hashes; the index builds on crossing and drops on

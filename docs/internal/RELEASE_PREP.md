@@ -1,7 +1,7 @@
 # Release prep — v0.1.0 "public preview"
 
 Working checklist for bringing Quoin to a releasable state. Assessment date
-2026-07-08, on `chore/release-prep` (stacked on `fix/bug-hunt`, PR #77).
+2026-07-08, on `chore/release-prep` (stacked on `fix/bug-hunt`, PR 77).
 
 ## Goal: definition of done
 
@@ -212,6 +212,16 @@ Tier 2 work builds toward it:
   tests and reported green; `--workspace` runs all 585. The 132 it skipped were
   all of `quoin-syntax`, `quoin-fmt`, `quoin-ext` and `quoin-ext-proto` —
   including every parser test written for the `#(-1 -2)` fix.
+- [ ] **Move the repo to `quoin-lang/quoin`** (prep on `release/v0.1-prep`; unblocks
+  the two DEFERRED items below). Tree scrub done on that branch: the old working-copy
+  name is gone from tracked files (vim README install paths; the two audit ext
+  fixtures resolve `sdk/python` relative to `__file__` now), `.idea/` is untracked
+  and gitignored, and PR references are written `PR N` so GitHub can't auto-link
+  them against the new repo's *own* future PR numbers. The move itself, still to do:
+  force-push the complete history over the placeholder (`main` only — no old feature
+  branches, no `pre-resign` tag), repoint local `origin`, archive the old private
+  repo. History ships unrewritten: the old name survives only in one commit message
+  and a few historic blobs, as a bare directory name with no account attached.
 - [ ] **DEFERRED until the repo moves org.** CI: macOS runner, `cargo fmt --check`
   + clippy, doc-example harness, dependency caching, build `crates/adbc`. Swap
   `cargo test` for `cargo nextest run` (see below) — ~4× less wall time.

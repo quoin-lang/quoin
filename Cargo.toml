@@ -29,10 +29,9 @@ members = [
 ]
 
 # Shared across every member so version/licence/links live in one place. The name
-# `quoin` is already reserved on crates.io by the placeholder crate at
-# github.com/quoin-lang/quoin, which this VM is destined to become — hence the
-# repository/homepage point there rather than at the current working remote.
-# `crates/adbc` is its own workspace and repeats these explicitly.
+# `quoin` is reserved on crates.io by a placeholder crate until this VM is
+# published under it. `crates/adbc` is its own workspace and repeats these
+# explicitly.
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

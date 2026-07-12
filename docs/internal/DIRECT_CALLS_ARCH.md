@@ -3,7 +3,7 @@
 *Status (verified 2026-07-09 at `dbe188d`): **PARTIAL — all slices landed; the tier ships
 default-off.** D2.5a (`8489807`, skip the env swap for env-blind callees), D2.5b (`9b96ac1`,
 per-entry marshaling plans), D3a (`a2a29a9`, the `dispatch_epoch` ABI) and D3b (`7f966c2`, W0
-direct edges) are all on main via PR #75. The machinery is proven, but the direct-edge gate
+direct edges) are all on main via PR 75. The machinery is proven, but the direct-edge gate
 measured net-negative, so it is **off unless `QN_DIRECT_WARM` is set** (see also
 `QN_DIRECT_ONLY` / `QN_DIRECT_MAX` / `QN_DIRECT_NULL` in `docs/internal/ENV_FLAGS.md`); code lives in
 `src/codegen/mod.rs` (`lane_plan`, `BakedW0`) with `tests/direct_calls.rs`. Successor arc:

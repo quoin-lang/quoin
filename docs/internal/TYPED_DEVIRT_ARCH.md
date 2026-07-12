@@ -1,7 +1,7 @@
 # Typed devirtualization tier (Tier 2) — design
 
 *Status (verified 2026-07-09 at `dbe188d`): **PARTIAL**. The devirtualization tier shipped
-(`src/devirt_ops.rs` is its single source of truth; merged via PR #31, which also brought the
+(`src/devirt_ops.rs` is its single source of truth; merged via PR 31, which also brought the
 breaking strict `var`/`let` and sealed types). Slice 2b-B Phase 1 — compile-time seal detection
 and `CallSelfDirect` — shipped in `fb67760`. Phase 2 (the call-site cache) was **spiked and
 parked** as a measured net loss, and Phase 3 (unboxed structs) is **deferred**, blocked on

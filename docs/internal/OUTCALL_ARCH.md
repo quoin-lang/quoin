@@ -1,6 +1,6 @@
 # The outcall seam: three fixes on one branch
 
-*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED**, merged to main via PR #61 —
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED**, merged to main via PR 61 —
 `perf/ic-direct-calls` is history, not a live branch. The doc's closing line "D3 remains the
 recorded future arc" is stale: D3 has since shipped too (see `docs/internal/DIRECT_CALLS_ARCH.md`).*
 

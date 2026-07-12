@@ -10,11 +10,11 @@ Symlink this directory as a vim package (loads automatically, no config):
 
 ```sh
 mkdir -p ~/.vim/pack/quoin/start
-ln -s /path/to/building_blocks_vm/editors/vim ~/.vim/pack/quoin/start/quoin
+ln -s /path/to/quoin/editors/vim ~/.vim/pack/quoin/start/quoin
 ```
 
 For Neovim use `~/.local/share/nvim/site/pack/quoin/start` instead, or add
-`set runtimepath+=/path/to/building_blocks_vm/editors/vim` to your vimrc.
+`set runtimepath+=/path/to/quoin/editors/vim` to your vimrc.
 
 Exact colors require `set termguicolors` (truecolor). Without it, nearest
 xterm-256 approximations are used.
