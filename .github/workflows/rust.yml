@@ -36,9 +36,10 @@ jobs:
         cargo run -- doc --check --stdlib
         cargo run -- doc --check docs/language README.md
 
-  # Dylint lints: no_borrow_across_yield is deny-level (a violation fails this
-  # job); no_gc_across_yield stays advisory (warnings only). The lint libraries
-  # pin their own nightly via rust-toolchain files, which rustup fetches on use.
+  # Dylint lints: both yield-safety lints are deny-level — a violation fails
+  # this job; an audited #[allow] at the site is the escape hatch. The lint
+  # libraries pin their own nightly via rust-toolchain files, which rustup
+  # fetches on use.
   lint:
 
     runs-on: ubuntu-latest

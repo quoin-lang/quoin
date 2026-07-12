@@ -1023,7 +1023,7 @@ fn consume_or_raise<'gc>(
 }
 
 /// Run `block` with an open stream `handle`, closing it on every exit path; returns the
-/// block's value. No suspend here, so neither `handle` nor the result is held across one.
+/// block's value.
 fn scope_stream<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
@@ -1033,9 +1033,14 @@ fn scope_stream<'gc>(
     let result = vm.execute_block(mc, block, vec![handle], None);
     match result {
         // The normal exit gets the full close — flush, and finish a write codec
-        // (its trailer error surfaces here rather than being swallowed).
+        // (its trailer error surfaces here rather than being swallowed). The
+        // close PARKS (flush; FinishStream), so the block's result must ride
+        // the traced value stack across the suspend, not this native frame.
         Ok(v) => {
-            close_stream(vm, mc, handle)?;
+            vm.stack.push(v);
+            let closed = close_stream(vm, mc, handle);
+            let v = vm.stack.pop().expect("scope_stream: rooted result");
+            closed?;
             Ok(v)
         }
         // The throw/cancel path must not park again: enqueue the drop-reap as

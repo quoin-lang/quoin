@@ -31,7 +31,7 @@ dylint_linting::declare_late_lint! {
     /// use(val);
     /// ```
     pub NO_GC_ACROSS_YIELD,
-    Warn,
+    Deny,
     "GC-managed values held in local variables across a fiber yield point"
 }
 

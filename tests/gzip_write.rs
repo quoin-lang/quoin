@@ -13,13 +13,18 @@ use std::process::Command;
 /// (under plain `cargo test` the tests are THREADS of one process — the
 /// cli.rs lesson).
 fn run_qn(tag: &str, script: &str) -> std::process::Output {
+    run_qn_env(tag, script, &[])
+}
+
+fn run_qn_env(tag: &str, script: &str, envs: &[(&str, &str)]) -> std::process::Output {
     let path = std::env::temp_dir().join(format!("quoin_gzw_{tag}_{}.qn", std::process::id()));
     std::fs::write(&path, script).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
-        .arg(&path)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("run qn");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_qn"));
+    cmd.arg(&path).current_dir(env!("CARGO_MANIFEST_DIR"));
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run qn");
     let _ = std::fs::remove_file(&path);
     out
 }
@@ -49,6 +54,36 @@ fn an_unclosed_gzip_stream_is_finished_at_exit() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(read_gz(&gz), "finished at teardown");
+}
+
+#[test]
+fn a_scoped_close_keeps_the_blocks_result_rooted() {
+    // `over:do:`'s close PARKS (flush + FinishStream for the gzip codec), and
+    // the block's result is a fresh allocation whose only reference is the
+    // suspended native frame — unless scope_stream roots it on the value
+    // stack. QN_GC_SLEEP=0 collects hard during the park; before the rooting
+    // fix this returned a swept value.
+    let gz = std::env::temp_dir().join(format!("quoin_gzw_scoped_{}.gz", std::process::id()));
+    let script = format!(
+        "var out = StringStream.over:(([IO]File.create:'{p}').gzip) do:{{ |s|\n\
+             (1..200).each:{{ |i| s.writeln:('line ' + i.s) }}\n\
+             'fresh-' + (6 * 7).s + '-result'\n\
+         }}\n\
+         out.print\n",
+        p = gz.display()
+    );
+    let out = run_qn_env("scoped", &script, &[("QN_GC_SLEEP", "0")]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "fresh-42-result"
+    );
+    let text = read_gz(&gz);
+    assert!(text.starts_with("line 1\n") && text.ends_with("line 199\n"));
 }
 
 #[test]
