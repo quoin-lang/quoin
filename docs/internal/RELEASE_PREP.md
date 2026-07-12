@@ -215,16 +215,16 @@ Tier 2 work builds toward it:
   tests and reported green; `--workspace` runs all 585. The 132 it skipped were
   all of `quoin-syntax`, `quoin-fmt`, `quoin-ext` and `quoin-ext-proto` —
   including every parser test written for the `#(-1 -2)` fix.
-- [ ] **Move the repo to `quoin-lang/quoin`** (prep on `release/v0.1-prep`; unblocks
-  the two DEFERRED items below). Tree scrub done on that branch: the old working-copy
-  name is gone from tracked files (vim README install paths; the two audit ext
-  fixtures resolve `sdk/python` relative to `__file__` now), `.idea/` is untracked
-  and gitignored, and PR references are written `PR N` so GitHub can't auto-link
-  them against the new repo's *own* future PR numbers. The move itself, still to do:
-  force-push the complete history over the placeholder (`main` only — no old feature
-  branches, no `pre-resign` tag), repoint local `origin`, archive the old private
-  repo. History ships unrewritten: the old name survives only in one commit message
-  and a few historic blobs, as a bare directory name with no account attached.
+- [x] **Move the repo to `quoin-lang/quoin`** — DONE 2026-07-12 (`139ede8`): the
+  complete unrewritten history force-pushed over the placeholder, `main` only (no
+  old feature branches, no `pre-resign` tag; verified: one branch, zero tags, and
+  the site reference's source links resolve). Local `origin` now points at
+  quoin-lang/quoin; the old private repo remains as remote `private`, ready to
+  archive. Prep had scrubbed the tree (PR 100): old working-copy name gone from
+  tracked files, `.idea/` untracked, PR references written `PR N` so GitHub can't
+  auto-link them against this repo's own future PR numbers. The old name survives
+  only in one commit message and a few historic blobs, as a bare directory name
+  with no account attached. **The two DEFERRED items below are now unblocked.**
 - [ ] **DEFERRED until the repo moves org.** CI: macOS runner, `cargo fmt --check`
   + clippy, doc-example harness, dependency caching. Swap `cargo test` for
   `cargo nextest run` (see below) — ~4× less wall time. (`crates/adbc` was on
