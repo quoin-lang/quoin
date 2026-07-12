@@ -17,16 +17,23 @@ env:
   WORKSPACE: --workspace --exclude no_gc_across_yield --exclude no_borrow_across_yield
 
 jobs:
-  build:
+  test:
 
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
+    # Tests run under nextest -- each test its own process, parallel across binaries
+    # (~4x less wall time than `cargo test`, which runs the 46 test binaries serially).
+    # There are zero doctests in this workspace, so nextest loses no coverage. Installed
+    # from nextest's own release endpoint to avoid a marketplace action.
+    - name: Install nextest
+      run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
     - name: Build
       run: cargo build --verbose $WORKSPACE
     - name: Run tests
-      run: cargo test --verbose $WORKSPACE
+      run: cargo nextest run $WORKSPACE
     - name: Run Quoin tests
       run: cargo run --verbose -- test qnlib/tests
     # Every fenced example in the reference docs and the language book must run and match
@@ -36,7 +43,21 @@ jobs:
         cargo run -- doc --check --stdlib
         cargo run -- doc --check docs/language README.md
 
-  # Dylint lints: both yield-safety lints are deny-level — a violation fails
+  fmt:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check formatting
+      run: cargo fmt --all --check
+
+  # Clippy is deliberately NOT gated yet: the tree carries ~160 style warnings plus one
+  # deny-by-default `clippy::mut_from_ref` on the intentional unsafe `Fiber::get`
+  # (src/fiber.rs). Running it down (an audited #[allow] there + the warnings) is a
+  # tracked post-v0.1 follow-up, not a release blocker. See docs/internal/RELEASE_PREP.md.
+
+  # Dylint lints: both yield-safety lints are deny-level -- a violation fails
   # this job; an audited #[allow] at the site is the escape hatch. The lint
   # libraries pin their own nightly via rust-toolchain files, which rustup
   # fetches on use.
@@ -46,6 +67,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
     - name: Install dylint
       run: cargo install cargo-dylint dylint-link
     - name: Run lints

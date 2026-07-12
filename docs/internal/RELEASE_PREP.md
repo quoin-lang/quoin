@@ -225,17 +225,28 @@ Tier 2 work builds toward it:
   auto-link them against this repo's own future PR numbers. The old name survives
   only in one commit message and a few historic blobs, as a bare directory name
   with no account attached. **The two DEFERRED items below are now unblocked.**
-- [ ] **DEFERRED until the repo moves org.** CI: macOS runner, `cargo fmt --check`
-  + clippy, doc-example harness, dependency caching. Swap `cargo test` for
-  `cargo nextest run` (see below) — ~4× less wall time. (`crates/adbc` was on
-  this list; dropped 2026-07-12 — deferred past v0.1 with the extension
-  surface, see "Out of scope" above.)
-- [ ] **DEFERRED until the repo moves org.** Release workflow producing binaries
-  (macOS arm64 + Linux x86_64). Whenever it is written: it must smoke-test the
-  built binary **from outside the source tree** (`cd $(mktemp -d) && qn -e …`),
-  because that is the only place `QUOIN_STDLIB` is unset and the embedded stdlib
-  is actually exercised. Prefer the runner's `gh` CLI over a third-party action so
-  the org move costs nothing. `ubuntu-22.04` for a glibc old enough to be useful.
+- [x] **CI hardening** (`.github/workflows/rust.yml`, on `release/v0.1-final`):
+  doc-example harness was already wired; added **`cargo fmt --all --check`** (tree is
+  rustfmt-clean, verified), **dependency caching** (`Swatinem/rust-cache@v2` — the one
+  third-party action, chosen over hand-rolled `actions/cache`), and swapped
+  `cargo test` → **`cargo nextest run`** (installed from nextest's own release endpoint,
+  not a marketplace action; zero doctests so no coverage lost). **DEFERRED, by decision:**
+  *macOS runner* — CI stays Linux-only for now; `release.yml` builds+smokes the macOS
+  binary at tag time, so the platform isn't unverified. *clippy* — the tree carries ~160
+  style warnings **plus a deny-by-default `clippy::mut_from_ref`** on the intentional
+  unsafe `Fiber::get` (`src/fiber.rs:200`, returns `&mut` from `&self`), so a clippy gate
+  reds CI in any form today; running it down (an audited `#[allow]` there + the warnings)
+  is a tracked **post-v0.1 follow-up**, not a release blocker. (`crates/adbc` dropped
+  2026-07-12 — deferred past v0.1 with the extension surface, see "Out of scope" above.)
+- [x] **Release workflow** (`.github/workflows/release.yml`, on `release/v0.1-final`):
+  `v*` tag → matrix build (macOS arm64 on `macos-14`, Linux x86_64 on `ubuntu-22.04` for
+  an old-enough glibc), **out-of-tree smoke test** (`cd $(mktemp -d)` then `qn --version`
+  + a `collect:`/`.s` one-liner that exercises the EMBEDDED stdlib — `QUOIN_STDLIB` unset
+  there, verified locally), tarball (binary + both licenses + README + CHANGELOG), and a
+  **draft** GitHub Release with `SHA256SUMS` + CHANGELOG-extracted notes, published via the
+  runner's `gh` CLI (no third-party release action). `workflow_dispatch` gives a
+  build+smoke dry run with no publish. Pending: a dispatch dry-run + first tag to verify
+  end-to-end on the runners.
 - [x] `CHANGELOG.md` (`55bade1`). Heading is dated at tag time.
 - [x] Status-stamp the docs (`bfd59ca`). Every file under `docs/` now opens with a
   Status line from a fixed vocabulary, verified against the tree rather than from
