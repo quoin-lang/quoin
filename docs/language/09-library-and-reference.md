@@ -347,6 +347,38 @@ var mac = [Crypto]Hmac.sha256:'msg' key:'secret'
 ([Crypto]Random.bytes:16).count              "* -> 16
 ```
 
+### Metaprogramming: the parser & AST
+
+`use std:lang/ast` exposes the compiler's front half: **[Lang]Parser** parses
+source (`parse:`, `parse:named:`, `parseFile:`) into a tree of **[Lang]Node**
+— one class for every node, not thirty. A node answers `kind` (a Symbol:
+`#send`, `#classDefinition`, `#stringLiteral`, …), `children` (structural, in
+source order), and `at:#field` for kind-specific parts (`#selector` /
+`#receiver` / `#arguments` on a send; `#name` / `#parent` / `#body` on a class
+definition; `#value` on literals — nil for a field the kind doesn't have).
+Source fidelity is total: every node carries `file` (threaded from
+`parseFile:` / `parse:named:`), `span` (byte offsets + line/column), and
+`text`, the exact source slice. `walk:` visits a subtree pre-order and
+`allNodes` flattens it, so the whole Iterate vocabulary works on programs —
+a lint rule is a `select:` one-liner.
+
+Transformation is deliberately *source rewriting*, not tree mutation:
+**[Lang]Rewrite** collects span edits (`replace:with:`, `insertBefore:text:`,
+`delete:`) and `apply` splices them byte-exactly into new source — parse it
+again to verify, `Runtime.eval:` it to use it. Overlapping edits throw. (A
+synthetic-node unparser is future work; until then the AST never has to
+invent text, only point at it.)
+
+```quoin
+use std:lang/ast;
+var src = 'var total = 2 + 3';
+var rw = [Lang]Rewrite.over:src;
+([Lang]Parser.parse:src).walk:{ |n|
+    (n.kind == #integerLiteral).if:{ rw.replace:n with:((n.at:#value) * 10).s }
+};
+rw.apply    "* -> var total = 20 + 30
+```
+
 ### Covered elsewhere
 
 - **Concurrency** — `Task`, `Fiber`, `Channel`, `Async`, the `parallelCollect:`
@@ -480,6 +512,7 @@ MyFile <- [IO]File;     "* aliasing is just an ordinary definition — not a `us
 | `core/tcp_server.qn` | `TcpServer` — a minimal concurrent accept-loop server (`start:`/`stop`/`join`). |
 | `net/http.qn` | `[HTTP]Client` — an HTTP/1.1 client in pure Quoin over `TcpSocket`/`TlsSocket` (so HTTPS falls out for free). |
 | `net/websocket.qn` | `WebSocket` — an RFC 6455 client in pure Quoin over the same sockets (`wss://` included); masked frames, reassembled fragments, auto-pong, the close handshake. |
+| `lang/ast.qn` | `[Lang]Parser`/`[Lang]Node`/`[Lang]Rewrite` — the parser and a walkable AST as Quoin objects, plus span-based source rewriting. |
 | `net/http_server.qn` | `[HTTP]Server` — the HTTP/1.1 server protocol machine, pure Quoin over `TcpListener`. |
 | `web/00-url.qn` | `[Web]Url` — the percent codec: `encode:`/`decode:`, `queryParse:`, `formDecode:`. |
 | `web/01-error.qn` | `HttpError` — throw a status (and optional body) from anywhere under a `[Web]App`. |
