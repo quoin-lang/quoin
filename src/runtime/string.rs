@@ -314,7 +314,7 @@ pub fn build_string_class() -> NativeClassBuilder {
              '42'.to_integer     \"* -> 42\n\
              ```",
         )
-        .instance_method("mod", |vm, mc, receiver, _args| {
+        .instance_method("%", |vm, mc, receiver, _args| {
             let s_borrow = recv!(receiver, String);
             let s = s_borrow.to_string();
 

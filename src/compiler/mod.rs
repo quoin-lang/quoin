@@ -3424,7 +3424,7 @@ impl Compiler {
                 bytecode.push(Instruction::Send(Symbol::intern("+"), 0));
             }
             UnaryOperatorType::Mod => {
-                bytecode.push(Instruction::Send(Symbol::intern("mod"), 0));
+                bytecode.push(Instruction::Send(Symbol::intern("%"), 0));
             }
             _ => {
                 return Err(format!(
