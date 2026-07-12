@@ -167,11 +167,28 @@ fn push_fence(out: &mut String, info: &str, body: &str) {
 }
 
 fn push_table(out: &mut String, rows: &[&str], rewrite: bool) {
+    // A `|` inside a backtick code span (block params: `{ |n| … }`) or escaped
+    // as `\|` is content, not a cell separator — matching GitHub, which also
+    // unescapes `\|`.
     let cells = |row: &str| -> Vec<String> {
-        row.trim_matches('|')
-            .split('|')
-            .map(|c| c.trim().to_string())
-            .collect()
+        let mut cells = vec![String::new()];
+        let mut in_code = false;
+        let mut chars = row.trim_matches('|').chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if chars.peek() == Some(&'|') => {
+                    chars.next();
+                    cells.last_mut().unwrap().push('|');
+                }
+                '`' => {
+                    in_code = !in_code;
+                    cells.last_mut().unwrap().push(c);
+                }
+                '|' if !in_code => cells.push(String::new()),
+                _ => cells.last_mut().unwrap().push(c),
+            }
+        }
+        cells.iter().map(|c| c.trim().to_string()).collect()
     };
     let is_separator = |row: &str| row.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '));
     out.push_str("<table>\n");

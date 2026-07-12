@@ -87,6 +87,21 @@ fn tables_render_with_headers() {
 }
 
 #[test]
+fn table_cells_keep_pipes_inside_code_spans() {
+    let md = "| Kind | Example |\n|---|---|\n| Block | `{ |n| n * 2 }` |\n";
+    let html = render(md, false);
+    assert!(
+        html.contains("<td><code>{ |n| n * 2 }</code></td>"),
+        "a | inside a code span is content, not a separator: {html}"
+    );
+    // GitHub-style escaped pipes are unescaped content, in and out of code spans.
+    let md = "| Op | Note |\n|---|---|\n| `a \\|\\| b` | or \\| pipe |\n";
+    let html = render(md, false);
+    assert!(html.contains("<td><code>a || b</code></td>"), "{html}");
+    assert!(html.contains("<td>or | pipe</td>"), "{html}");
+}
+
+#[test]
 fn lists_ordered_and_wrapped() {
     let md = "1. first\n2. second line\n   wraps here\n\n- bullet\n";
     let html = render(md, false);
