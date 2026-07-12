@@ -55,3 +55,38 @@ fn error_positions_are_not_shifted_by_the_shebang() {
         "the failing send is on line 3, shebang included\n{stderr}"
     );
 }
+
+#[test]
+fn a_bin_directory_script_anchors_self_at_the_project_root() {
+    // The installable-tool convention: <root>/bin/tool + <root>/lib/*.qn — the
+    // script's `use self:lib/…` must resolve from ANY invoking directory, so
+    // `script_self_root` anchors a bin/-resident script at bin's parent.
+    let root = std::env::temp_dir().join(format!("quoin_binroot_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(
+        root.join("lib/probe.qn"),
+        "[BinRoot]Probe <- { .meta <-- { hello -> { 'lib loaded' } } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("bin/tool"),
+        "#!/usr/bin/env qn\nuse self:lib/probe\n[BinRoot]Probe.hello.print\n",
+    )
+    .unwrap();
+    // Invoke from an unrelated cwd (the temp root itself), extensionless path.
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(root.join("bin/tool"))
+        .current_dir(std::env::temp_dir())
+        .output()
+        .expect("run qn");
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("lib loaded"));
+}

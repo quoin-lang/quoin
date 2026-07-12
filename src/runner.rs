@@ -515,13 +515,25 @@ fn test_entry_source(dir: &str) -> String {
 }
 
 /// The directory `use self:…` resolves against for a script: the script's own directory,
-/// so `qn /srv/app/main.qn` finds `/srv/app/lib/…` regardless of the invoking CWD.
-/// Falls back to CWD-relative (an empty path) when the script path has no parent or
-/// cannot be canonicalized — the run will fail on the missing script anyway.
+/// so `qn /srv/app/main.qn` finds `/srv/app/lib/…` regardless of the invoking CWD — with
+/// one convention on top: a script living in a `bin/` directory anchors at bin's PARENT,
+/// so an installable tool laid out as `<root>/bin/quern` + `<root>/lib/*.qn` loads its
+/// own library (`use self:lib/*`) from any invoking directory. Falls back to
+/// CWD-relative (an empty path) when the script path has no parent or cannot be
+/// canonicalized — the run will fail on the missing script anyway.
 fn script_self_root(script: &str) -> PathBuf {
     std::fs::canonicalize(script)
         .ok()
         .and_then(|p| p.parent().map(PathBuf::from))
+        .map(|dir| {
+            if dir.file_name().is_some_and(|n| n == "bin")
+                && let Some(root) = dir.parent()
+            {
+                root.to_path_buf()
+            } else {
+                dir
+            }
+        })
         .unwrap_or_default()
 }
 
