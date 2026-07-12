@@ -688,7 +688,23 @@ deferred `Mirror` in `## REPL`.
   `## Networking & Async I/O`.
 - [x] ⭐ **URL** — `[Web]Url` parse/build + percent/query/form codecs (`qnlib/web/`,
   tests/47-url.qn).
-- [ ] **DNS** resolution (async) and **WebSocket** (over the HTTP upgrade) — later.
+- [x] **DNS** — `DNS.resolve:`/`resolve4:`/`resolve6:`/`reverse:` (`src/runtime/dns.rs` over
+  `IoRequest::Resolve`/`ResolveReverse`): the system resolver `Connect` always used internally
+  (getaddrinfo/getnameinfo on the blocking pool), exposed; lookups park the task. Reverse is a
+  direct libc `getnameinfo` (std has none; the `kill` precedent), NI_NAMEREQD, nil = unmapped.
+  Hermetic tests (`78-dns.qn`: localhost, RFC 5737 TEST-NET, RFC 2606 `.invalid`). Record-type
+  queries (TXT/MX/SRV) deliberately absent — they need a real DNS client dependency
+  (hickory-resolver, runtime-coupled); revisit only with a concrete use case.
+- [x] **WebSocket** — `WebSocket` RFC 6455 client, PURE QUOIN (`qnlib/net/websocket.qn`,
+  `use std:net/websocket`) over TcpSocket/TlsSocket (wss:// free, the HTTP-client story):
+  upgrade handshake reuses the native `[HTTP]Parser.parseHead:` and VERIFIES
+  Sec-WebSocket-Accept (sha1+base64 via [Crypto]); frames by `readExactly:` (16/64-bit lengths,
+  fragmentation reassembly, auto-pong, close handshake w/ closeCode/closeReason, torn
+  connection = IoError not silent nil); sends masked via new native `Bytes#maskWith:` (cycled
+  XOR, its own inverse). `WebSocket.acceptFor:key` is class-side so Quoin SERVERS can answer
+  the handshake — the in-test echo server (`79-websocket.qn`, parseRequestHead: + hand frames)
+  is the reference and pins the client's masking duty. Deferred: [Web]App server-side upgrade
+  (wants handler connection adoption), subprotocols/extra headers, permessage-deflate.
 
 **Metaprogramming**
 - [ ] **Parser / AST to Quoin** — expose the parser and a visitable AST as Quoin objects so Quoin
@@ -702,21 +718,16 @@ deferred `Mirror` in `## REPL`.
   deadlines, detached spawn+join — `docs/ASYNC_ARCH.md` Stage 2b).
 
 ## Bugs/Odd Behavior
-- [ ] **`qn fmt` internal error: multi-line `#( … )` as `%`'s right operand inside a parenthesized
-  argument.** The self-verification catches it (aborts, no corruption), but the file can't be
-  formatted. Minimal repro (formats fine once the list is single-line, or when the `%` expression
-  is bound to a var first — the workaround used in `core/17-zip.qn` contentFor:):
-  ```
-  Foo <- {
-      m: -> { |entry|
-          ParseError.throw:('zip: %1 method %2' % #(
-              entry.name
-              entry.methodCode
-          ))
-      }
-  }
-  ```
-  Found writing the zip reader (2026-07-11). Fix lives in `crates/quoin-fmt`.
+- [x] **`qn fmt` internal error: multi-line `#( … )` as `%`'s right operand inside a parenthesized
+  argument.** The self-verification caught it (aborted, no corruption), but the file couldn't be
+  formatted — `ParseError.throw:('… %1 …' % #(\n a\n b\n ))` lost the outer closing `)`. Root
+  cause: `lower_stmt`'s collection arm was the one dispatch that renders purely from the node's
+  OWN span, dropping the region residue around it — the wrapping `(`/`)` captured by
+  `statement_content_start` / left before `content_end`. FIXED (2026-07-11) by re-attaching both
+  residues around the lowered collection (`crates/quoin-fmt/src/format.rs`); regression tests
+  `keeps_wrapping_parens_*` in format_tests.rs cover throw-arg, parenthesized rvalue, and
+  mid-send positions. The `core/17-zip.qn` contentFor: workaround was reverted to the natural
+  form as the end-to-end proof.
 - [x] **`List.new` / `Map.new` / `Set.new` produce broken shells.** FIXED for the
   collections (+ `Bytes.new`): native class methods now win the hierarchy lookup before the
   generic fallback — `new` constructs the real empty native value; `new:` raises a clear

@@ -479,6 +479,7 @@ MyFile <- [IO]File;     "* aliasing is just an ordinary definition — not a `us
 | `core/12-os.qn` | Conveniences over the native `[OS]` namespace (`[OS]Env.at:ifAbsent:`, iteration). |
 | `core/tcp_server.qn` | `TcpServer` — a minimal concurrent accept-loop server (`start:`/`stop`/`join`). |
 | `net/http.qn` | `[HTTP]Client` — an HTTP/1.1 client in pure Quoin over `TcpSocket`/`TlsSocket` (so HTTPS falls out for free). |
+| `net/websocket.qn` | `WebSocket` — an RFC 6455 client in pure Quoin over the same sockets (`wss://` included); masked frames, reassembled fragments, auto-pong, the close handshake. |
 | `net/http_server.qn` | `[HTTP]Server` — the HTTP/1.1 server protocol machine, pure Quoin over `TcpListener`. |
 | `web/00-url.qn` | `[Web]Url` — the percent codec: `encode:`/`decode:`, `queryParse:`, `formDecode:`. |
 | `web/01-error.qn` | `HttpError` — throw a status (and optional body) from anywhere under a `[Web]App`. |

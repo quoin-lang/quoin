@@ -1,0 +1,32 @@
+"* DNS (src/runtime/dns.rs over IoRequest::Resolve/ResolveReverse): the system
+"* resolver, exposed. Kept hermetic: localhost and reserved addresses only, so
+"* the suite passes offline — no real-world names.
+
+(TestSuite.new:{ var name = 'DNS' }).add:{
+    .test:
+    resolvesLocalhost -> {
+        var ips = DNS.resolve:'localhost';
+        .isTrue:{ ips.any? };
+        .isTrue:{ (ips.contains?:'127.0.0.1') || (ips.contains?:'::1') };
+        "* The filtered variants partition the same answer.
+        .isTrue:{ (DNS.resolve4:'localhost').none?:{ |ip| ip.contains?:':' } };
+        .isTrue:{ (DNS.resolve6:'localhost').all?:{ |ip| ip.contains?:':' } };
+    };
+
+    .test:
+    reverseLookups -> {
+        "* The loopback PTR is universal.
+        .is:{ DNS.reverse:'127.0.0.1' } equalTo:'localhost';
+        "* TEST-NET-3 (RFC 5737) is reserved: no mapping is an ANSWER (nil),
+        "* not an error.
+        .is:{ DNS.reverse:'203.0.113.1' } equalTo:nil;
+    };
+
+    .test:
+    errors -> {
+        "* .invalid is guaranteed NXDOMAIN (RFC 2606) — a catchable IoError.
+        .does:{ DNS.resolve:'no-such-host-xyz.invalid' } throw:IoError;
+        "* Not an IP at all.
+        .does:{ DNS.reverse:'not-an-ip' } throw:IoError;
+    };
+}

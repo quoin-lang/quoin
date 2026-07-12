@@ -18,7 +18,7 @@ connections multiplex over one program. Tasks and their handles, `Async.gather:`
 `Async.timeout:do:`, and cancellation are Part V's subject (§18–19); a CPU-bound
 handler round-robins with its siblings at scheduler boundaries rather than
 starving them (§18), but real multi-core parallelism is worker isolates (§21, or
-`serve:workers:` in §26). Sockets, listeners, and streams are **native
+`serve:workers:` in §27). Sockets, listeners, and streams are **native
 built-ins** — always available, no `use`. The HTTP layers are **pure Quoin** in
 the stdlib: `use std:net/http` loads the `[HTTP]` client, `use std:net/http_server`
 the `[HTTP]Server` transport, `use std:web/*` the `[Web]` framework, and
@@ -54,6 +54,7 @@ task, not the sum, and results come back in input order.
 > - Streams layer buffering, framing, and text on top. `socket.byteStream` answers a **ByteStream** (16 KiB read-ahead): `read` / `read:` / `readExactly:` (n or throw) / `readUntil:` (delimiter framing, delimiter included; `readUntil:limit:` throws IoError `#limitExceeded` past the bound) / `readAll` / `peek:` (look without consuming) / `writeAll:`. `.stringStream` (on a socket or a byte stream) answers a **StringStream**: `readLine` (terminator stripped; nil at EOF), `eachLine:`, `read`, `readAll`, `write:`, `writeln:` — UTF-8, with a catchable ParseError on invalid bytes.
 > - **Sockets write through; file write streams buffer.** `[IO]File.create:` / `append:` answer a ByteStream that accumulates 16 KiB before draining — `flush!`, `close`, or program exit drains the rest. On a socket `flush!` is a no-op, so the same code runs over both. (`[IO]File.open:` answers a file object whose `byteStream` / `stringStream` open it for reading.)
 > - `ByteStream.over:sock do:{ |st| … }` / `StringStream.over:st do:{ … }` scope a stream exactly as `connect:do:` scopes a socket: closed on every exit path, block value answered.
+> - **`DNS`** exposes the resolver `connect:` already uses: `DNS.resolve:'host'` answers every address as Strings (IPv4 + IPv6, resolver order; `resolve4:` / `resolve6:` filter), a name that doesn't resolve throws a catchable IoError, and `DNS.reverse:'ip'` answers the PTR hostname or nil (unmapped is an answer, not an error). Lookups park the task, not the scheduler. Record-type queries (TXT/MX/SRV) are deliberately absent — that's a DNS client's job, not the system resolver's.
 
 A complete echo round-trip — server and client are just two tasks on the same
 scheduler:
@@ -150,7 +151,7 @@ replies         "* -> #(AAAA BBBB)
 
 Both clients are served concurrently by one `TcpServer` — the `stop` / `join` /
 `close` tail is the standard wind-down and reappears unchanged on `[HTTP]Server`
-in §26.
+in §27.
 
 ---
 
@@ -213,7 +214,26 @@ listener.close;
 
 ---
 
-## 26. Serving HTTP: `[HTTP]Server` and `[Web]App`
+## 26. WebSocket
+
+> **Rules**
+> - `use std:net/websocket`, then `WebSocket.connect:'ws://…'` (or `wss://` — TLS, like the HTTP client, falls out for free). The upgrade handshake sends a random `Sec-WebSocket-Key` and **verifies** the response's `Sec-WebSocket-Accept`; a wrong status or token throws a catchable IoError.
+> - `receive` answers the next **message**: a String for a text frame, Bytes for binary, and `nil` once the connection has closed cleanly. Fragmented messages are reassembled and pings are ponged invisibly; `eachMessage:{ |m| … }` loops until close. Receives park the task, not the scheduler.
+> - `sendText:` / `sendBytes:` send one masked frame each (clients must mask — `Bytes#maskWith:` natively); `ping` / `ping:` probe liveness.
+> - `close` (or `close:code reason:`) runs the RFC 6455 close handshake: send a close frame, drain to the peer's reply. After close, `closeCode` / `closeReason` report the far side's; a connection torn *without* a close frame surfaces as an IoError instead of a silent nil.
+> - `WebSocket.acceptFor:key` (class-side) computes the upgrade token, so a Quoin *server* can answer the handshake too — the test suite's in-file echo server (`qnlib/tests/79-websocket.qn`) is the reference. First-class server support in `[Web]App` is future work, as are subprotocols and permessage-deflate.
+
+```quoin norun
+use std:net/websocket;
+var ws = WebSocket.connect:'wss://stream.example.org/live';
+ws.sendText:(JSON.generate:#{ 'subscribe': 'trades' });
+ws.eachMessage:{ |m| (JSON.parse:m).print };    "* until the server closes
+ws.closeCode                                    "* why it ended
+```
+
+---
+
+## 27. Serving HTTP: `[HTTP]Server` and `[Web]App`
 
 Serving splits into two layers, mirroring the client's philosophy: `[HTTP]Server`
 (`use std:net/http_server`) is the HTTP/1.1 *protocol machine* — no routing, no
@@ -347,7 +367,7 @@ app.serve:':8080' workers:8 backing:'process'   "* child processes: real multico
 
 ---
 
-## 27. End to end: a JSON service, tested in-process
+## 28. End to end: a JSON service, tested in-process
 
 The framework's testing story *is* `handle:` — build the app, then call it like a
 function. No listener, no ports, no concurrency; requests are constructed and

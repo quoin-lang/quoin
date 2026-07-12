@@ -490,3 +490,30 @@ fn a_shebang_line_survives_formatting() {
         "shebang dropped:\n{out}"
     );
 }
+
+#[test]
+fn keeps_wrapping_parens_around_a_relowered_multiline_list() {
+    // The closing `)` of `throw:( … )` lives in the REGION, not the list's span; the
+    // collection re-lowering used to drop it (the reformatted source didn't parse).
+    let src = "Foo <- {\n    m: -> { |entry|\n        ParseError.throw:('zip: %1 method %2' % #(\n            entry.name\n            entry.methodCode\n        ))\n    }\n}\n";
+    let out = fmt(src);
+    assert!(
+        out.contains("% #( entry.name entry.methodCode ))"),
+        "outer paren lost:\n{out}"
+    );
+}
+
+#[test]
+fn keeps_wrapping_parens_around_a_parenthesized_multiline_list_rvalue() {
+    // Both sides at once: the leading `(` is captured by statement_content_start, the
+    // trailing `)` sits between the list's span end and the statement end.
+    let src = "x = (#(\n    1\n    2\n))\n";
+    assert_eq!(fmt(src), "x = (#( 1 2 ))\n");
+}
+
+#[test]
+fn keeps_wrapping_parens_around_a_multiline_list_mid_send() {
+    let src = "foo.bar:('%1-%2' % #(\n    a\n    b\n)) baz:x\n";
+    let out = fmt(src);
+    assert!(out.contains(")) baz:x"), "mid-send paren lost:\n{out}");
+}
