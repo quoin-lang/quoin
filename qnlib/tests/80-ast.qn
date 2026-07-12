@@ -1,0 +1,144 @@
+"* [Lang]Parser / [Lang]Node / [Lang]Rewrite (src/runtime/lang_ast.rs +
+"* lang/ast.qn): the parser and a walkable AST as Quoin objects. The dogfood
+"* test parses a real stdlib file when run from the repo (guarded, so the suite
+"* stays location-independent); everything else asserts on embedded snippets.
+use std:lang/ast
+
+(TestSuite.new:{ var name = 'Ast' }).add:{
+    var snippet = 'use std:net/http
+var x:Integer = 1 + 2
+Object <- [Toy]Point <- { |@x @y|
+    "* the distance to another point
+    dist: -> { |other:[Toy]Point ^Double|
+        ^((@x - (other.at:\'naïve\')) * 2).abs.asDouble
+    }
+    .meta <-- { origin -> { ^.new } }
+}
+#{ \'k\': #( 1 2.5 #sym #/re/ ) }.print';
+
+    .test:
+    kindsAndFields -> {
+        var ast = [Lang]Parser.parse:snippet named:'snippet.qn';
+        .is:{ ast.kind } equalTo:#program;
+        .is:{ ast.file } equalTo:'snippet.qn';
+        var useNode = ast.children.at:0;
+        .is:{ useNode.kind } equalTo:#use;
+        .is:{ useNode.at:#path } equalTo:'net/http';
+        .is:{ useNode.at:#package } equalTo:'std';
+        var decl = ast.children.at:1;
+        .is:{ decl.kind } equalTo:#declaration;
+        .is:{ decl.at:#kind } equalTo:#var;
+        .is:{ decl.at:#type } equalTo:'Integer';
+        var cls = ast.children.at:2;
+        .is:{ cls.kind } equalTo:#classDefinition;
+        .is:{ cls.at:#name } equalTo:'Point';
+        .is:{ cls.at:#namespace } equalTo:'Toy';
+        .is:{ cls.at:#qualifiedName } equalTo:'[Toy]Point';
+        .is:{ cls.at:#parent } equalTo:'Object';
+        "* A field the kind doesn't have is nil — absence is an answer.
+        .is:{ cls.at:#selector } equalTo:nil;
+    };
+
+    .test:
+    sendsSelectorsAndBlocks -> {
+        var ast = [Lang]Parser.parse:snippet;
+        var methods = ast.allNodes.select:{ |n| n.kind == #methodDefinition };
+        "* dist: keeps its colon; origin (unary, inside .meta) has none.
+        .elementsOf:{ methods.collect:{ |m| m.at:#selector } } areEqualTo:#( 'dist:' 'origin' );
+        var dist = methods.detect:{ |m| (m.at:#selector) == 'dist:' };
+        var body = dist.at:#body;
+        .is:{ body.at:#parameters } equalTo:#( 'other' );
+        .is:{ (body.at:#parameterTypes).at:0 } equalTo:'[Toy]Point';
+        .is:{ body.at:#returnType } equalTo:'Double';
+        "* Sends: receiver + reconstructed keyword selector.
+        var sends = ast.allNodes.select:{ |n| n.kind == #send };
+        .isTrue:{ sends.any?:{ |s| (s.at:#selector) == 'at:' } };
+        .isTrue:{ sends.any?:{ |s| (s.at:#selector) == 'print' } };
+    };
+
+    .test:
+    literalsAndValues -> {
+        var ast = [Lang]Parser.parse:snippet;
+        var all = ast.allNodes;
+        .elementsOf:{
+            (all.select:{ |n| n.kind == #integerLiteral }).collect:{ |n| n.at:#value }
+        } areEqualTo:#( 1 2 1 2 );
+        .is:{ (all.detect:{ |n| n.kind == #doubleLiteral }).at:#value } equalTo:2.5;
+        .is:{ (all.detect:{ |n| n.kind == #symbolLiteral }).at:#value } equalTo:#sym;
+        .is:{ (all.detect:{ |n| n.kind == #regexLiteral }).at:#value } equalTo:'re';
+        var ops = all.select:{ |n| n.kind == #binaryOp };
+        .isTrue:{ ops.any?:{ |o| (o.at:#operator) == '+' } };
+        .isTrue:{ ops.any?:{ |o| (o.at:#operator) == '*' } };
+    };
+
+    .test:
+    spanFidelity -> {
+        "* Every node's text is EXACTLY the byte slice its span names — with
+        "* multibyte content in play (the ï), so byte-vs-char honesty is pinned.
+        var ast = [Lang]Parser.parse:snippet;
+        var bytes = snippet.asBytes;
+        var checked = 0;
+        ast.walk:{ |n|
+            n.span.defined?.if:{
+                var span = n.span;
+                .is:{ (bytes.from:(span.at:0) to:(span.at:1)).asString } equalTo:n.text
+                checked = checked + 1
+            }
+        };
+        .isTrue:{ checked > 30 };
+    };
+
+    .test:
+    rewriteCodemod -> {
+        "* The transform story: walk, edit spans, apply, EVAL the result.
+        var src = 'var total = 2 + 3
+total * 10';
+        var rw = [Lang]Rewrite.over:src;
+        ([Lang]Parser.parse:src).walk:{ |n|
+            (n.kind == #integerLiteral).if:{ rw.replace:n with:((n.at:#value) * 2).s }
+        };
+        var out = rw.apply;
+        .is:{ out } equalTo:'var total = 4 + 6
+total * 20';
+        .is:{ Runtime.eval:out } equalTo:200;
+        "* Inserts splice byte-exactly PAST multibyte text — if the rewriter
+        "* counted chars instead of bytes, the ï would shift this edit.
+        var src2 = 'var s = \'naïve\'
+var n = 1';
+        var ast2 = [Lang]Parser.parse:src2;
+        var one = ast2.allNodes.detect:{ |n| n.kind == #integerLiteral };
+        var rw2 = ([Lang]Rewrite.over:src2).insertBefore:one text:'2 + ';
+        .is:{ rw2.apply } equalTo:'var s = \'naïve\'
+var n = 2 + 1';
+        "* Overlapping edits refuse.
+        var rw3 = [Lang]Rewrite.over:src;
+        var sum = ([Lang]Parser.parse:src).allNodes.detect:{ |n| n.kind == #binaryOp };
+        rw3.replace:sum with:'9';
+        rw3.replace:(sum.at:#left) with:'8';
+        .does:{ rw3.apply } throw:ValueError;
+    };
+
+    .test:
+    parseErrorsAndEdges -> {
+        .does:{ [Lang]Parser.parse:'1 +' } throw:ParseError;
+        "* The default unit name.
+        .is:{ ([Lang]Parser.parse:'1').file } equalTo:'<string>';
+        "* An empty-ish program still answers a #program root.
+        .is:{ ([Lang]Parser.parse:'nil').kind } equalTo:#program;
+    };
+
+    .test:
+    stdlibDogfood -> {
+        "* Parse a real stdlib file when the repo layout is visible (the suite
+        "* runs from the repo root); elsewhere this quietly checks nothing.
+        ([IO]File.exists?:'qnlib/core/02-iterate.qn').if:{
+            var ast = [Lang]Parser.parseFile:'qnlib/core/02-iterate.qn';
+            .is:{ ast.kind } equalTo:#program;
+            .is:{ ast.file } equalTo:'qnlib/core/02-iterate.qn';
+            var defs = ast.allNodes.select:{ |n| n.kind == #methodDefinition };
+            "* Iterate declares dozens of combinators; pin a famous one.
+            .isTrue:{ defs.count > 40 };
+            .isTrue:{ defs.any?:{ |d| (d.at:#selector) == 'collect:' } };
+        }
+    };
+}

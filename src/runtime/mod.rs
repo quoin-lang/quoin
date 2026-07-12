@@ -26,6 +26,7 @@ pub mod instant;
 pub mod integer;
 pub mod io;
 pub mod json;
+pub mod lang_ast;
 pub mod list;
 pub mod map;
 pub mod math;

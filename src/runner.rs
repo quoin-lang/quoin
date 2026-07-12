@@ -13,9 +13,9 @@ use crate::runtime::runtime::build_block;
 use crate::runtime::{
     array, async_rt, big_decimal, big_integer, block, boolean, bytes, channel, civil, class,
     codecs, crypto, csv_fmt, date_time, dns, double, duration, extension, fiber as fiber_class,
-    http, ids, instant, integer, io, json, list, map, math, method, msgpack, nil, object, os,
-    pretty, process, random_access, regex, runtime, set, sockets, span, streams, string, symbol,
-    task, term, time_zone, timer, timestamp, toml_fmt, vm_stats, yaml,
+    http, ids, instant, integer, io, json, lang_ast, list, map, math, method, msgpack, nil, object,
+    os, pretty, process, random_access, regex, runtime, set, sockets, span, streams, string,
+    symbol, task, term, time_zone, timer, timestamp, toml_fmt, vm_stats, yaml,
 };
 use crate::value::{EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -107,6 +107,8 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, crypto::build_crypto_hmac_class());
     vm.register_native_class(mc, crypto::build_crypto_random_class());
     vm.register_native_class(mc, json::build_json_class());
+    vm.register_native_class(mc, lang_ast::build_lang_parser_class());
+    vm.register_native_class(mc, lang_ast::build_lang_node_class());
     vm.register_native_class(mc, msgpack::build_message_pack_class());
     vm.register_native_class(mc, csv_fmt::build_csv_class());
     vm.register_native_class(mc, ids::build_uuid_class());

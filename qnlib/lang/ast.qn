@@ -1,0 +1,106 @@
+"* ===========================================================================
+"* [Lang] — the traversal vocabulary and the span-based rewriter over the
+"* native [Lang]Parser / [Lang]Node surface (src/runtime/lang_ast.rs).
+"*
+"*   use std:lang/ast;
+"*   var ast = [Lang]Parser.parseFile:'tool.qn';
+"*   ast.allNodes.select:{ |n| (n.kind == #send) && ((n.at:#selector) == 'print') }
+"*
+"* Trees are immutable views with exact byte spans; transformation is SOURCE
+"* rewriting: collect span edits with [Lang]Rewrite, apply, parse again (or
+"* Runtime.eval: the result). No unparser needed — and none exists yet; a
+"* synthetic-node printer is future work (its right home is qn fmt's renderer).
+
+[Lang]Parser <-- {
+    .meta <-- {
+        "* Parse the file at `path`; its nodes' `file` answer the path.
+        parseFile: -> { |path| ^.parse:([IO]File.read:path) named:path }
+    }
+}
+
+[Lang]Node <-- {
+    "* Pre-order walk: the block sees this node, then each child's subtree,
+    "* in source order. Answers self.
+    walk: -> { |block|
+        block.value:self;
+        .children.each:{ |c| c.walk:block }
+        ^self
+    }
+
+    "* Every node of this subtree, pre-order, as a List — the whole Iterate
+    "* vocabulary rides on the answer (`select:`, `detect:`, `groupBy:`, …).
+    allNodes -> {
+        var out = #();
+        .walk:{ |n| out.add:n }
+        ^out
+    }
+}
+
+"* An edit list over one unit's source: collect replacements by node span,
+"* `apply` splices them (back to front, byte-exact — spans are byte offsets)
+"* into new source text. Overlapping edits throw. The output is just source:
+"* parse it again to verify, eval it to use it.
+"*
+"* ```
+"* use std:lang/ast
+"* var src = 'total = 2 + 3'
+"* var rw = [Lang]Rewrite.over:src
+"* ([Lang]Parser.parse:src).walk:{ |n|
+"*     (n.kind == #integerLiteral).if:{ rw.replace:n with:((n.at:#value) * 10).s }
+"* }
+"* rw.apply    "* -> total = 20 + 30
+"* ```
+[Lang]Rewrite <- { |@source @edits|
+    .meta <-- {
+        "* A rewriter over `source` (the exact text that was parsed — spans
+        "* must refer to it).
+        over: -> { |sourceText| ^.new:{ var source = sourceText } }
+    }
+
+    "* Internal.
+    init -> { @edits = #() }
+
+    "* Replace `node`'s exact span with `text`. Answers self.
+    replace:with: -> { |node text:String|
+        var span = node.span
+        span.defined?.else:{ ValueError.throw:'rewrite: the node has no span' }
+        @edits.add:#( (span.at:0) (span.at:1) text )
+        ^self
+    }
+
+    "* Remove `node`'s span entirely. Answers self.
+    delete: -> { |node| ^.replace:node with:'' }
+
+    "* Insert `text` immediately before `node`. Answers self.
+    insertBefore:text: -> { |node text:String|
+        var span = node.span
+        span.defined?.else:{ ValueError.throw:'rewrite: the node has no span' }
+        @edits.add:#( (span.at:0) (span.at:0) text )
+        ^self
+    }
+
+    "* Insert `text` immediately after `node`. Answers self.
+    insertAfter:text: -> { |node text:String|
+        var span = node.span
+        span.defined?.else:{ ValueError.throw:'rewrite: the node has no span' }
+        @edits.add:#( (span.at:1) (span.at:1) text )
+        ^self
+    }
+
+    "* The rewritten source. Edits apply back to front so earlier spans stay
+    "* valid; two edits that overlap throw a ValueError (zero-width inserts at
+    "* the same position are fine).
+    apply -> {
+        var bytes = @source.asBytes
+        var sorted = @edits.sort:{ |a b| (a.at:0) > (b.at:0) }
+        var floor = bytes.count + 1
+        sorted.each:{ |e|
+            ((e.at:1) > floor).if:{ ValueError.throw:'rewrite: overlapping edits' }
+            var head = bytes.from:0 to:(e.at:0)
+            var tail = bytes.from:(e.at:1) to:(bytes.count)
+            bytes = head + (e.at:2).asBytes + tail
+            floor = e.at:0
+        }
+        ^bytes.asString
+    }
+}

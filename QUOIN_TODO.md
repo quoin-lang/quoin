@@ -707,9 +707,19 @@ deferred `Mirror` in `## REPL`.
   (wants handler connection adoption), subprotocols/extra headers, permessage-deflate.
 
 **Metaprogramming**
-- [ ] **Parser / AST to Quoin** — expose the parser and a visitable AST as Quoin objects so Quoin
-  code can read/transform source. Foundation for macros; companion to the deferred REPL `Mirror`
-  (reflection over the running program) and `Runtime.eval:`.
+- [x] **Parser / AST to Quoin** — `[Lang]Parser`/`[Lang]Node` (`src/runtime/lang_ast.rs`) +
+  `[Lang]Rewrite` and the traversal vocabulary (`qnlib/lang/ast.qn`, `use std:lang/ast`). ONE node
+  class wrapping the parser's own `Arc<Node>` tree (never deep-copied): `kind` Symbol, `children`,
+  `at:#field` (nil = the kind lacks it), and total source fidelity — `file` (threaded through
+  parse:named:/parseFile:), `span` (BYTE offsets + line/col), `text` exact slice. The
+  kind/children/field maps are EXHAUSTIVE matches over `NodeValue`, so a new parser variant
+  without an AST mapping is a compile error. Transformation = span-based SOURCE rewriting
+  ([Lang]Rewrite: replace/insert/delete edits, byte-exact splice, overlap → ValueError), then
+  re-parse or `Runtime.eval:` — no unparser exists or is needed for codemods; a synthetic-node
+  printer is future work (its right home is qn fmt's renderer). Tests `80-ast.qn` incl. a
+  span-fidelity sweep with multibyte content and a stdlib-dogfood parse. Foundation for macros;
+  companion to the deferred REPL `Mirror`. Still deferred: `Block#ast` on live blocks (AST not
+  retained post-compile; re-parsing Block#source spans is fragile in REPL/eval contexts).
 
 **Concurrency** (on the async scheduler)
 - [x] **Channels** — buffered/unbuffered async queues with scheduler park/wake
