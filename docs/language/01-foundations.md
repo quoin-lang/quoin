@@ -1,13 +1,11 @@
 # Part I — Foundations
 
-How Quoin code is spelled and how the most basic pieces fit together: comments,
-literals, names, message sends, and operators. Read this first; everything else
-builds on it.
+How Quoin code is written and how the most basic pieces fit together: comments,
+literals, names, message sends, and operators.
 
 > Each section opens with a **Rules** box (the terse version for lookup) followed
 > by prose and examples. **⚠ Gotcha** boxes flag behavior that is surprising or a
-> common source of wrong code. Every claim here is verified against the pest
-> grammar (`src/parser/pest/`), the VM (`src/vm.rs`), and the test suite.
+> common source of wrong code.
 
 Nav: **Foundations** · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · [Tooling](08-tooling.md) · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
 
@@ -18,10 +16,10 @@ Nav: **Foundations** · [Blocks & control](02-blocks-and-control.md) · [Objects
 > **Rules**
 > - Everything is an **object**. All computation is **messages** (method calls) sent to objects with `.`.
 > - A leading dot with no receiver — `.foo` — means `self.foo`.
-> - Classes are defined with `<-`, methods with `->`. Blocks `{ … }` are first-class closures.
-> - There are **no control-flow keywords**. `if:`, `whileDo:`, `case:` are ordinary methods.
-> - Comments start with `"`. Strings are single-quoted `'…'`. There are **no** double-quoted strings.
-> - A newline ends a statement when unambiguous; use `;` when the next line would otherwise continue the expression (i.e. it starts with `.` or an operator).
+> - Classes are defined with `<-`, methods with `->`. Blocks `{ … }` are first-class closures and objects.
+> - There are no control-flow keywords. `if:`, `whileDo:`, `case:` are ordinary methods.
+> - Inline comments are wrapped in `"`. Strings are single-quoted `'…'`.
+> - A newline ends a statement when unambiguous; use `;` when the next line would otherwise continue the expression (i.e. it starts with `.` or an operator). The formatter (`qn fmt`) will generally figure this out for you.
 
 Quoin is a small, uniformly object-oriented language in the Smalltalk lineage. If you
 can read "send the message `m` to the object `x`" for every `x.m`, you can read
@@ -35,7 +33,7 @@ person.greet           "* sends greet to person
 ```
 
 Because control flow is just methods (Part II), there is very little dedicated
-syntax to memorize — most of this document is about *which messages exist*, not
+syntax to memorize — most of this document is about which messages exist, not
 about statements.
 
 ---
@@ -43,13 +41,12 @@ about statements.
 ## 2. Lexical structure
 
 > **Rules**
-> - **Comments** (three forms):
+> - **Comments** (two forms):
 >   - `"* …` — line comment, runs to end of line.
->   - `"…"` — block comment; **may span multiple lines**; ends at the next unescaped `"`.
->   - `""` — empty comment.
-> - **No double-quoted strings exist** — a `"` always begins a comment.
+>   - `"…"` — block comment; may span multiple lines; ends at the next unescaped `"`.
+> - No double-quoted strings exist — a `"` always begins a comment.
 > - **Separators**: a newline ends a statement *when unambiguous*. A `;` is required when the next line would otherwise continue the expression — i.e. it begins with `.` (a message send) or an infix operator.
-> - **Identifiers**: start with a letter or `_`, then letters/digits/`_`/`?`. So `done?` and `my_var` are valid names. `!` is *not* part of a name (it's a selector suffix — see §5).
+> - **Identifiers**: start with a letter or `_`, then letters/digits/`_`/`?`. So `done?`, `flush!` and `my_var` are valid names.
 > - **Reserved identifiers**: only `nil`, `true`, `false` (can't be reassigned). The *keywords* are all soft keywords (reserved only as a statement prefix, so ordinary uses of the word are unaffected): `use` (§47) and `var`/`let` (local declarations; §4). Identifiers are case-sensitive.
 
 ### Comments
@@ -58,24 +55,18 @@ about statements.
 "* A line comment — everything to the end of this line is ignored.
 
 "
-A block comment. It opens with a quote that is NOT followed by '*',
+A block comment. It opens with a quote that is not followed by '*',
 spans as many lines as you like, and closes at the next quote.
 "
 
 var x = 1 "this trailing block comment ends here" + 2   "* x is 3
 ```
 
-> **⚠ Gotcha — a stray `"` swallows code.** Because the `"…"` block comment runs
-> until the *next* `"`, an unbalanced quote silently comments out everything up to
-> the following quote (possibly many lines away). If a chunk of code mysteriously
-> "doesn't run," look for an earlier lone `"`. There is no double-quoted string to
-> fall back on — `"` is always a comment.
-
 ### Separators
 
 A newline ends a statement **when the result is unambiguous**. A `;` is needed
 when the next line would otherwise continue the previous expression —
-specifically when it begins with `.` (a message send) or an infix operator:
+specifically when it begins with `.` (a message send) or an infix operator. The formatter (`qn fmt`) will generally figure this out for you, but a common gotcha is:
 
 ```quoin
 A <- {
@@ -87,11 +78,6 @@ A <- {
 Without the `;` on the `method` line, this parses as `(method -> {}).mix:Mixin` —
 the `.mix:` send attaches to the method definition instead of starting a new
 statement.
-
-> **⚠ Gotcha — a leading `.` or operator continues the previous line.** A line that
-> starts with `.` (a message send) or an infix operator (`+`, `-`, …) is read as a
-> continuation of the line above, not a new statement. Terminate the previous line
-> with `;` in those cases. (This is why stdlib code ends most lines with `;`.)
 
 ---
 
@@ -111,23 +97,23 @@ statement.
 > | Range | `a..b` (half-open) | `1..5`, `5..1` |
 > | Regex | `#/…/` | `#/^[a-z]+$/` |
 > | User string | `#Name'…'` | `#ANSI'…'` |
-> | User list | `#Name( … )` | (mixes in `ActAsUserList`) |
+> | User list | `#Name( … )` |  |
 > | Block | `{ … }` | `{ |n| n * 2 }` (Part II) |
 > | Booleans / nil | reserved identifiers | `true`, `false`, `nil` |
 
 - **Numbers.** Integers have no fractional part; a number is a double only if it
-  has a `.` followed by digits. There is no negative *literal* — `-3` is the
+  has a `.` followed by digits. There is no negative literal — `-3` is the
   prefix operator `-` applied to `3` (see §6).
 - **Strings** use single quotes. Escapes: `\t \n \r \" \' \\`, plus `\uXXXX` and
-  `\xXXXX` (four hex digits). Plain strings do **not** interpolate; interpolation
+  `\xXXXX` (four hex digits). Plain strings do not interpolate; interpolation
   is a separate `%` form (see [§45](09-library-and-reference.md)).
 - **Symbols** are interned selector-like names: `#name`, multi-part `#when:do:`,
   or a quoted form `#'+:'` for operators and otherwise-unspellable names. They are a
-  **distinct type** (`#foo.class == Symbol`), compared by identity — `#foo == #foo`
+  distinct type (`#foo.class == Symbol`), compared by identity — `#foo == #foo`
   is true, but `#foo == 'foo'` is **false**; `#foo.s` yields the name `'foo'`.
   `Block#name` and `Method#selector` (alias `Method#name`) return symbols.
-- **Lists** are space-separated (no commas): `#(1 2 3)`. **Maps** pair `key: value`
-  and are string-keyed: `#{ 'foo': 100 'bar': 200 }`. **Sets** are space-separated
+- **Lists** are space-separated (no commas): `#(1 2 3)`. **Maps** pair `key: value`:
+  `#{ 'foo': 100 'bar': 200 #sym: 300 }`. **Sets** are space-separated
   and hold unique elements (deduplicated by `hash` + `==:` — a user class that
   overrides `==:` must also override `hash`, or its instances dedup by identity;
   mirrors the any-key Map contract): `#<1 2 3>`, empty `#<>`.
@@ -145,7 +131,7 @@ statement.
 ## 4. Variables, scope & destructuring
 
 > **Rules**
-> - **Declare a local with `var` (mutable) or `let` (immutable)**, always with an initializer: `var x = 5`, `let pi = 3.14`. A plain `name = expr` **reassigns** an already-declared local — assigning an *undeclared* name, or reassigning a `let`, is a compile error. (`var`/`let` are soft keywords, like `use`: `variable`/`letter` are still ordinary identifiers.)
+> - **Declare a local with `var` (mutable) or `let` (immutable)**, always with an initializer: `var x = 5`, `let pi = 3.14`. A plain `name = expr` reassigns an already-declared local — assigning an *undeclared* name, or reassigning a `let`, is a compile error.
 > - Declaration/assignment is a **statement, not an expression** — you cannot nest it (`b = (a = 5)` is a parse error) or use it as a condition.
 > - Scope is **lexical**; blocks are closures that capture the enclosing scope. `var`/`let` may **shadow** an outer binding but cannot redeclare a name in the same scope. A recursive reference works — `var f = { … f … }` sees its own name.
 > - A single-target declaration may carry a **type**: `var n: Integer = 5` (drives the typed/unboxed tier). The type may be namespaced — `var f: [IO]File = …`; a bare name means the root namespace. Destructuring targets are untyped.
@@ -171,7 +157,7 @@ Pi <- 3.14159               "* a constant; a second `Pi <- …` would throw
 
 Only one splat is allowed per pattern **level** (a compile error otherwise; each
 nested `( … )` sub-pattern may carry its own), but it may lead, sit in the
-middle, or trail. Targets *after* a splat bind from the **end** of the list:
+middle, or trail. Targets after a splat bind from the end of the list:
 
 ```quoin
 var a *mid z = #(10 20 30 40 50)
@@ -186,18 +172,14 @@ Destructuring never errors on length: a missing position reads `nil` and a splat
 clamps to `#()` (on a too-short list the end-relative targets can re-read leading
 elements). `_` (and `*_`) ignore the corresponding element(s).
 
-> **⚠ Gotcha — assignment is statement-only.** `a = 5` does not produce a value you
-> can feed into another expression. Write conditions and arguments as plain
-> expressions; do the assignment on its own line.
-
 ---
 
 ## 5. Messages & call syntax
 
 > **Rules**
 > - **Unary** send: `receiver.selector` → `42.abs`, `list.first`.
-> - **Keyword** send: `receiver.selector:arg`. Multi-part selectors are *one* name: `map.at:'k' put:v` sends `at:put:`.
-> - A keyword argument is a **whole expression** (greedy) — `obj.m: 1 + 2` passes `1 + 2`.
+> - **Keyword** send: `receiver.selector:arg`. Multi-part selectors are one name: `map.at:'k' put:v` sends `at:put:`.
+> - A keyword argument is a whole expression (greedy) — `obj.m: 1 + 2` passes `1 + 2`.
 > - **Leading dot** `.selector` sends to `self`.
 > - **Suffix selectors**: `name!` (e.g. `.sealed!`) and `name?` (e.g. `fiber.done?`) are ordinary method names.
 > - Method (postfix) sends bind **tighter** than infix operators: `a.b + c.d` is `(a.b) + (c.d)`.
@@ -219,7 +201,7 @@ parenthesize an operator expression that you want to pass as a single argument
 ## 6. Operators & precedence
 
 > **Rules**
-> - **Prefix** operators are no-argument sends on the operand: `-x`→`-`, `+x`→`+` (identity), `!x`→`!`, `%x`→`mod`.
+> - **Prefix** operators are no-argument sends on the operand: `-x`→`-`, `+x`→`+` (identity), `!x`→`!`, `%x`→`%`.
 > - **Infix** operators are one-argument sends and are **all left-associative**.
 > - Most infix operators are overridable methods on the receiver's type; `&&`/`||` are special short-circuit forms (not method sends).
 > - **Precedence, loosest → tightest:** `||` · `&&` · `== !=` · `< <= > >=` · `~` · `..` · `+ -` · `* / %` · `<--`. Postfix sends (`.method`) bind tighter than any infix operator.

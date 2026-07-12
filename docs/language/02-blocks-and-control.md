@@ -11,11 +11,10 @@ Nav: [Foundations](01-foundations.md) · **Blocks & control** · [Objects](03-ob
 
 > **Rules**
 > - A block is `{ … }`. Parameters: `{ |a b| … }`; type hints (optional): `{ |a:Integer b| … }` — a hint may be namespaced (`{ |e:[Web]Halt| … }`); ignore a param with `_`.
-> - **Block-locals**: names after a `-` in the header are locals initialized to `nil` — `{ |a b - x y| … }` declares params `a b` and locals `x y`.
 > - **Named block**: `{ #name |…| … }` attaches a debug name, readable via `.name`.
 > - **Invoke**: `.value` (0 args), `.value:arg` (1 arg), `.valueWithArgs:#(…)` (N args). Also `.arity` (param count) and `.args` (param names).
 > - Blocks are **closures** capturing a *live reference* to the enclosing scope — later mutations of an outer local are visible inside the block.
-> - Calling with the **wrong number of args is not an error**: extra args are ignored; missing params read as `nil`.
+> - Calling with the **wrong number of args is not an error**: extra args are ignored; missing params read as `nil`. (This may change.)
 
 ```quoin
 var double = { |n| n * 2 }
@@ -37,11 +36,6 @@ bump.value
 count                            "* -> 2
 ```
 
-> **⚠ Gotcha — arity is not checked.** `{ |a b| … }.value:1` runs with `b` bound to
-> `nil`; `{ |a| … }.valueWithArgs:#(1 2 3)` runs ignoring `2` and `3`. No error is
-> raised either way, so an arity mismatch shows up only as an unexpected `nil` or a
-> dropped argument.
-
 Other invocation selectors exist for binding a receiver as well as arguments —
 `valueWithSelf:`, `value:withSelf:`, `valueWithSelfOrArg:` — these are mostly used
 by the iteration protocol (Part V) to pass each element as both `self` and the
@@ -54,10 +48,9 @@ block argument.
 > **Rules**
 > - `if:`, `else:`, `if:else:`, and `not` are methods defined **only on `true` and `false`** (see `core/00-bootstrap.qn`). `nil` has none of them.
 > - **Conditionals are strict**: `if:`/`else:`/`if:else:` and `whileDo:` require an actual Boolean condition — sending one to a non-Boolean (including `nil`) is a `MessageNotUnderstood`. There is no truthiness coercion for these.
-> - **Combinators do coerce truthiness** (falsy = `false` or `nil`, everything else truthy): `&&` and `||` short-circuit and return the *operand value* (`7 || false` → `7`, `nil && x` → `nil`), and `!` (via `Object#'!'`/`Nil#'!'`) maps any value to a Boolean (`!5` → `false`, `!nil` → `true`).
 > - The `if:`/`else:` blocks are zero-arg; they run via `.value`.
 > - **Loops** are methods on a *block* used as the condition:
->   - `{ cond }.whileDo:{ body }` — re-evaluates `cond` (must yield `true`/`false`) before each iteration.
+>   - `{ cond }.whileDo:{ body }` — re-evaluates `cond` (must return `true`/`false`) before each iteration.
 >   - `{ cond }.whileDefinedDo:{ |v| body }` — loops while `cond`'s value is `defined?` (non-`nil`), passing that value into the body.
 
 ```quoin
@@ -107,10 +100,6 @@ Inside the `each:` block, `^ n` would merely end that one iteration of the block
 (returning `n` as the block's value, which `each:` discards) — the loop would
 continue. `^^ n` is what actually exits `firstBig:`. The standard `whileDo:` is
 itself defined using `^^` to unwind its recursion.
-
-> **⚠ Gotcha — `^` inside an iterator block does not break the loop.** Use `^^` to
-> return out of the surrounding method from within a block passed to `each:`,
-> `collect:`, etc. `^` only finishes the current block invocation.
 
 ---
 

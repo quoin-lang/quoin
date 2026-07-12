@@ -34,11 +34,6 @@ name.case:{
 The same `~` operator works standalone, with the matcher on the left:
 `(1..10) ~ 5`, `#/b/ ~ 'abc'`, `TypeError ~ value`, `{ |n| n > 0 } ~ x`.
 
-> **⚠ Gotcha — `case:` matches with `~`, not `==`.** A `when:` clause succeeds
-> whenever `cond ~ subject` is truthy, so ranges, regexes, classes, and predicate
-> blocks all "match" — not just equal values. Order your clauses most-specific
-> first, since the first match wins.
-
 ### Destructuring into blocks — the `bind:` family
 
 > **Rules**
@@ -81,8 +76,6 @@ m.at:2;                                           "* -> 'example.org'
 > - `{ … }.catch:{ |e| … }` runs the receiver block; if it throws, the thrown value is passed to the catch block, whose result becomes the value. `{ … }.catch:{ |e| … } finally:{ … }` additionally runs `finally:` **always** (on success or failure).
 > - **Typed catch.** A typed handler param — `catch:{ |e:IoError| … }` — only catches when the thrown value is (a subtype of) that type; a non-match **re-raises** to an enclosing `catch:`. An untyped `|e|` (≡ `|e:Object|`) is a catch-all.
 > - **Multiple handlers by type.** Chain `catch:` keywords: `{ … }.catch:{ |e:IoError| … } catch:{ |e:Error| … } finally:{ … }`. Handlers are tried in **source order, first match wins** — so write them most-specific → least-specific, with any untyped catch-all **last** (a broad handler placed first shadows the narrower ones below it). This first-match ordering is a deliberate exception to Quoin's otherwise order-independent multimethod dispatch: a handler's type lives on a runtime block, not a scored method chain, so there is no specificity order to fall back on. (Inside a single handler you can still branch with `case`/`~`: `e.case:{ .when:TypeError do:… }`.)
-> - **Built-in hierarchy** (`core/00-bootstrap.qn`): `Error` with `@message @payload`, accessors `message`/`payload`, and `s` (→ `'ClassName: message'`); subclasses `TypeError`, `ArgumentError`, `MessageNotUnderstood`, `AmbiguousMethodError`, `ArithmeticError`, `IndexError`, `FiberError`.
-> - **Runtime errors are structured**: the VM maps its internal errors to these Quoin `Error` objects at the `catch:` boundary, so you can catch and inspect them.
 
 ```quoin
 var amount = -5
@@ -112,7 +105,7 @@ is a parse error):
 > - `!!!` — "can NEVER execute": throws a typed `UnreachableError`. Reaching one
 >   is a logic error worth crashing over.
 > - `???` — "shouldn't get here, but keep going": prints a
->   `file:line:col: warning:` line to stderr — with the placeholder's real source
+>   `file:line:col: warning:` line to the Log — with the placeholder's real source
 >   location — and execution continues (its statement value is `nil`).
 
 ```quoin
@@ -123,12 +116,6 @@ is a parse error):
 Both throwing forms are ordinary `Error` subclasses: a plain `catch:{ |e:Error| … }`
 catches them, traces point at the placeholder, and a test can pin one with
 `.does:{ ... } throw:NotImplementedError`.
-
-> **⚠ Gotcha — `throw` accepts any value; it types by its actual class.**
-> `42.throw` is caught by `catch:{ |e:Integer| … }` (a thrown value matches by its
-> class), but **not** by `catch:{ |e:Error| … }` — `42` isn't an `Error`. Throw
-> `Error` subclasses (or use the `Error.throw:` constructors) when handlers should
-> dispatch on the error hierarchy.
 
 > Stack traces: uncaught errors print a highlighted trace (with source snippets).
 > The mechanics are an implementation detail; nothing in the language surface

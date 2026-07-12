@@ -96,8 +96,7 @@ class's `init:` receiving the block fields whose names match its parameters.
 > `new:{…}` block are copied into the object *before* any `init:` runs, so
 > `init: -> { |a| @a = a }` just re-does work already done — it behaves identically
 > to having no `init:` at all. Use `init:` for *derived* or *validated* state, not
-> plain copies. See `QUOIN_TODO.md` → *Bugs/Odd Behavior* for the full write-up of
-> the `new:{}` scoping rules and the (intentionally absent) lexical capture.
+> plain copies.
 
 > **Note — there is no `super`.** A subclass `init:` cannot call its parent's
 > initializer with computed arguments; the parent runs first off the raw block
@@ -109,12 +108,11 @@ class's `init:` receiving the block fields whose names match its parameters.
 
 > **Rules**
 > - **Method lookup order**: the receiver's own class → its mixins (in the order added) → its parent, recursing upward. The most-derived definition wins.
-> - `.mix:M` mixes class `M` into the current class; its methods and instance vars are included. (There is no `.can:` alias — use `.mix:`.)
+> - `.mix:M` mixes class `M` into the current class; its methods and instance vars are included.
 > - A mixin may declare requirements via a class-side `assertMeetsRequirements: -> { |class| … }` (typically using `class.can?:#someMethod`). It runs at the **end of the host's definition block**, so the host may define the required methods *after* the `.mix:`. If it throws, the host class is not registered.
 > - **Initializer order is the dual of lookup**: base → derived (parent, then mixins, then self), so ancestors initialize first (§11).
 > - **`.sealed!`** freezes a class (or, on an instance, its eigenclass): no further `<--` / `->` / `-->` / `.mix:` and no subclassing — any attempt throws *"Cannot extend sealed …"* / *"Cannot subclass sealed class …"*. **`.abstract!`** forbids instantiating the class itself (`new` / `new:` throw *"Cannot instantiate abstract class …"*), though concrete subclasses still instantiate. The two are independent. Call `.sealed!` **last** in a body — defs *after* it are rejected.
 > - `obj.can?:X` is **overloaded**: a `Symbol`/`String` selector asks *"does it implement that method?"*; a `Class` asks *"is it an instance of / does it mix in that class?"* — e.g. `list.can?:#each:`, `list.can?:'each:'`, `list.can?:Iterate`. Works on instance, class, and metaclass receivers.
-> - The built-in `ActAsUserList` / `ActAsUserString` mixins are what enable the `#Name( … )` and `#Name'…'` custom-literal forms.
 
 ```quoin
 Greeter <- { hello -> { 'hi from ' + .class.name.s } }
@@ -126,11 +124,6 @@ Widget <- {
 
 Widget.new.hello       "* 'hi from Widget'   (found via the mixin)
 ```
-
-> **⚠ Gotcha — seal last.** `.sealed!` takes effect immediately, so any `->` / `-->`
-> / `.mix:` *after* it in the same class body is rejected. Put `.sealed!` at the end of
-> the body (or call `Foo.sealed!` after the definition). `.abstract!` doesn't have this
-> issue — it only blocks instantiation, not extension.
 
 ---
 
@@ -160,15 +153,6 @@ Type-based variants are the right tool when you want different behavior per
 argument type; the dispatcher chooses the most specific match: `5` fails the
 guard, so the plain `:Integer` variant handles it, while `150` passes it and the
 guarded variant outranks the unguarded one.
-
-> **⚠ Gotcha — equal-specificity matches are ambiguous, not ordered.** If two
-> variants match the same argument with the **same** type-specificity *and* the same
-> guard status (e.g. two overlapping guards on the same type that both pass), neither
-> is preferred — dispatch raises `AmbiguousMethodError` rather than picking by
-> definition order. A *guarded* variant always beats an equal-typed *unguarded* one,
-> so the usual idiom is specific guarded variants plus one unguarded catch-all
-> (`|x|`), which is unambiguous. (Two variants with the **same signature and no
-> guard** don't coexist at all: the later one *replaces* the earlier — §10.)
 
 ---
 
