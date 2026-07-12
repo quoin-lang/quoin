@@ -14,6 +14,7 @@ pub mod crypto;
 pub mod csv_fmt;
 pub mod data_value;
 pub mod date_time;
+pub mod dns;
 pub mod double;
 pub mod duration;
 pub mod elem_tag;

@@ -292,6 +292,15 @@ pub enum IoRequest {
         offset: u64,
         max: usize,
     },
+    /// Resolve `host` to its addresses — the same getaddrinfo-on-the-blocking-pool
+    /// trick `Connect` uses internally, exposed. Resolves `Resolved(ips)`
+    /// (A + AAAA, resolver order, deduplicated) or an error for a name that
+    /// doesn't resolve.
+    Resolve { host: String },
+    /// Reverse-resolve an IP to its hostname (getnameinfo, name required).
+    /// Resolves `Resolved` with one name, or empty when the address has no
+    /// mapping — an unmapped address is an ordinary answer, not an error.
+    ResolveReverse { addr: String },
 }
 
 /// The plain-data outcome of an [`IoRequest`].
@@ -304,6 +313,9 @@ pub enum IoResult {
         id: StreamId,
         size: u64,
     },
+    /// A `Resolve`/`ResolveReverse` answer: IP strings (forward, deduplicated,
+    /// resolver order) or zero-or-one hostname (reverse).
+    Resolved(Vec<String>),
     /// A bound listening socket: its id plus the *actual* local port (so a `:0`
     /// ephemeral bind is usable — the caller can read the port it got).
     Listening {
@@ -399,6 +411,8 @@ impl IoRequest {
             IoRequest::FinishStream { .. } => "io: finish".to_string(),
             IoRequest::OpenFileRandom { .. } => "io: open file (random)".to_string(),
             IoRequest::ReadAt { .. } => "io: read at".to_string(),
+            IoRequest::Resolve { host } => format!("dns: resolve {host}"),
+            IoRequest::ResolveReverse { addr } => format!("dns: reverse {addr}"),
         }
     }
 }
@@ -500,6 +514,82 @@ impl Drop for SmolInner {
             }
         }
     }
+}
+
+/// getnameinfo with NI_NAMEREQD, run on the blocking pool: the PTR name for `ip`,
+/// or `None` when the address has no mapping — that is an ordinary answer, not an
+/// error. Rust's std exposes no reverse lookup, so this is a direct libc call
+/// (the process code's `kill` precedent).
+#[cfg(unix)]
+fn reverse_lookup(ip: std::net::IpAddr) -> Option<String> {
+    use std::ffi::CStr;
+    use std::net::IpAddr;
+    let mut host = [0u8; 1025]; // NI_MAXHOST
+    let rc = unsafe {
+        match ip {
+            IpAddr::V4(v4) => {
+                let mut sa: libc::sockaddr_in = std::mem::zeroed();
+                #[cfg(any(
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                    target_os = "dragonfly"
+                ))]
+                {
+                    sa.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+                }
+                sa.sin_family = libc::AF_INET as libc::sa_family_t;
+                sa.sin_addr.s_addr = u32::from_ne_bytes(v4.octets());
+                libc::getnameinfo(
+                    &sa as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    host.as_mut_ptr() as *mut libc::c_char,
+                    host.len() as libc::socklen_t,
+                    std::ptr::null_mut(),
+                    0,
+                    libc::NI_NAMEREQD,
+                )
+            }
+            IpAddr::V6(v6) => {
+                let mut sa: libc::sockaddr_in6 = std::mem::zeroed();
+                #[cfg(any(
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                    target_os = "dragonfly"
+                ))]
+                {
+                    sa.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as u8;
+                }
+                sa.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+                sa.sin6_addr.s6_addr = v6.octets();
+                libc::getnameinfo(
+                    &sa as *const libc::sockaddr_in6 as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                    host.as_mut_ptr() as *mut libc::c_char,
+                    host.len() as libc::socklen_t,
+                    std::ptr::null_mut(),
+                    0,
+                    libc::NI_NAMEREQD,
+                )
+            }
+        }
+    };
+    if rc != 0 {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(host.as_ptr() as *const libc::c_char) };
+    name.to_str().ok().map(|s| s.to_string())
+}
+
+/// No getnameinfo off unix: reverse lookups answer "no mapping".
+#[cfg(not(unix))]
+fn reverse_lookup(_ip: std::net::IpAddr) -> Option<String> {
+    None
 }
 
 /// Decompose an `ExitStatus` into the `(code, signal)` pair the results carry.
@@ -1408,6 +1498,42 @@ impl IoBackend for SmolBackend {
                     Err(e) => IoResult::Err(e.into()),
                 }
             }),
+
+            IoRequest::Resolve { host } => Box::pin(async move {
+                // getaddrinfo on the blocking pool, exactly as `Connect` does
+                // internally via async-net. Port 0: addresses, not sockets.
+                let res = blocking::unblock(move || {
+                    use std::net::ToSocketAddrs;
+                    (host.as_str(), 0u16)
+                        .to_socket_addrs()
+                        .map(|it| it.map(|sa| sa.ip().to_string()).collect::<Vec<_>>())
+                })
+                .await;
+                match res {
+                    Ok(mut ips) => {
+                        // getaddrinfo repeats each address per socket type — dedup,
+                        // keeping resolver order.
+                        let mut seen = HashSet::new();
+                        ips.retain(|ip| seen.insert(ip.clone()));
+                        IoResult::Resolved(ips)
+                    }
+                    Err(e) => IoResult::Err(e.into()),
+                }
+            }),
+
+            IoRequest::ResolveReverse { addr } => Box::pin(async move {
+                let ip: std::net::IpAddr = match addr.parse() {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        return IoResult::Err(IoError {
+                            kind: std::io::ErrorKind::InvalidInput,
+                            message: format!("reverse: not an IP address: '{addr}'"),
+                        });
+                    }
+                };
+                let name = blocking::unblock(move || reverse_lookup(ip)).await;
+                IoResult::Resolved(name.into_iter().collect())
+            }),
         }
     }
 
@@ -1581,6 +1707,9 @@ impl IoBackend for MockBackend {
                 let id = StreamId(self.next_id.get());
                 self.next_id.set(self.next_id.get() + 1);
                 IoResult::Opened { id, size: 0 }
+            }
+            IoRequest::Resolve { .. } | IoRequest::ResolveReverse { .. } => {
+                IoResult::Resolved(Vec::new()) // no resolver in the mock
             }
             IoRequest::RunProcess { .. }
             | IoRequest::SpawnProcess { .. }

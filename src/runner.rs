@@ -12,10 +12,10 @@ use crate::repl_complete::{CompletionIndex, build_completion_index, complete_inp
 use crate::runtime::runtime::build_block;
 use crate::runtime::{
     array, async_rt, big_decimal, big_integer, block, boolean, bytes, channel, civil, class,
-    codecs, crypto, csv_fmt, date_time, double, duration, extension, fiber as fiber_class, http,
-    ids, instant, integer, io, json, list, map, math, method, msgpack, nil, object, os, pretty,
-    process, random_access, regex, runtime, set, sockets, span, streams, string, symbol, task,
-    term, time_zone, timer, timestamp, toml_fmt, vm_stats, yaml,
+    codecs, crypto, csv_fmt, date_time, dns, double, duration, extension, fiber as fiber_class,
+    http, ids, instant, integer, io, json, list, map, math, method, msgpack, nil, object, os,
+    pretty, process, random_access, regex, runtime, set, sockets, span, streams, string, symbol,
+    task, term, time_zone, timer, timestamp, toml_fmt, vm_stats, yaml,
 };
 use crate::value::{EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -114,6 +114,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, channel::build_channel_class());
     vm.register_native_class(mc, toml_fmt::build_toml_class());
     vm.register_native_class(mc, yaml::build_yaml_class());
+    vm.register_native_class(mc, dns::build_dns_class());
     vm.register_native_class(mc, sockets::build_tcp_socket_class());
     vm.register_native_class(mc, sockets::build_tls_socket_class());
     vm.register_native_class(mc, sockets::build_tcp_listener_class());

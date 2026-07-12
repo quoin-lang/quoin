@@ -688,7 +688,14 @@ deferred `Mirror` in `## REPL`.
   `## Networking & Async I/O`.
 - [x] ⭐ **URL** — `[Web]Url` parse/build + percent/query/form codecs (`qnlib/web/`,
   tests/47-url.qn).
-- [ ] **DNS** resolution (async) and **WebSocket** (over the HTTP upgrade) — later.
+- [x] **DNS** — `DNS.resolve:`/`resolve4:`/`resolve6:`/`reverse:` (`src/runtime/dns.rs` over
+  `IoRequest::Resolve`/`ResolveReverse`): the system resolver `Connect` always used internally
+  (getaddrinfo/getnameinfo on the blocking pool), exposed; lookups park the task. Reverse is a
+  direct libc `getnameinfo` (std has none; the `kill` precedent), NI_NAMEREQD, nil = unmapped.
+  Hermetic tests (`78-dns.qn`: localhost, RFC 5737 TEST-NET, RFC 2606 `.invalid`). Record-type
+  queries (TXT/MX/SRV) deliberately absent — they need a real DNS client dependency
+  (hickory-resolver, runtime-coupled); revisit only with a concrete use case.
+- [ ] **WebSocket** (client over the HTTP upgrade) — in progress on this branch.
 
 **Metaprogramming**
 - [ ] **Parser / AST to Quoin** — expose the parser and a visitable AST as Quoin objects so Quoin
