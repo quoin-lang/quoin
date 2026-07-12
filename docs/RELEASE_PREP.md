@@ -147,7 +147,11 @@ Decided 2026-07-10: the release ships browsable docs on the project website
 workflows (needs the org + hosting), but the shape is recorded now so the
 Tier 2 work builds toward it:
 
-- [ ] **One generated site from two sources.** The API reference is already
+- [ ] **One generated site from two sources.** *(Half done, 2026-07-12: `qn doc --md
+  docs/language --out site/book` renders the book to HTML with real Quoin highlighting —
+  quoin/norun fences through the shared highlighter, tables, rule-box blockquotes, `.md`
+  links rewritten, README→index. Remaining: assemble book + `--stdlib` reference under one
+  root and cross-link via `--stdlib-path`.)* The API reference is already
   HTML (`qn doc`); the language book (`docs/language/*.md`) needs a
   markdown→HTML render. Reuse the doc generator's page chrome and the shared
   code stylesheet (`highlighter::code_stylesheet`) so book pages and reference

@@ -33,7 +33,7 @@ jobs:
     # its `"* -> value` annotations (docs/DOCS_ARCH.md phase 3 / RELEASE_PREP Tier 2).
     - name: Check documentation examples
       run: |
-        cargo run -- doc --check
+        cargo run -- doc --check --stdlib
         cargo run -- doc --check docs/language README.md
 
   # Dylint lints: no_borrow_across_yield is deny-level (a violation fails this

@@ -225,6 +225,13 @@ pub struct VmRunnerOptions {
     pub highlight_html: bool,
     /// `qn doc --check`: run the documentation's fenced examples instead of generating.
     pub doc_check: bool,
+    /// `qn doc --md`: render markdown paths to HTML pages with Quoin highlighting.
+    pub doc_md: bool,
+    /// `qn doc --stdlib` (hidden): document the shipped stdlib instead of a project.
+    pub doc_stdlib: bool,
+    /// `qn doc --stdlib-path PREFIX` (hidden): link prefix (relative path or URL) for
+    /// stdlib types in project docs.
+    pub doc_stdlib_path: Option<String>,
 }
 
 /// Recursively collect `.qn` files under `dir`, in sorted order, skipping `target`/`.git`.
@@ -377,9 +384,10 @@ enum Cmd {
         #[arg(value_name = "PATH", required = true)]
         paths: Vec<String>,
     },
-    /// Generate the API reference (HTML, and JSON with --json) for the stdlib plus any PATHs
+    /// Generate the project's API reference (HTML, and JSON with --json)
     Doc {
-        /// Extra `.qn` units to document, relative to the current directory
+        /// Project roots to document (files or directories); default: the current
+        /// directory's tree, minus tests/ and shebang scripts
         #[arg(value_name = "PATH")]
         paths: Vec<String>,
         /// Output directory
@@ -392,9 +400,21 @@ enum Cmd {
         #[arg(long)]
         coverage: bool,
         /// Run the documentation's fenced examples instead of generating: with PATHs,
-        /// markdown files/dirs (blocks tagged `quoin`); without, the stdlib's doc examples
+        /// markdown files/dirs (blocks tagged `quoin`); without, the project's doc examples
         #[arg(long)]
         check: bool,
+        /// Render markdown PATHs (files or directories) to HTML pages instead —
+        /// fenced `quoin` blocks through the syntax highlighter
+        #[arg(long)]
+        md: bool,
+        /// Document the shipped stdlib instead of a project (the reference-publishing
+        /// mode this repository uses) — not an end-user flag
+        #[arg(long, hide = true)]
+        stdlib: bool,
+        /// Link prefix (a relative path or full URL) for stdlib types in project docs —
+        /// not an end-user flag
+        #[arg(long, value_name = "PREFIX", hide = true)]
+        stdlib_path: Option<String>,
     },
     /// Format Quoin source in place
     Fmt {
@@ -515,13 +535,25 @@ fn test_entry_source(dir: &str) -> String {
 }
 
 /// The directory `use self:…` resolves against for a script: the script's own directory,
-/// so `qn /srv/app/main.qn` finds `/srv/app/lib/…` regardless of the invoking CWD.
-/// Falls back to CWD-relative (an empty path) when the script path has no parent or
-/// cannot be canonicalized — the run will fail on the missing script anyway.
+/// so `qn /srv/app/main.qn` finds `/srv/app/lib/…` regardless of the invoking CWD — with
+/// one convention on top: a script living in a `bin/` directory anchors at bin's PARENT,
+/// so an installable tool laid out as `<root>/bin/quern` + `<root>/lib/*.qn` loads its
+/// own library (`use self:lib/*`) from any invoking directory. Falls back to
+/// CWD-relative (an empty path) when the script path has no parent or cannot be
+/// canonicalized — the run will fail on the missing script anyway.
 fn script_self_root(script: &str) -> PathBuf {
     std::fs::canonicalize(script)
         .ok()
         .and_then(|p| p.parent().map(PathBuf::from))
+        .map(|dir| {
+            if dir.file_name().is_some_and(|n| n == "bin")
+                && let Some(root) = dir.parent()
+            {
+                root.to_path_buf()
+            } else {
+                dir
+            }
+        })
         .unwrap_or_default()
 }
 
@@ -602,6 +634,9 @@ impl VmRunnerOptions {
         let mut doc_json = false;
         let mut doc_coverage = false;
         let mut doc_check = false;
+        let mut doc_md = false;
+        let mut doc_stdlib = false;
+        let mut doc_stdlib_path = None;
         let mut highlight_html = false;
         let mut target_path = None;
         let mut vm_args = Vec::new();
@@ -624,12 +659,18 @@ impl VmRunnerOptions {
                 json,
                 coverage: cov,
                 check,
+                md,
+                stdlib,
+                stdlib_path,
             }) => {
                 target_path = Some(out);
                 vm_args = paths;
                 doc_json = json;
                 doc_coverage = cov;
                 doc_check = check;
+                doc_md = md;
+                doc_stdlib = stdlib;
+                doc_stdlib_path = stdlib_path;
                 VmRunnerMode::Doc
             }
             Some(Cmd::Fmt {
@@ -745,6 +786,9 @@ impl VmRunnerOptions {
             doc_json,
             doc_coverage,
             doc_check,
+            doc_md,
+            doc_stdlib,
+            doc_stdlib_path,
             highlight_html,
         }
     }

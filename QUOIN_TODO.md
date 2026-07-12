@@ -3,6 +3,33 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the Quoin standard library (`qnlib`) files and test suites.
 
 ## Misc
+- [x] **`qn doc` reworked PROJECT-first** (feat/doc-rework, 2026-07): `qn doc` documents the
+  current directory's project — tree-walked units load via `use self:` (per-directory GLOBS when
+  file names aren't `use`-spellable, e.g. `lib/00-task.qn` — the hyphen gotcha; skipping
+  `tests/`, `bin/`, hidden dirs, shebang scripts; warn-and-skip for discovered units that don't
+  load standalone, hard-fail for explicitly named ones). PROVENANCE partitions the class table
+  (`self:`-defined = subject; platform classes with `self:` method variants = "Extensions to X"
+  pages — method-level provenance); `bin/` entries with a `#!…qn` line list as commands (doc =
+  the block under the shebang); README.md renders as the index preamble (minimal md: headers,
+  lists, bold, links, `quoin` fences highlighted). `--coverage`/`--check` scope to the project
+  (check preloads the project's units); model.json is v2 (project/commands/extensions/readme).
+  Hidden flags (not in --help, per Damon): `--stdlib` = the old reference-publishing mode (now
+  also loads `std:lang/*`), `--stdlib-path PREFIX` = link prefix (relative path or URL) for
+  platform types in project docs. Proven on quern (~/code/quern): 8 classes + the
+  [OS]Process.shell: extension page + the `quern` command + README index; its `--coverage` and
+  `--check` both caught real doc bugs on first run. HARDENING backlog: a hung unit load hangs
+  `qn doc` (a corpus file that parks forever — hit via the VM repo's own tree in an e2e); a
+  per-unit load timeout or `--exclude` would bound it.
+
+- [ ] **`qn doc` for COMMANDS, not just classes/methods.** A `[CLI]Spec`-based tool is an API
+  too — its flags, options, positionals, and subcommands deserve a generated doc page (roughly:
+  the `-h` help, as publishable HTML/Markdown, next to the tool's library classes). Blocked on
+  the doc rework's **static discovery mode** (`[Lang]Parser`-based, "option B" in the rework
+  plan): a command's top level IS the program, so the runtime load-and-introspect model cannot
+  document one without *running* it — and the spec (`cli.flag:…` calls) only exists as data at
+  runtime, so static discovery must read the builder sends from the AST. Do this after the
+  project-first `qn doc` rework lands.
+
 - [x] **`qn fmt` only adds semicolons where the statement end is ambiguous.**
   DONE (fix/fmt-minimal-semicolons): the `;` is a separator, not a terminator —
   on a guaranteed line break it survives only where the next statement would

@@ -1,16 +1,30 @@
-//! `qn doc` — the reference-documentation generator (docs/DOCS_ARCH.md §7).
+//! `qn doc` — the documentation generator (docs/DOCS_ARCH.md §7), PROJECT-first.
 //!
-//! Boots a VM the way `qn -e` does (embedded stdlib prelude), loads the rest of the shipping
-//! stdlib (`use std:net/*; use std:web/*`) plus any user units, then walks the *class table*
-//! through `introspect` — the one source of truth that unifies Quoin classes, native classes,
-//! mixins, and extension classes. Docs come from two places: a native method carries its
-//! `.doc(..)` text in the introspection result already; a Quoin method's doc is the `"*`
-//! block above its `SourceLoc`, lifted lazily by `crate::docs`.
+//! Discovery is runtime, never static: boot a VM the way `qn -e` does (embedded stdlib
+//! prelude), LOAD the code, then walk the *class table* through `introspect` — the one
+//! source of truth that unifies Quoin classes, native classes, mixins, and extension
+//! classes. Docs come from two places: a native method carries its `.doc(..)` text in the
+//! introspection result already; a Quoin method's doc is the `"*` block above its
+//! `SourceLoc`, lifted lazily by `crate::docs`.
 //!
-//! Output: one self-contained HTML page per class plus a namespace-grouped index (no JS, one
-//! inline stylesheet), and with `--json` the raw model (`model.json`, `{"version": 1, …}`) —
-//! the contract other renderers (LSP hover, a website) consume so the HTML here is just one
-//! consumer of the model, not the model.
+//! Two modes, one mechanism, split by PROVENANCE (which unit defined each class/method):
+//!
+//!   * Default: document the current project. The tree's `.qn` units (minus `tests/`,
+//!     `bin/`, and shebang scripts — a command's top level IS the program) load via
+//!     `use self:…`; classes defined in `self:` units are the subject, and project methods
+//!     added to PLATFORM classes (open-class reopens like `[OS]Process <-- …`) render as
+//!     "Extensions" — for many Quoin libraries that is the API. `bin/` files with a `#!…qn`
+//!     line list as commands (flag docs are future work — QUOIN_TODO); `README.md` opens
+//!     the index. Platform type names link to a published stdlib reference when
+//!     `--stdlib-path PREFIX` (hidden; a relative path or full URL) is given.
+//!
+//!   * `--stdlib` (hidden): document the shipping stdlib itself — the reference-publishing
+//!     mode this repository uses.
+//!
+//! Output: one self-contained HTML page per class (plus one per extension host) and an
+//! index (no JS, one inline stylesheet); with `--json` the raw model (`model.json`,
+//! `{"version": 2, …}`) — the contract other renderers consume, so the HTML here is just
+//! one consumer of the model, not the model.
 
 use super::*;
 use crate::docs;
@@ -23,7 +37,43 @@ use std::fmt::Write as _;
 #[derive(Serialize)]
 struct DocModel {
     version: u32,
+    /// True for a project model (the default); false for `--stdlib`.
+    project: bool,
+    /// The index title: the project directory's name, or "Quoin reference".
+    title: String,
+    /// The project's README.md, verbatim markdown (rendered on the index).
+    readme: Option<String>,
+    /// `bin/` entries with a `#!…qn` line: the project's commands.
+    commands: Vec<CommandDoc>,
     classes: Vec<ClassDoc>,
+    /// Project methods added to platform classes, grouped per host.
+    extensions: Vec<ExtensionGroup>,
+    /// Link prefix for platform types (`--stdlib-path`) — relative path or URL.
+    stdlib_path: Option<String>,
+    /// Every class name the session knows (link resolution) — not part of the contract.
+    #[serde(skip)]
+    known: Vec<String>,
+}
+
+/// A `bin/` command: its name and the `"*` block under its shebang.
+#[derive(Serialize)]
+struct CommandDoc {
+    name: String,
+    doc: Option<String>,
+}
+
+/// The project's additions to one platform class — method-level provenance:
+/// only `self:`-defined variants appear here.
+#[derive(Serialize)]
+struct ExtensionGroup {
+    /// The host class, e.g. `[OS]Process`.
+    host: String,
+    /// The doc block above the project's reopen site, when present.
+    doc: Option<String>,
+    /// The project's reopen sites, as `file:line`.
+    sources: Vec<String>,
+    instance_methods: Vec<MethodDoc>,
+    class_methods: Vec<MethodDoc>,
 }
 
 #[derive(Serialize)]
@@ -74,6 +124,9 @@ impl VmRunner {
         if self.options.doc_check {
             return self.run_doc_check();
         }
+        if self.options.doc_md {
+            return self.run_doc_md();
+        }
         let out_dir = PathBuf::from(
             self.options
                 .target_path
@@ -83,7 +136,8 @@ impl VmRunner {
         let want_json = self.options.doc_json;
         let want_coverage = self.options.doc_coverage;
         let user_units: Vec<String> = self.options.vm_options.arguments.clone();
-        let model = build_model(self.collect_infos(&user_units));
+        let mut model = build_model(self.collect_inputs(&user_units));
+        model.stdlib_path = self.options.doc_stdlib_path.clone();
 
         if want_coverage {
             report_coverage(&model);
@@ -105,50 +159,375 @@ impl VmRunner {
                 &render_class(class, &model),
             );
         }
+        for group in &model.extensions {
+            write_out(
+                &out_dir.join(ext_page_name(&group.host)),
+                &render_extension(group, &model),
+            );
+        }
+        let mut parts = vec![format!("{} classes", model.classes.len())];
+        if !model.extensions.is_empty() {
+            parts.push(format!("{} extended classes", model.extensions.len()));
+        }
+        if !model.commands.is_empty() {
+            parts.push(format!("{} commands", model.commands.len()));
+        }
         crate::runner::print_or_exit(&format!(
-            "qn doc: {} classes -> {}\n",
-            model.classes.len(),
+            "qn doc: {} -> {}\n",
+            parts.join(", "),
             out_dir.display()
         ));
         Ok(())
     }
 
-    /// Boot a VM with the whole shipping stdlib (plus `user_units`, `use self:`-loaded) and
-    /// walk the class table into plain data. Shared by generation, coverage, and `--check`.
-    fn collect_infos(&self, user_units: &[String]) -> Vec<ClassInfo> {
+    /// `--md`: render markdown PATHs (files, or directories walked recursively) to HTML
+    /// pages under `--out`, fenced `quoin` blocks through the shared highlighter — the
+    /// book build, and anyone's project docs. Relative `*.md` links rewrite to the
+    /// rendered names; a directory's `README.md` becomes its `index.html`. Directory
+    /// structure under a given root is mirrored.
+    fn run_doc_md(&self) -> Result<(), QuoinError> {
+        let paths: Vec<String> = self.options.vm_options.arguments.clone();
+        if paths.is_empty() {
+            eprintln!("qn doc --md: give markdown files or directories to render");
+            exit(2);
+        }
+        let out_dir = PathBuf::from(
+            self.options
+                .target_path
+                .clone()
+                .unwrap_or_else(|| "qn-docs".to_string()),
+        );
+        // (root-relative output path, source path)
+        let mut pages: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for arg in &paths {
+            let path = Path::new(arg);
+            if path.is_dir() {
+                collect_md(path, Path::new(""), &mut pages);
+            } else {
+                let name = path.file_name().map(PathBuf::from).unwrap_or_default();
+                pages.push((name, path.to_path_buf()));
+            }
+        }
+        if pages.is_empty() {
+            eprintln!("qn doc --md: no .md files under the given paths");
+            exit(2);
+        }
+        if let Err(e) = std::fs::create_dir_all(&out_dir) {
+            eprintln!("qn doc: cannot create {}: {e}", out_dir.display());
+            exit(1);
+        }
+        for (rel, src) in &pages {
+            let Ok(text) = std::fs::read_to_string(src) else {
+                eprintln!("qn doc --md: cannot read {}", src.display());
+                exit(1);
+            };
+            let html = crate::md_html::render(&text, true);
+            let title = crate::md_html::title_of(&text).unwrap_or_else(|| {
+                rel.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
+            let out_rel = html_name(rel);
+            if let Some(parent) = out_rel.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = std::fs::create_dir_all(out_dir.join(parent));
+            }
+            write_out(&out_dir.join(&out_rel), &page(&title, &html));
+        }
+        crate::runner::print_or_exit(&format!(
+            "qn doc: {} pages -> {}\n",
+            pages.len(),
+            out_dir.display()
+        ));
+        Ok(())
+    }
+
+    /// Boot a VM, load the subject (the project tree by default; the shipping stdlib under
+    /// `--stdlib`), and walk the class table into plain data. Shared by generation,
+    /// coverage, and `--check`.
+    fn collect_inputs(&self, user_units: &[String]) -> DocInputs {
         let Some(mut arena) = self.build_repl_arena() else {
             exit(1);
         };
-        // The prelude loads `core/*` only; the rest of the shipping stdlib is use-loaded.
-        for unit in ["use std:net/*", "use std:web/*", "use test"] {
-            if let Err(e) = runner_repl::eval_once(&mut arena, unit) {
-                eprintln!("qn doc: loading the stdlib: {e}");
-                exit(1);
-            }
-        }
-        // User units: `qn doc app/util.qn` loads `use self:app/util` (self_root = CWD in the
-        // script-less modes, so relative paths resolve as written).
-        for path in user_units {
-            let unit = path.strip_suffix(".qn").unwrap_or(path);
-            if Path::new(unit).is_absolute() {
-                eprintln!("qn doc: {path}: give a path relative to the current directory");
+        let project = !self.options.doc_stdlib;
+        let units = if project {
+            let units = discover_project_units(user_units);
+            if units.is_empty() {
+                eprintln!(
+                    "qn doc: no .qn units under {} (tests/, bin/, and shebang scripts \
+                     don't count; see --help)",
+                    if user_units.is_empty() {
+                        "."
+                    } else {
+                        "the given paths"
+                    }
+                );
                 exit(2);
             }
-            if let Err(e) = runner_repl::eval_once(&mut arena, &format!("use self:{unit}")) {
-                eprintln!("qn doc: loading {path}: {e}");
-                exit(1);
+            units
+        } else {
+            // The prelude loads `core/*` only; the rest of the shipping stdlib is use-loaded.
+            for unit in [
+                "use std:net/*",
+                "use std:web/*",
+                "use std:lang/*",
+                "use test",
+            ] {
+                if let Err(e) = runner_repl::eval_once(&mut arena, unit) {
+                    eprintln!("qn doc: loading the stdlib: {e}");
+                    exit(1);
+                }
+            }
+            user_units
+                .iter()
+                .map(|p| p.strip_suffix(".qn").unwrap_or(p).to_string())
+                .collect()
+        };
+        // Loading IS discovery (and for a project, `self:` in each unit's provenance is
+        // what marks it as the subject). `self_root` is the CWD in the script-less modes,
+        // so relative paths resolve as written. A DISCOVERED unit that doesn't load
+        // standalone isn't part of the documentable library (a Quernfile-style config
+        // script, say, that its tool loads after its own library) — warn and move on;
+        // an explicitly named path still fails hard.
+        let explicit = !user_units.is_empty() || !project;
+        let mut loaded: Vec<String> = Vec::new();
+        for unit in &units {
+            if Path::new(unit).is_absolute() {
+                eprintln!("qn doc: {unit}: give a path relative to the current directory");
+                exit(2);
+            }
+            match runner_repl::eval_once(&mut arena, &format!("use self:{unit}")) {
+                Ok(_) => loaded.push(unit.clone()),
+                Err(e) if explicit => {
+                    eprintln!("qn doc: loading {unit}.qn: {e}");
+                    exit(1);
+                }
+                Err(e) => {
+                    let first = e.to_string();
+                    let first = first.lines().next().unwrap_or_default().to_string();
+                    eprintln!("qn doc: skipping {unit}.qn (does not load standalone): {first}");
+                }
             }
         }
-        arena.mutate_root(|_mc, vm| {
-            let mut infos: Vec<ClassInfo> = introspect::globals(vm)
+        let units = loaded;
+        let (infos, known) = arena.mutate_root(|_mc, vm| {
+            let names: Vec<String> = introspect::globals(vm)
                 .into_iter()
                 .filter(|g| g.kind == GlobalKind::Class && !is_internal(&g.name))
-                .filter_map(|g| introspect::describe_class(vm, &g.name))
+                .map(|g| g.name)
+                .collect();
+            let mut infos: Vec<ClassInfo> = names
+                .iter()
+                .filter_map(|n| introspect::describe_class(vm, n))
                 .collect();
             infos.sort_by(|a, b| a.name.cmp(&b.name));
-            infos
-        })
+            (infos, names)
+        });
+        DocInputs {
+            infos,
+            project,
+            units,
+            commands: if project {
+                collect_commands()
+            } else {
+                Vec::new()
+            },
+            readme: if project {
+                std::fs::read_to_string("README.md").ok()
+            } else {
+                None
+            },
+            known,
+        }
     }
+}
+
+/// What one collection pass hands the model builder.
+struct DocInputs {
+    infos: Vec<ClassInfo>,
+    project: bool,
+    /// The `use self:` units that were loaded (— `--check` preloads them again so a
+    /// project example doesn't have to repeat the project's own `use` line).
+    units: Vec<String>,
+    commands: Vec<CommandDoc>,
+    readme: Option<String>,
+    known: Vec<String>,
+}
+
+/// A `self:`-loaded unit — the provenance test that partitions project from platform.
+fn is_project_file(file: &str) -> bool {
+    file.starts_with("self:")
+}
+
+/// The project's `use self:` paths: every `.qn` under the roots (default `.`), sorted —
+/// minus `tests/` (suites aren't API), `bin/` (commands, sniffed separately), the output
+/// directory, hidden directories, and shebang-first files (a script's top level IS the
+/// program; loading would run it). A directory holding files whose names the `use` path
+/// grammar can't spell (hyphens, leading digits — `lib/00-task.qn`) loads as ONE glob
+/// (`self:lib/*`), exactly how the stdlib loads its own core; name-safe files load
+/// individually, which keeps the warn-and-skip granular. A root-level glob-only name
+/// can't be reached either way and is skipped with a warning.
+fn discover_project_units(roots: &[String]) -> Vec<String> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    if roots.is_empty() {
+        walk_units(Path::new("."), &mut files);
+    } else {
+        for root in roots {
+            let p = Path::new(root);
+            if p.is_dir() {
+                walk_units(p, &mut files);
+            } else {
+                files.push(p.to_path_buf());
+            }
+        }
+    }
+    // Group by directory; decide glob-vs-individual per group.
+    let mut by_dir: Vec<(String, Vec<String>)> = Vec::new();
+    for f in &files {
+        let Some(rel) = f.to_str().map(|s| s.trim_start_matches("./")) else {
+            continue;
+        };
+        let unit = rel.strip_suffix(".qn").unwrap_or(rel).to_string();
+        let dir = unit
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_string())
+            .unwrap_or_default();
+        match by_dir.iter_mut().find(|(d, _)| *d == dir) {
+            Some((_, v)) => v.push(unit),
+            None => by_dir.push((dir, vec![unit])),
+        }
+    }
+    let mut units: Vec<String> = Vec::new();
+    for (dir, group) in &by_dir {
+        if group.iter().all(|u| unit_name_safe(u)) {
+            units.extend(group.iter().cloned());
+        } else if dir.is_empty() {
+            for u in group {
+                if unit_name_safe(u) {
+                    units.push(u.clone());
+                } else {
+                    eprintln!(
+                        "qn doc: skipping {u}.qn — its name can't be spelled as a `use` \
+                         path (hyphen or leading digit); move it into a subdirectory"
+                    );
+                }
+            }
+        } else {
+            units.push(format!("{dir}/*"));
+        }
+    }
+    units.sort();
+    units.dedup();
+    units
+}
+
+/// Whether every path segment is a spellable `use` identifier.
+fn unit_name_safe(unit: &str) -> bool {
+    unit.split('/').all(|seg| {
+        let mut chars = seg.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn walk_units(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    children.sort();
+    for child in children {
+        let name = child
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if child.is_dir() {
+            if name.starts_with('.') || name == "tests" || name == "bin" || name == "qn-docs" {
+                continue;
+            }
+            walk_units(&child, out);
+        } else if name.ends_with(".qn") && !starts_with_shebang(&child) {
+            out.push(child);
+        }
+    }
+}
+
+/// Every `.md` under `dir` (sorted, hidden dirs skipped), with root-relative paths.
+fn collect_md(dir: &Path, rel: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    children.sort();
+    for child in children {
+        let name = child
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if child.is_dir() {
+            if !name.starts_with('.') {
+                collect_md(&child, &rel.join(&name), out);
+            }
+        } else if name.ends_with(".md") {
+            out.push((rel.join(&name), child));
+        }
+    }
+}
+
+/// `01-foundations.md` → `01-foundations.html`; `README.md` → `index.html`.
+fn html_name(rel: &Path) -> PathBuf {
+    let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let mapped = if name == "README.md" {
+        "index.html".to_string()
+    } else {
+        format!("{}.html", name.strip_suffix(".md").unwrap_or(name))
+    };
+    rel.with_file_name(mapped)
+}
+
+fn starts_with_shebang(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|t| t.starts_with("#!"))
+        .unwrap_or(false)
+}
+
+/// The project's commands: `bin/` entries whose first line is a `#!` mentioning `qn`,
+/// with the `"*` block under the shebang as the doc. Flag-level docs need static
+/// discovery and are future work (QUOIN_TODO).
+fn collect_commands() -> Vec<CommandDoc> {
+    let Ok(entries) = std::fs::read_dir("bin") else {
+        return Vec::new();
+    };
+    let mut out: Vec<CommandDoc> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_str()?.to_string();
+            let text = std::fs::read_to_string(&path).ok()?;
+            let mut lines = text.lines();
+            let first = lines.next()?;
+            if !(first.starts_with("#!") && first.contains("qn")) {
+                return None;
+            }
+            let doc_lines: Vec<&str> = lines
+                .take_while(|l| l.starts_with("\"*"))
+                .map(|l| {
+                    l.strip_prefix("\"* ")
+                        .or_else(|| l.strip_prefix("\"*"))
+                        .unwrap_or(l)
+                })
+                .collect();
+            Some(CommandDoc {
+                name,
+                doc: (!doc_lines.is_empty()).then(|| doc_lines.join("\n")),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 fn write_out(path: &Path, text: &str) {
@@ -158,9 +537,69 @@ fn write_out(path: &Path, text: &str) {
     }
 }
 
+/// The `MethodDoc`s for a method list — one doc per selector: the first variant that has
+/// one (native `.doc(..)` text first, else the comment block above the first located
+/// variant), sorted by selector.
+fn method_docs(
+    list: &[MethodInfo],
+    doc_at: &mut impl FnMut(&str, usize, Option<&str>) -> Option<String>,
+) -> Vec<MethodDoc> {
+    let mut out: Vec<MethodDoc> = list
+        .iter()
+        .map(|m| {
+            let native_doc = m.variants.iter().find_map(|v| v.doc.clone());
+            let quoin_doc = m.variants.iter().find_map(|v| {
+                let src = v.source.as_ref()?;
+                doc_at(&src.file, src.line, Some(&m.selector))
+            });
+            let source = m
+                .variants
+                .iter()
+                .find_map(|v| v.source.as_ref())
+                .map(|s| format!("{}:{}", s.file, s.line));
+            MethodDoc {
+                selector: m.selector.clone(),
+                signatures: m
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        let sig = introspect::signature(&m.selector, v);
+                        sig.strip_suffix(" (native)")
+                            .map(String::from)
+                            .unwrap_or(sig)
+                    })
+                    .collect(),
+                doc: native_doc.or(quoin_doc),
+                source,
+                native: m.variants.iter().all(|v| v.native),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.selector.cmp(&b.selector));
+    out
+}
+
 /// Assemble the model: introspection data plus lazily-extracted Quoin docs. Source files are
-/// read once each (`cache`), through the same resolution `$doc` will use.
-fn build_model(infos: Vec<ClassInfo>) -> DocModel {
+/// read once each (`cache`), through the same resolution `$doc` will use. In project mode
+/// the class table is PARTITIONED by provenance: `self:`-defined classes are the subject;
+/// platform classes carrying `self:`-defined methods become extension groups; everything
+/// else is background (link targets only).
+fn build_model(inputs: DocInputs) -> DocModel {
+    let DocInputs {
+        infos,
+        project,
+        units: _,
+        commands,
+        readme,
+        known,
+    } = inputs;
+    let (subjects, background): (Vec<ClassInfo>, Vec<ClassInfo>) = if project {
+        infos
+            .into_iter()
+            .partition(|i| i.source.as_ref().is_some_and(|s| is_project_file(&s.file)))
+    } else {
+        (infos, Vec::new())
+    };
     let mut cache: HashMap<String, Option<String>> = HashMap::new();
     // `selector: Some(..)` routes through the wrapped-header-aware anchor (docs.rs); class and
     // extension sites anchor on their own line.
@@ -174,7 +613,7 @@ fn build_model(infos: Vec<ClassInfo>) -> DocModel {
         })
     };
 
-    let classes = infos
+    let classes: Vec<ClassDoc> = subjects
         .into_iter()
         .map(|info| {
             // Same precedence the runtime `X.doc` uses (introspect::doc_of_class): native
@@ -198,43 +637,6 @@ fn build_model(infos: Vec<ClassInfo>) -> DocModel {
                     doc_at(&src.file, src.line, None)
                 })
                 .or_else(|| (!ext_docs.is_empty()).then(|| ext_docs.remove(0).doc));
-            let mut methods = |list: &[MethodInfo]| -> Vec<MethodDoc> {
-                let mut out: Vec<MethodDoc> = list
-                    .iter()
-                    .map(|m| {
-                        // One doc per selector: the first variant that has one — native text
-                        // first, else the comment block above the first located variant.
-                        let native_doc = m.variants.iter().find_map(|v| v.doc.clone());
-                        let quoin_doc = m.variants.iter().find_map(|v| {
-                            let src = v.source.as_ref()?;
-                            doc_at(&src.file, src.line, Some(&m.selector))
-                        });
-                        let source = m
-                            .variants
-                            .iter()
-                            .find_map(|v| v.source.as_ref())
-                            .map(|s| format!("{}:{}", s.file, s.line));
-                        MethodDoc {
-                            selector: m.selector.clone(),
-                            signatures: m
-                                .variants
-                                .iter()
-                                .map(|v| {
-                                    let sig = introspect::signature(&m.selector, v);
-                                    sig.strip_suffix(" (native)")
-                                        .map(String::from)
-                                        .unwrap_or(sig)
-                                })
-                                .collect(),
-                            doc: native_doc.or(quoin_doc),
-                            source,
-                            native: m.variants.iter().all(|v| v.native),
-                        }
-                    })
-                    .collect();
-                out.sort_by(|a, b| a.selector.cmp(&b.selector));
-                out
-            };
             let ns = NamespacedName::parse(&info.name);
             ClassDoc {
                 name: info.name.clone(),
@@ -249,14 +651,76 @@ fn build_model(infos: Vec<ClassInfo>) -> DocModel {
                     .as_ref()
                     .map(|s| format!("{}:{}", s.file, s.line)),
                 extensions: ext_docs,
-                instance_methods: methods(&info.instance_methods),
-                class_methods: methods(&info.class_methods),
+                instance_methods: method_docs(&info.instance_methods, &mut doc_at),
+                class_methods: method_docs(&info.class_methods, &mut doc_at),
             }
         })
         .collect();
+
+    // Method-level provenance: a platform class with `self:`-defined variants is a host
+    // the project extended. Only the project's variants document here.
+    let mut extensions: Vec<ExtensionGroup> = Vec::new();
+    for info in &background {
+        let project_methods = |list: &[MethodInfo]| -> Vec<MethodInfo> {
+            list.iter()
+                .filter_map(|m| {
+                    let variants: Vec<_> = m
+                        .variants
+                        .iter()
+                        .filter(|v| v.source.as_ref().is_some_and(|s| is_project_file(&s.file)))
+                        .cloned()
+                        .collect();
+                    (!variants.is_empty()).then(|| MethodInfo {
+                        selector: m.selector.clone(),
+                        variants,
+                    })
+                })
+                .collect()
+        };
+        let inst = project_methods(&info.instance_methods);
+        let cls = project_methods(&info.class_methods);
+        let sources: Vec<&introspect::SourceLoc> = info
+            .extension_sources
+            .iter()
+            .filter(|s| is_project_file(&s.file))
+            .collect();
+        if inst.is_empty() && cls.is_empty() && sources.is_empty() {
+            continue;
+        }
+        let doc = sources
+            .iter()
+            .find_map(|src| doc_at(&src.file, src.line, None));
+        extensions.push(ExtensionGroup {
+            host: info.name.clone(),
+            doc,
+            sources: sources
+                .iter()
+                .map(|s| format!("{}:{}", s.file, s.line))
+                .collect(),
+            instance_methods: method_docs(&inst, &mut doc_at),
+            class_methods: method_docs(&cls, &mut doc_at),
+        });
+    }
+    extensions.sort_by(|a, b| a.host.cmp(&b.host));
+
+    let title = if project {
+        std::env::current_dir()
+            .ok()
+            .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "Project".to_string())
+    } else {
+        "Quoin reference".to_string()
+    };
     DocModel {
-        version: 1,
+        version: 2,
+        project,
+        title,
+        readme,
+        commands,
         classes,
+        extensions,
+        stdlib_path: None, // the caller stamps the flag in
+        known,
     }
 }
 
@@ -284,6 +748,24 @@ fn report_coverage(model: &DocModel) {
                     crate::runner::print_or_exit(&format!(
                         "undocumented: {} {}{}\n",
                         class.name, side, m.selector
+                    ));
+                }
+            }
+        }
+    }
+    for group in &model.extensions {
+        for (side, list) in [
+            ("", &group.instance_methods),
+            (".meta ", &group.class_methods),
+        ] {
+            for m in list {
+                total += 1;
+                if m.doc.is_some() {
+                    documented += 1;
+                } else {
+                    crate::runner::print_or_exit(&format!(
+                        "undocumented extension: {} {}{}\n",
+                        group.host, side, m.selector
                     ));
                 }
             }
@@ -371,14 +853,30 @@ fn source_html(source: &str) -> String {
     }
 }
 
-/// Link `name` if the model documents a class by that name (bare or nullable `Foo?`).
+/// Link `name` (bare or nullable `Foo?`): to its local page when the model documents it,
+/// to the published stdlib reference when `--stdlib-path` names one and the session knows
+/// the class, else plain text.
 fn type_link(name: &str, model: &DocModel) -> String {
     let bare = name.strip_suffix('?').unwrap_or(name);
     if model.classes.iter().any(|c| c.name == bare) {
-        format!(r#"<a href="{}">{}</a>"#, page_name(bare), esc(name))
-    } else {
-        esc(name)
+        return format!(r#"<a href="{}">{}</a>"#, page_name(bare), esc(name));
     }
+    if let Some(prefix) = &model.stdlib_path
+        && model.known.iter().any(|k| k == bare)
+    {
+        return format!(
+            r#"<a href="{}/{}">{}</a>"#,
+            prefix.trim_end_matches('/'),
+            page_name(bare),
+            esc(name)
+        );
+    }
+    esc(name)
+}
+
+/// The extension page for a host class: `ext.OS.Process.html`.
+fn ext_page_name(host: &str) -> String {
+    format!("ext.{}", page_name(host))
 }
 
 /// Doc text -> HTML: paragraphs split on blank lines; fenced blocks render through the shared
@@ -453,6 +951,11 @@ a.src:hover { text-decoration: underline; }
 .method > .body { margin: .3rem 0 0 1rem; }
 .badge { font-size: .75rem; color: var(--dim); border: 1px solid var(--line);
          border-radius: 4px; padding: 0 .35rem; margin-left: .5rem; vertical-align: middle; }
+blockquote { border-left: 3px solid var(--line); margin: 1rem 0; padding: .1rem 1rem;
+             color: var(--fg); background: color-mix(in srgb, var(--code-bg) 55%, var(--bg)); }
+table { border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid var(--line); padding: .3rem .6rem; text-align: left; }
+th { background: var(--code-bg); }
 ul.classlist { list-style: none; padding-left: 0; }
 ul.classlist li { margin: .15rem 0; }
 ul.classlist .summary { color: var(--dim); margin-left: .5rem; }
@@ -487,7 +990,44 @@ fn render_index(model: &DocModel) -> String {
     }
     groups.sort_by(|a, b| (a.0 != "Core").cmp(&(b.0 != "Core")).then(a.0.cmp(&b.0)));
 
-    let mut body = String::from("<h1>Quoin reference</h1>\n");
+    // A README that opens with its own `# title` renders as the page heading;
+    // otherwise the model's title does.
+    let readme_has_title = model
+        .readme
+        .as_deref()
+        .and_then(|r| r.lines().find(|l| !l.trim().is_empty()))
+        .is_some_and(|l| l.starts_with("# "));
+    let mut body = if readme_has_title {
+        String::new()
+    } else {
+        format!("<h1>{}</h1>\n", esc(&model.title))
+    };
+    if let Some(readme) = &model.readme {
+        body.push_str(&crate::md_html::render(readme, false));
+        body.push_str("<hr>\n");
+    }
+    if !model.commands.is_empty() {
+        body.push_str("<h2>Commands</h2>\n<ul class=\"classlist\">\n");
+        for cmd in &model.commands {
+            let summary = cmd
+                .doc
+                .as_deref()
+                .map(|d| {
+                    format!(
+                        "<span class=\"summary\">{}</span>",
+                        inline(docs::summary(d))
+                    )
+                })
+                .unwrap_or_default();
+            let _ = write!(
+                body,
+                "<li><code>bin/{}</code>{}</li>\n",
+                esc(&cmd.name),
+                summary
+            );
+        }
+        body.push_str("</ul>\n");
+    }
     for (ns, classes) in groups {
         let _ = write!(body, "<h2>{}</h2>\n<ul class=\"classlist\">\n", esc(&ns));
         for c in classes {
@@ -511,7 +1051,75 @@ fn render_index(model: &DocModel) -> String {
         }
         body.push_str("</ul>\n");
     }
-    page("Quoin reference", &body)
+    if !model.extensions.is_empty() {
+        body.push_str("<h2>Extensions</h2>\n<ul class=\"classlist\">\n");
+        for group in &model.extensions {
+            let n = group.instance_methods.len() + group.class_methods.len();
+            let _ = write!(
+                body,
+                "<li><a href=\"{}\"><code>{}</code></a><span class=\"summary\">{} added \
+                 method{}</span></li>\n",
+                ext_page_name(&group.host),
+                esc(&group.host),
+                n,
+                if n == 1 { "" } else { "s" }
+            );
+        }
+        body.push_str("</ul>\n");
+    }
+    page(&model.title, &body)
+}
+
+/// Render an extension group as a class-like page: the project's additions to a platform
+/// class, with the host linked (locally never — it isn't a subject — so via
+/// `--stdlib-path` when set).
+fn render_extension(group: &ExtensionGroup, model: &DocModel) -> String {
+    let mut body = String::new();
+    let _ = write!(body, "<p><a href=\"index.html\">← index</a></p>\n");
+    let _ = write!(
+        body,
+        "<h1>Extensions to <code>{}</code></h1>\n",
+        type_link(&group.host, model)
+    );
+    if !group.sources.is_empty() {
+        let srcs: Vec<String> = group.sources.iter().map(|s| source_html(s)).collect();
+        let _ = write!(
+            body,
+            "<p class=\"meta-line\">extended at {}</p>\n",
+            srcs.join(" · ")
+        );
+    }
+    if let Some(doc) = &group.doc {
+        body.push_str(&doc_html(doc));
+    }
+    for (title, anchor, list) in [
+        ("Class methods", "c", &group.class_methods),
+        ("Instance methods", "i", &group.instance_methods),
+    ] {
+        if list.is_empty() {
+            continue;
+        }
+        let _ = write!(body, "<h2>{title}</h2>\n");
+        for m in list {
+            let sigs: Vec<String> = m.signatures.iter().map(|s| esc(s)).collect();
+            let _ = write!(
+                body,
+                "<div class=\"method\" id=\"{}-{}\"><span class=\"sig\">{}</span>",
+                anchor,
+                esc(&m.selector),
+                sigs.join("<br>")
+            );
+            let _ = write!(body, "<div class=\"body\">");
+            if let Some(doc) = &m.doc {
+                body.push_str(&doc_html(doc));
+            }
+            if let Some(src) = &m.source {
+                let _ = write!(body, "<p class=\"meta-line\">{}</p>", source_html(src));
+            }
+            body.push_str("</div></div>\n");
+        }
+    }
+    page(&format!("Extensions to {}", group.host), &body)
 }
 
 fn render_class(class: &ClassDoc, model: &DocModel) -> String {
@@ -616,9 +1224,16 @@ struct ExampleBlock {
 impl VmRunner {
     pub(crate) fn run_doc_check(&self) -> Result<(), QuoinError> {
         let paths: Vec<String> = self.options.vm_options.arguments.clone();
+        // Project examples run with the project preloaded (the subject shouldn't have to
+        // `use` itself); stdlib and markdown examples must be runnable as pasted.
+        let mut preload: Vec<String> = Vec::new();
         let blocks = if paths.is_empty() {
-            let model = build_model(self.collect_infos(&[]));
-            stdlib_doc_blocks(&model)
+            let inputs = self.collect_inputs(&[]);
+            if inputs.project {
+                preload = inputs.units.clone();
+            }
+            let model = build_model(inputs);
+            doc_example_blocks(&model)
         } else {
             let mut blocks = Vec::new();
             for p in &paths {
@@ -631,7 +1246,7 @@ impl VmRunner {
         let mut checked_annotations = 0usize;
         let mut failures: Vec<String> = Vec::new();
         for block in &blocks {
-            match self.run_example(block) {
+            match self.run_example(block, &preload) {
                 Ok(n) => checked_annotations += n,
                 Err(msg) => failures.push(msg),
             }
@@ -659,7 +1274,7 @@ impl VmRunner {
     /// and may bleed past a statement's own text. Whole lines also carry the trailing
     /// annotation comment along harmlessly, and a standalone `"* -> …` line after the last
     /// statement lands in that statement's group.
-    fn run_example(&self, block: &ExampleBlock) -> Result<usize, String> {
+    fn run_example(&self, block: &ExampleBlock, preload: &[String]) -> Result<usize, String> {
         use crate::parser::{NodeValue, try_parse_quoin_string_named};
 
         let node = try_parse_quoin_string_named(&block.source, &block.label).map_err(|pe| {
@@ -702,7 +1317,7 @@ impl VmRunner {
             .skip(1)
             .any(|&(f, l)| annotation_of(f, l).is_some());
         if !intermediate_annotated {
-            let mut arena = self.example_session(&block.label, &block.source)?;
+            let mut arena = self.example_session(&block.label, &block.source, preload)?;
             let rendered = match runner_repl::eval_once(&mut arena, &block.source) {
                 Ok(r) => r.unwrap_or_default(),
                 Err(e) => return Err(format!("FAIL {} — {}", block.label, e)),
@@ -725,7 +1340,7 @@ impl VmRunner {
             ));
         }
 
-        let mut arena = self.example_session(&block.label, &block.source)?;
+        let mut arena = self.example_session(&block.label, &block.source, preload)?;
         let mut checked = 0usize;
         for (i, &start) in starts.iter().enumerate() {
             let end = starts.get(i + 1).map(|&n| n - 1).unwrap_or(lines.len());
@@ -776,7 +1391,12 @@ impl VmRunner {
     /// `use` once; method examples don't repeat it) — but only the prelude is free, so the
     /// net/web/test units load only when the example's source names them. A miss shows up as
     /// a visible NameError failure, never a silent pass.
-    fn example_session(&self, label: &str, source: &str) -> Result<ReplArena, String> {
+    fn example_session(
+        &self,
+        label: &str,
+        source: &str,
+        preload: &[String],
+    ) -> Result<ReplArena, String> {
         let Some(mut arena) = self.build_repl_arena() else {
             return Err(format!("FAIL {label} — no session arena"));
         };
@@ -785,6 +1405,9 @@ impl VmRunner {
                 .map(|_| ())
                 .map_err(|e| format!("FAIL {label} — loading the stdlib: {e}"))
         };
+        for unit in preload {
+            load(&format!("use self:{unit}"))?;
+        }
         if source.contains("[HTTP]") || source.contains("TcpServer") {
             load("use std:net/*")?;
         }
@@ -808,9 +1431,9 @@ fn first_code_line(group: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Corpus B: every runnable fenced example in the stdlib's doc comments — class docs,
+/// Corpus B: every runnable fenced example in the subject's doc comments — class docs,
 /// extension docs, and method docs, labeled by owner.
-fn stdlib_doc_blocks(model: &DocModel) -> Vec<ExampleBlock> {
+fn doc_example_blocks(model: &DocModel) -> Vec<ExampleBlock> {
     let mut blocks = Vec::new();
     let mut add = |label: &str, doc: &Option<String>| {
         if let Some(doc) = doc {
@@ -840,6 +1463,17 @@ fn stdlib_doc_blocks(model: &DocModel) -> Vec<ExampleBlock> {
         ] {
             for m in list {
                 add(&format!("{} {side}{}", class.name, m.selector), &m.doc);
+            }
+        }
+    }
+    for group in &model.extensions {
+        add(&format!("extensions to {}", group.host), &group.doc);
+        for (side, list) in [
+            ("", &group.instance_methods),
+            (".meta ", &group.class_methods),
+        ] {
+            for m in list {
+                add(&format!("{} {side}{}", group.host, m.selector), &m.doc);
             }
         }
     }
