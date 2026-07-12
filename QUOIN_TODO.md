@@ -3,6 +3,15 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the Quoin standard library (`qnlib`) files and test suites.
 
 ## Misc
+- [ ] **`qn doc` for COMMANDS, not just classes/methods.** A `[CLI]Spec`-based tool is an API
+  too — its flags, options, positionals, and subcommands deserve a generated doc page (roughly:
+  the `-h` help, as publishable HTML/Markdown, next to the tool's library classes). Blocked on
+  the doc rework's **static discovery mode** (`[Lang]Parser`-based, "option B" in the rework
+  plan): a command's top level IS the program, so the runtime load-and-introspect model cannot
+  document one without *running* it — and the spec (`cli.flag:…` calls) only exists as data at
+  runtime, so static discovery must read the builder sends from the AST. Do this after the
+  project-first `qn doc` rework lands.
+
 - [x] **`qn fmt` only adds semicolons where the statement end is ambiguous.**
   DONE (fix/fmt-minimal-semicolons): the `;` is a separator, not a terminator —
   on a guaranteed line break it survives only where the next statement would
