@@ -5,7 +5,7 @@ migration this plans is complete and is the VM's current architecture: `src/fibe
 `corosensei::ScopedCoroutine` with a `YieldReason` enum, and the "host driver loop as scheduler"
 became `src/vm_scheduler.rs` + `src/runner_driver.rs`. The GC-safety rules it defines are now
 enforced mechanically by the `no_gc_across_yield` / `no_borrow_across_yield` lints
-(`docs/LINTER_DESIGN.md`). Read its future tense as history; nothing here is pending.*
+(`docs/internal/LINTER_DESIGN.md`). Read its future tense as history; nothing here is pending.*
 
 This document serves as the master design reference and implementation blueprint for the Quoin VM. It details the resolution of performance bottlenecks and compile/runtime issues, evaluates alternative VM architectures (including Continuation-Passing Style), compares low-level fiber crates, defines safety rules for integrating a tracing GC with native stackful fibers, and presents a step-by-step rearchitecture plan.
 

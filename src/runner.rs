@@ -74,7 +74,7 @@ fn parse_source_or_exit(source: &str, display: &str) -> Node {
 /// Register every native (Rust-backed) class on a fresh `VmState`. Shared by all runner
 /// modes (run/test/benchmark/repl) so the builtin set can't drift between them.
 /// The once-per-unit compiler: template ids for shared inline caches, plus AOT
-/// candidate collection when `QN_AOT=1` (docs/AOT_ARCH.md).
+/// candidate collection when `QN_AOT=1` (docs/internal/AOT_ARCH.md).
 pub(crate) fn unit_compiler() -> Compiler {
     let c = Compiler::new().with_template_ids();
     if crate::tuning::aot_enabled() {
@@ -258,7 +258,7 @@ fn collect_qn_files(dir: &Path, out: &mut Vec<PathBuf>) {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmRunnerMode {
     /// `qn worker-serve <sock> <unit> [<serviceClass>]` — the child side of
-    /// a PROCESS-backed worker (docs/CONCURRENCY_ARCH.md §13.1).
+    /// a PROCESS-backed worker (docs/internal/CONCURRENCY_ARCH.md §13.1).
     WorkerServe,
     Highlight,
     Test,
@@ -277,7 +277,7 @@ pub enum VmRunnerMode {
     /// `qn check <file>…`: type-check each file (report diagnostics) without running it. The paths
     /// are carried in `VmRunnerOptions::vm_options.arguments`; exits non-zero if any diagnostic.
     Check,
-    /// `qn doc [PATH…]`: generate the API reference (docs/DOCS_ARCH.md). The output directory
+    /// `qn doc [PATH…]`: generate the API reference (docs/internal/DOCS_ARCH.md). The output directory
     /// is carried in `target_path`, extra units in `vm_options.arguments`.
     Doc,
     /// `qn` with no arguments: print usage. (`--help` / `--version` are answered by
@@ -886,7 +886,7 @@ impl VmRunner {
                 };
                 if self.options.highlight_html {
                     // A standalone page over the shared code stylesheet — the same classes and
-                    // colors the doc generator's fenced examples use (docs/DOCS_ARCH.md §8).
+                    // colors the doc generator's fenced examples use (docs/internal/DOCS_ARCH.md §8).
                     print_or_exit(&format!(
                         "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<title>{}</title>\n{}\n\
                          <style>\nbody {{ margin: 2rem auto; max-width: 60rem; padding: 0 1rem; \

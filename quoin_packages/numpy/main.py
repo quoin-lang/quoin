@@ -5,7 +5,7 @@ Slice 1 (eager skeleton): creation, introspection, and the materialization exit 
 `[NumPy]Array` instance lives in this process (the SDK's object table); Quoin holds an opaque
 handle and each method send is one socket round-trip. Bulk data crosses the boundary only at the
 explicit exit ramps (`toArray` / `toList`) — whole-array ops keep the data resident here
-(docs/FUTURE_EXT_ARCH.md §8). The lazy expression DAG (`evalGraph:`) and operators arrive in the
+(docs/internal/FUTURE_EXT_ARCH.md §8). The lazy expression DAG (`evalGraph:`) and operators arrive in the
 next slice; the Quoin-side glue lives in `init.qn`.
 
 Dtype policy: every array is `float64`, `int64`, or `bool` (masks, born from comparisons).

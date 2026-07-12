@@ -17,7 +17,7 @@ use std::mem::transmute;
 #[derive(Debug)]
 pub struct NativeListState {
     pub vec: Vec<Value<'static>>,
-    /// Checked element type (docs/GENERICS_ARCH.md). `None` — every list the
+    /// Checked element type (docs/internal/GENERICS_ARCH.md). `None` — every list the
     /// pre-existing world builds — means no checks anywhere.
     pub elem: Option<ElemTag>,
 }
@@ -164,7 +164,7 @@ pub fn build_list_class() -> NativeClassBuilder {
             "Always refused: a List has no instance fields for a `new:` config block to set. \
              Construct with `#()`, `List.new`, or `List.of:`.",
         )
-        // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6) ---
+        // --- checked generics (docs/internal/GENERICS_ARCH.md §4.2/§6) ---
         // `List.of:Integer` — a fresh empty list tagged with the element class.
         .class_method("of:", |vm, mc, _receiver, args| {
             let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {

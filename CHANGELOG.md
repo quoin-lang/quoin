@@ -109,7 +109,7 @@ waits for the client; `flush!` is a no-op there, so the same code works over bot
   mismatch.
 - Inline caches, devirtualized arithmetic and collection operations, and generics-aware dispatch.
 - Cross-language comparisons are tracked in `bench/CROSS.md`; the environment variables that
-  tune or disable each tier are in `docs/ENV_FLAGS.md`.
+  tune or disable each tier are in `docs/internal/ENV_FLAGS.md`.
 
 ### Known limitations
 

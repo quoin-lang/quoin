@@ -1,4 +1,4 @@
-//! The Quoin out-of-process extension protocol (Tier 1; see `docs/FUTURE_EXT_ARCH.md`).
+//! The Quoin out-of-process extension protocol (Tier 1; see `docs/internal/FUTURE_EXT_ARCH.md`).
 //!
 //! The whole wire is MessagePack: one frame is one MessagePack array `[type, field, ...]`,
 //! length-prefixed on the unix-domain socket with a little-endian `u32`. A structured value

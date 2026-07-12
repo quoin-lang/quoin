@@ -1,4 +1,4 @@
-"* The reference-doc query surface (docs/DOCS_ARCH.md §6): `doc` and `docFor:` on Object,
+"* The reference-doc query surface (docs/internal/DOCS_ARCH.md §6): `doc` and `docFor:` on Object,
 "* read-only and lazy. Quoin docs live in source -- the `"*` block immediately above a
 "* definition -- and are extracted on demand; native docs come from the builder's `.doc(..)`.
 "*

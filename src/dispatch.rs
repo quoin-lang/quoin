@@ -64,7 +64,7 @@ pub enum Callable<'gc> {
     /// owning `Extension` instance). The class and class-vs-instance side are derived from the
     /// receiver at call time; `selector` is the message to forward.
     ExtMethod { ext: Value<'gc>, selector: Symbol },
-    /// An AOT-compiled user method (docs/AOT_ARCH.md): `entry` is the native
+    /// An AOT-compiled user method (docs/internal/AOT_ARCH.md): `entry` is the native
     /// code, `block` the ordinary interpreter body it overlays (the fallback if
     /// the argument shapes ever fail to unbox — which dispatch's typed-variant
     /// selection should make impossible).
@@ -1064,7 +1064,7 @@ impl<'gc> VmState<'gc> {
     }
 
     /// A native candidate's `.doc(..)` text, or `None`. User blocks answer `None` here — their
-    /// doc lives in source, in the `"*` block above the definition (docs/DOCS_ARCH.md §4), and
+    /// doc lives in source, in the `"*` block above the definition (docs/internal/DOCS_ARCH.md §4), and
     /// is extracted lazily from `MethodVariant.source` rather than carried at runtime.
     pub(crate) fn candidate_doc(&self, method_val: Value<'gc>) -> Option<String> {
         if self.get_block_from_method(method_val).is_some() {

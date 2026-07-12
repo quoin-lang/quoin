@@ -11,7 +11,7 @@
 "* out for free. GET/POST + arbitrary verbs/headers/body; bodies are framed by
 "* chunked transfer-encoding, Content-Length, or connection-close (the response is
 "* read over a Stage 6 ByteStream). Deferred: keep-alive/pooling, redirects, cookies,
-"* gzip, and a streaming (per-chunk generator) body. See docs/ASYNC_ARCH.md.
+"* gzip, and a streaming (per-chunk generator) body. See docs/internal/ASYNC_ARCH.md.
 "* ===========================================================================
 
 "* Thrown while draining a body that exceeds a caller-imposed byte ceiling — the

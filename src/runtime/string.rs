@@ -119,7 +119,7 @@ pub fn build_string_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, out))
         })
         // asBytes -> the string's UTF-8 bytes as a `Bytes` (infallible). The inverse
-        // is `Bytes.asString` (which can fail). See `docs/ASYNC_ARCH.md`.
+        // is `Bytes.asString` (which can fail). See `docs/internal/ASYNC_ARCH.md`.
         .instance_method("asBytes", |vm, mc, receiver, _args| {
             let s = recv!(receiver, String);
             Ok(vm.new_bytes(mc, s.as_bytes().to_vec()))

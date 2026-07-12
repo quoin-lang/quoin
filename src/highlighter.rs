@@ -49,7 +49,7 @@ pub fn highlight_to_ansi(source: &str) -> String {
     format_ansi(source, spans)
 }
 
-// ---- HTML rendering (docs/DOCS_ARCH.md §8) ---------------------------------------------
+// ---- HTML rendering (docs/internal/DOCS_ARCH.md §8) ---------------------------------------------
 //
 // A second formatter over the same `HighlightSpan`s ANSI renders — one span model, two
 // consumers. `qn highlight --html` and the doc generator's fenced examples both call these,

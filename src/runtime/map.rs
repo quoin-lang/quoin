@@ -43,7 +43,7 @@ pub struct NativeMapState {
     /// hash → entry indices (buckets are almost always length 1).
     index: FxHashMap<u64, Vec<u32>>,
     /// Checked *value* type (`Map(String V)`).
-    /// `None` = untagged, no checks (docs/GENERICS_ARCH.md).
+    /// `None` = untagged, no checks (docs/internal/GENERICS_ARCH.md).
     pub elem: Option<ElemTag>,
 }
 
@@ -490,7 +490,7 @@ pub fn build_map_class() -> NativeClassBuilder {
              #{'a': 1 'b': 2}.remove:'a'     \"* -> 1\n\
              ```",
         )
-        // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6): the VALUE type
+        // --- checked generics (docs/internal/GENERICS_ARCH.md §4.2/§6): the VALUE type
         // is generic (`Map(String V)`). ---
         .class_method("new", |vm, mc, _receiver, _args| {
             Ok(vm.new_map(mc, Vec::new()))

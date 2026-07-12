@@ -257,7 +257,7 @@
 
     "* An in-loop `var x = nil` mints a FRESH binding per iteration — a later
     "* iteration must never read an earlier one's value, interpreted and
-    "* compiled alike (F2, docs/OUTCALL_ARCH.md: in-loop declarations never
+    "* compiled alike (F2, docs/internal/OUTCALL_ARCH.md: in-loop declarations never
     "* defer; they take a slot re-nil'd at the declaration site).
     .test:inLoopNilDeclarationRenilsPerIteration -> {
         CFIV2Renil <- {

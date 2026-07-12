@@ -1,5 +1,5 @@
 //! Element tags: the runtime half of checked generic collections
-//! (docs/GENERICS_ARCH.md §6). A tagged collection checks every insertion
+//! (docs/internal/GENERICS_ARCH.md §6). A tagged collection checks every insertion
 //! against its tag, so whatever comes out is proven tag-or-nil — the third
 //! guarantee source after dispatch-guaranteed params and `sealed!`.
 //!

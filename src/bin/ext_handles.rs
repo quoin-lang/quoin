@@ -1,5 +1,5 @@
 //! A tiny out-of-process Quoin extension that exercises the Tier-1 **handle table**
-//! (`docs/FUTURE_EXT_ARCH.md` §2; see `tests/extension.rs`). The VM spawns it with a socket
+//! (`docs/internal/FUTURE_EXT_ARCH.md` §2; see `tests/extension.rs`). The VM spawns it with a socket
 //! path as argv[1]. It serves three ops that use the host-callback client to hold a host
 //! value across calls:
 //!

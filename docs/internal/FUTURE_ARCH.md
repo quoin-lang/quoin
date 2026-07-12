@@ -1,12 +1,12 @@
 # Future Architecture — where the VM performance work goes from here
 
 *Status (verified 2026-07-09 at `dbe188d`): **SUPERSEDED**, kept for lineage. Its central bet —
-"execute natively (compilation)" — shipped as the AOT tier (`docs/AOT_ARCH.md`) and speculative
-AOT (`docs/SPECULATIVE_AOT_ARCH.md`). The live ranked roadmap is `docs/PERF_ROADMAP.md`, which
+"execute natively (compilation)" — shipped as the AOT tier (`docs/internal/AOT_ARCH.md`) and speculative
+AOT (`docs/internal/SPECULATIVE_AOT_ARCH.md`). The live ranked roadmap is `docs/internal/PERF_ROADMAP.md`, which
 explicitly synthesizes this document. Do not plan from this file.*
 
 Long-term performance roadmap, at `main` @ `fc362a6` (after the typed-devirt tier and the
-cheap-dispatch work merged). Companion to `docs/TYPED_DEVIRT_ARCH.md`. Grounded in the profiling
+cheap-dispatch work merged). Companion to `docs/internal/TYPED_DEVIRT_ARCH.md`. Grounded in the profiling
 under `profiling/post-cheap-dispatch/`.
 
 ## Lineage — the previous bet shipped
@@ -17,7 +17,7 @@ fib/sieve) and unboxed struct nodes (for trees), de-risked by a ceiling-screen f
 taken and largely shipped:**
 
 - The **typed-devirt tier** (PR #31) — sealed value types, compile-time type propagation, devirtualized
-  `Int`/`List` ops, control-flow inlining, step-batching. See `docs/TYPED_DEVIRT_ARCH.md`.
+  `Int`/`List` ops, control-flow inlining, step-batching. See `docs/internal/TYPED_DEVIRT_ARCH.md`.
 - The **cheap-dispatch work** (PR #32, slices a1/b1/b2) — fused `Int` superinstructions, a flat inner
   dispatch loop, and an `ip`-register hoist.
 

@@ -2,7 +2,7 @@
 //! (`Async.gather:` / `Task.spawn:` / `Async.timeout:`) and the guest-`Fiber` coroutine
 //! machinery. Still intrinsically VM state — these are `impl VmState` methods and the
 //! `Scheduler` struct embedded in `VmState` — hence the `vm_` prefix; split out only so
-//! the growing `vm.rs` stays legible. See `docs/ASYNC_ARCH.md`.
+//! the growing `vm.rs` stays legible. See `docs/internal/ASYNC_ARCH.md`.
 
 use crate::error::QuoinError;
 use crate::fiber::{Fiber, YieldReason};
@@ -29,7 +29,7 @@ pub struct TaskId(pub usize);
 /// task has its own root coroutine and, while parked, its own stash of the
 /// per-task slice of `VmState` (the live task keeps that slice in `VmState`
 /// directly; see `save_task_context`/`load_task_context`, added in Stage 2a-ii).
-/// See `docs/ASYNC_ARCH.md`.
+/// See `docs/internal/ASYNC_ARCH.md`.
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Task<'gc> {
@@ -470,7 +470,7 @@ impl<'gc> VmState<'gc> {
     /// Suspend the running task to spawn one child task per block and wait for all of
     /// them (`Async.gather:`). The blocks bubble up as `YieldReason::Gather`; the
     /// scheduler runs the children concurrently and resumes this task with the list of
-    /// results in `self.sched.wake` (or the first child error). See `docs/ASYNC_ARCH.md`.
+    /// results in `self.sched.wake` (or the first child error). See `docs/internal/ASYNC_ARCH.md`.
     pub fn await_gather(
         &mut self,
         blocks: Vec<Gc<'gc, Block<'gc>>>,
@@ -483,7 +483,7 @@ impl<'gc> VmState<'gc> {
             ));
         }
         // On resume: a pending cancel raises (the gather's children have finished by
-        // now — see the v1 scope note in docs/ASYNC_ARCH.md).
+        // now — see the v1 scope note in docs/internal/ASYNC_ARCH.md).
         if self.sched.cancel_current {
             return Err(self.take_cancellation());
         }
@@ -600,7 +600,7 @@ impl<'gc> VmState<'gc> {
     ///   re-raise `Cancelled` (the handler does *not* run).
     ///
     /// `on_cancel` is rooted as a live argument of the calling native method, so holding
-    /// it across the await is sound. See `docs/ASYNC_ARCH.md` (Stage 5a).
+    /// it across the await is sound. See `docs/internal/ASYNC_ARCH.md` (Stage 5a).
     pub fn await_timeout(
         &mut self,
         mc: &Mutation<'gc>,

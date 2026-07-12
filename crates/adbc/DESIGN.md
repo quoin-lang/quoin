@@ -1,10 +1,10 @@
 # `adbc` — Quoin's ADBC database extension (design)
 
 Status: **Design capture — approved scope, building.** `adbc` is an out-of-process Quoin extension
-(`docs/FUTURE_EXT_ARCH.md`) that exposes [Apache Arrow Database
+(`docs/internal/FUTURE_EXT_ARCH.md`) that exposes [Apache Arrow Database
 Connectivity](https://arrow.apache.org/adbc/current/) as Quoin classes — the default database-access
 library. It is **out-of-core**: its only Quoin dependency is the extension SDK (`quoin-ext`); it
-never links the VM. Companion to `docs/EXT_PACKAGING.md` (the producer-side model this realizes).
+never links the VM. Companion to `docs/internal/EXT_PACKAGING.md` (the producer-side model this realizes).
 
 ## 1. What ADBC is (and why it fits)
 

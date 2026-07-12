@@ -1,4 +1,4 @@
-//! `qn doc` — the documentation generator (docs/DOCS_ARCH.md §7), PROJECT-first.
+//! `qn doc` — the documentation generator (docs/internal/DOCS_ARCH.md §7), PROJECT-first.
 //!
 //! Discovery is runtime, never static: boot a VM the way `qn -e` does (embedded stdlib
 //! prelude), LOAD the code, then walk the *class table* through `introspect` — the one
@@ -880,7 +880,7 @@ fn ext_page_name(host: &str) -> String {
 }
 
 /// Doc text -> HTML: paragraphs split on blank lines; fenced blocks render through the shared
-/// highlighter (docs/DOCS_ARCH.md §8) — the same classes and colors as `qn highlight --html`.
+/// highlighter (docs/internal/DOCS_ARCH.md §8) — the same classes and colors as `qn highlight --html`.
 fn doc_html(doc: &str) -> String {
     let mut out = String::new();
     let mut para: Vec<&str> = Vec::new();
@@ -1200,7 +1200,7 @@ fn render_class(class: &ClassDoc, model: &DocModel) -> String {
 
 // ---- `qn doc --check`: run the documentation's examples ---------------------------------
 //
-// One engine, two corpora (docs/DOCS_ARCH.md phase 3 + the RELEASE_PREP Tier 2 harness):
+// One engine, two corpora (docs/internal/DOCS_ARCH.md phase 3 + the RELEASE_PREP Tier 2 harness):
 //
 //   * With PATHs: markdown files/directories. A fenced block tagged `quoin` runs; `quoin
 //     norun` displays only. Untagged fences are prose/output samples and never run.

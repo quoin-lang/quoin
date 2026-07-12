@@ -1,4 +1,4 @@
-//! Speculative-AOT type feedback (S0, docs/SPECULATIVE_AOT_ARCH.md §3).
+//! Speculative-AOT type feedback (S0, docs/internal/SPECULATIVE_AOT_ARCH.md §3).
 //!
 //! Unannotated methods of AOT-eligible units are collected as *speculative
 //! pending*: the interpreter merges the kinds it actually sees at method

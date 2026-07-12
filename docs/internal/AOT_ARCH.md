@@ -36,7 +36,7 @@ actionable message and stays interpreted. This is the concrete motivation
 for checked generic collections: a proven `List(Boolean)` element type
 removes the dynamic branch (and its cold block) at the compiler level, and
 sieve then compiles with no new runtime machinery. Open: v0.3 (default-on
-soak), checked generics (own design pass). Follows `docs/PERF_ROADMAP.md`
+soak), checked generics (own design pass). Follows `docs/internal/PERF_ROADMAP.md`
 Tier 2; builds on the typed-devirt tier and the closure-template
 infrastructure.*
 

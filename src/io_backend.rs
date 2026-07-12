@@ -147,7 +147,7 @@ pub enum IoRequest {
     /// Open a TCP connection to `host:port`, resolving DNS internally; on success
     /// registers the stream and returns its id. Carrying `host`/`port` (rather than a
     /// pre-resolved `SocketAddr`) folds resolution into the one op — manual DNS is a
-    /// future class. See `docs/ASYNC_ARCH.md`.
+    /// future class. See `docs/internal/ASYNC_ARCH.md`.
     Connect { host: String, port: u16 },
     /// Connect to a unix-domain socket at `path`, registering the stream and returning
     /// its id. The host side of the out-of-process extension transport (Tier 1): an
@@ -178,7 +178,7 @@ pub enum IoRequest {
     /// Write all of `bytes`.
     Write { id: StreamId, bytes: Vec<u8> },
     /// Offload a pure, self-contained CPU-bound job to the compute pool
-    /// (docs/CONCURRENCY_ARCH.md §4). The job's `Send + Sync` closure owns
+    /// (docs/internal/CONCURRENCY_ARCH.md §4). The job's `Send + Sync` closure owns
     /// its detached inputs; the caller parks exactly as for IO.
     Compute(crate::compute::ComputeJob),
     /// Park until the next cross-worker message on this lane (a worker's

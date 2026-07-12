@@ -229,7 +229,7 @@ pub fn build_object_class() -> NativeClassBuilder {
              3.can?:String      \"* -> false\n\
              ```",
         )
-        // The reference-doc query surface (docs/DOCS_ARCH.md §6): read-only, lazy — Quoin docs
+        // The reference-doc query surface (docs/internal/DOCS_ARCH.md §6): read-only, lazy — Quoin docs
         // live in source (the `"*` block above the definition) and are extracted on demand;
         // native docs come from the builder's `.doc(..)`/`.class_doc(..)` metadata. On Object,
         // like `can?:`, so a Class, a `.meta`, and an instance all answer.

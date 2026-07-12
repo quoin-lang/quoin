@@ -7,7 +7,7 @@ and `CallSelfDirect` — shipped in `fb67760`. Phase 2 (the call-site cache) was
 parked** as a measured net loss, and Phase 3 (unboxed structs) is **deferred**, blocked on
 gc_arena. Read the future tense below as the plan it was, not as pending work.*
 
-Concrete design for the integrated slice that `docs/FUTURE_ARCH.md` calls Tier 2, following the
+Concrete design for the integrated slice that `docs/internal/FUTURE_ARCH.md` calls Tier 2, following the
 Tier-1 ceiling screen (`profiling/unboxed-ceiling/notes.md`), which returned a decisive **GO**: an
 unboxed + devirtualized interpreter beats Ruby 2.6 and Python 3.9 on all three tracked benchmarks
 (fib ~74×, sieve ~91×, trees ~56× vs Quoin then).
@@ -239,7 +239,7 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
   Integer devirt ops on statically-Int operands; differential `Devirt` suite. ~30% faster typed fib(30).
 - **Slice 2b-A — return types (typed method results). ✅ DONE** (`d7fe17b`). Originally `selector ->
   Integer { … }`; the return type later **moved into the block header as `^Integer`**
-  (`selector -> { |args ^Integer| … }`) — see docs/TYPE_SYSTEM_ARCH.md Phase 0. A self-send to a
+  (`selector -> { |args ^Integer| … }`) — see docs/internal/TYPE_SYSTEM_ARCH.md Phase 0. A self-send to a
   same-class method with a declared Integer return is statically Int, so the result `+` devirtualizes.
   ~4% more on fib(30).
   - **Followup — verify return types.** The declared return type is currently **trusted**: the compiler
@@ -321,7 +321,7 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
       block; and there is no block frame to step into for inlined `if`/`while` bodies (stepping no
       longer pushes a frame). The debugger's variable/scope display and step model will need scope
       metadata to reconstruct the source view over inlined regions — track against
-      `docs/DEBUGGER_ARCH.md`.
+      `docs/internal/DEBUGGER_ARCH.md`.
   - **Slicing:** v1 inlines **declaration-free** control-flow blocks (covers **fib** + **sieve**
     immediately — their bodies only assign to method-level locals). v2 adds alpha-renaming for
     **declaration-carrying** blocks (**tree**'s `makeTree` `if:` declares `var left`/`var right`).

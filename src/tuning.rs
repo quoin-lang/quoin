@@ -109,7 +109,7 @@ pub fn ext_handshake_timeout_ms() -> u64 {
 }
 
 /// AOT compilation of the sealed/typed subset at unit compile
-/// (docs/AOT_ARCH.md). Default ON as of v0.3 (the soak); `QN_AOT=0` is the
+/// (docs/internal/AOT_ARCH.md). Default ON as of v0.3 (the soak); `QN_AOT=0` is the
 /// kill switch — the interpreter path is untouched either way (the registry
 /// is a pure overlay), so disabling is always safe.
 pub fn aot_enabled() -> bool {

@@ -1977,7 +1977,7 @@ fn fuse_3instr_fixes_jump_offset() {
     }
 }
 
-// --- Checked generics G0: syntax → lattice → dispatch erasure (docs/GENERICS_ARCH.md §9) ---
+// --- Checked generics G0: syntax → lattice → dispatch erasure (docs/internal/GENERICS_ARCH.md §9) ---
 
 /// All diagnostic messages for a compiled source.
 fn all_diags(src: &str) -> Vec<String> {
@@ -2134,7 +2134,7 @@ fn generic_type_lattice_rules() {
     assert_eq!(Type::SetOf(Box::new(Type::String)).name(), "Set(String)");
 }
 
-// --- G4: Block types (docs/GENERICS_ARCH.md §11) ---
+// --- G4: Block types (docs/internal/GENERICS_ARCH.md §11) ---
 
 fn block_of(params: Vec<Type>, ret: Type) -> Type {
     Type::BlockOf {
@@ -2356,7 +2356,7 @@ fn block_type_annotations_resolve_and_erase() {
     );
 }
 
-// --- G2: type-variable binding machinery (docs/GENERICS_ARCH.md §4.4/§7) ---
+// --- G2: type-variable binding machinery (docs/internal/GENERICS_ARCH.md §4.4/§7) ---
 
 #[test]
 fn type_substitution_and_unification() {
@@ -2463,7 +2463,7 @@ fn tagged_receivers_keep_collection_devirt() {
     );
 }
 
-// --- B1: fused each: loops (docs/BLOCK_AOT_ARCH.md §3) ---
+// --- B1: fused each: loops (docs/internal/BLOCK_AOT_ARCH.md §3) ---
 
 fn each_shapes(src: &str) -> (usize, usize) {
     // (guards, hot-path block literals): a fused site emits one BranchIfNotList

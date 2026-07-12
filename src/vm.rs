@@ -80,7 +80,7 @@ const NATIVE_NEW_GENERIC_HINT: &str =
     "it has no default constructor (see its class-side constructor methods)";
 
 /// One compiled outcall site's direct-dispatch cache (D2, the "AOT IC" —
-/// docs/OUTCALL_ARCH.md): the same epoch + receiver/arg type-shape guards as
+/// docs/internal/OUTCALL_ARCH.md): the same epoch + receiver/arg type-shape guards as
 /// [`ICSlot`] (dispatch is multimethod — arg shapes select typed variants),
 /// but resolving straight to the compiled entry plus the callee block's
 /// lexical env, so a warm compiled→compiled call skips the `ic_registry`
@@ -270,7 +270,7 @@ pub struct AotFrameMark {
 #[derive(Collect, Default)]
 #[collect(no_drop)]
 pub struct AotTaskState<'gc> {
-    /// Fuel/depth counters (docs/AOT_ARCH.md §5): compiled code decrements
+    /// Fuel/depth counters (docs/internal/AOT_ARCH.md §5): compiled code decrements
     /// `fuel` in every prologue and checkpoints (cancellation + cooperative
     /// yield) at zero; `depth` caps compiled-call recursion on the real
     /// coroutine stack (which bypasses `MAX_NATIVE_REENTRY`).
@@ -423,7 +423,7 @@ pub struct Modules<'gc> {
     /// Loaded extension *packages* (`Extension loadPackage:`), keyed by canonical package directory →
     /// the live `Extension` value, so a repeat `loadPackage:` of the same folder is idempotent. The
     /// installed classes also root the extension, but this is its canonical owner for the session.
-    /// See `src/runtime/extension.rs` / `docs/EXT_PACKAGING.md`.
+    /// See `src/runtime/extension.rs` / `docs/internal/EXT_PACKAGING.md`.
     pub packages: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
 }
 
@@ -461,7 +461,7 @@ pub struct Io {
     pub backend: crate::io_backend::SmolBackend,
     /// fds whose QN `TcpSocket` handle has been closed or collected, awaiting a synchronous
     /// `IoBackend::close` by the driver. A non-GC queue (the handle's `Drop` can only push a plain
-    /// `StreamId`); a shared `Rc` clone lives in each socket handle. See `docs/ASYNC_ARCH.md`.
+    /// `StreamId`); a shared `Rc` clone lives in each socket handle. See `docs/internal/ASYNC_ARCH.md`.
     pub socket_reap: std::rc::Rc<std::cell::RefCell<Vec<StreamId>>>,
     /// Extension ids whose `Extension` handle was dropped (GC'd), awaiting bulk-release of the
     /// host-value handles they held (`HandleTable::release_for_ext`). A non-GC queue mirroring
@@ -484,7 +484,7 @@ pub struct Instrumentation {
 
 /// Non-hot, non-GC per-class metadata (see `VmState::class_meta`): where the class was
 /// defined, and — for a native class — its `.class_doc(..)` text. Quoin classes get their doc
-/// lazily, from the `"*` block above `source` (docs/DOCS_ARCH.md §4); native classes carry it
+/// lazily, from the `"*` block above `source` (docs/internal/DOCS_ARCH.md §4); native classes carry it
 /// here because they have no source to scan.
 #[derive(Default, Clone, Debug)]
 pub struct ClassMeta {
@@ -569,7 +569,7 @@ pub struct VmState<'gc> {
     /// swapped as ONE unit with the task context, since another task may run
     /// while this one is suspended at a checkpoint or parked mid-outcall.
     pub aot: AotTaskState<'gc>,
-    /// Error channel for compiled code (docs/AOT_ARCH.md v0.2): helpers store a
+    /// Error channel for compiled code (docs/internal/AOT_ARCH.md v0.2): helpers store a
     /// full `QuoinError` here and return `TAG_ERR`; `codegen::invoke` takes it.
     /// A thrown Quoin *value* needs no slot here — it travels as
     /// `QuoinError::Thrown` with the value GC-rooted in `exceptions.active`,
@@ -667,14 +667,14 @@ pub struct VmState<'gc> {
     /// The session's async-I/O backend + the deferred resource-reap queues ([`Io`]).
     #[collect(require_static)]
     pub io: Io,
-    /// Set at boot on a WORKER's VM (docs/CONCURRENCY_ARCH.md §5): the
+    /// Set at boot on a WORKER's VM (docs/internal/CONCURRENCY_ARCH.md §5): the
     /// channel ends back to the parent. `None` on the main VM.
     #[collect(require_static)]
     pub worker_link: Option<crate::worker::WorkerLink>,
     /// The ENTRY unit this VM was booted to run (canonicalized), `None` for
     /// REPL/eval. "What program is this?" — `Worker.spawn:(VM.unit)` runs
     /// another copy of the current program (the same-unit provisioning
-    /// model, docs/WEB_ARCH.md workers). Deliberately NOT `__FILE__`: a
+    /// model, docs/internal/WEB_ARCH.md workers). Deliberately NOT `__FILE__`: a
     /// `use`d library sees the app's unit, not its own file.
     pub unit_path: Option<String>,
     /// Workers this VM spawned (`VM.ps` observability; see `WorkerReg`).
@@ -688,7 +688,7 @@ pub struct VmState<'gc> {
     /// Inline by value so `#[derive(Collect)]` traces it: the table **is a GC root set**,
     /// keeping a handle's `Value` alive as long as the extension holds it. Empty (and a
     /// single bool load on the hot path) unless extensions are in use. See
-    /// `src/handle_table.rs` / `docs/FUTURE_EXT_ARCH.md` §2.
+    /// `src/handle_table.rs` / `docs/internal/FUTURE_EXT_ARCH.md` §2.
     pub handle_table: crate::handle_table::HandleTable<'gc>,
 }
 
@@ -1240,7 +1240,7 @@ impl<'gc> VmState<'gc> {
 
     /// Verify every element of a FRESH collection literal against `tag`, then
     /// stamp the tag (`TagCollection` — annotation-driven tagged literals,
-    /// docs/GENERICS_ARCH.md §4.2). Safe to stamp in place: the literal has no
+    /// docs/internal/GENERICS_ARCH.md §4.2). Safe to stamp in place: the literal has no
     /// aliases yet.
     pub(crate) fn tag_fresh_collection(
         &self,
@@ -2165,7 +2165,7 @@ impl<'gc> VmState<'gc> {
 
     /// Drive nested execution (a native-initiated block or method call) until the frame
     /// stack returns to `initial_frame_count` — the BATCHED form (B0,
-    /// docs/BLOCK_AOT_ARCH.md §3). One flat loop with the current frame's bytecode `Rc`
+    /// docs/internal/BLOCK_AOT_ARCH.md §3). One flat loop with the current frame's bytecode `Rc`
     /// hoisted exactly like `run_dispatch` (re-cloned only when the frame stack changes),
     /// yielding to the driver every `step_batch()` instructions instead of after every
     /// one. This gives nested block bodies — every `each:`-family combinator element —
@@ -4854,7 +4854,7 @@ impl<'gc> VmState<'gc> {
             self.dispatch_send_rooted(mc, callable, receiver, args, selector, recv_start)
         } else {
             // A WorkerService proxy forwards any selector its class doesn't
-            // define (docs/CONCURRENCY_ARCH.md §10 L4) — the hook sits on
+            // define (docs/internal/CONCURRENCY_ARCH.md §10 L4) — the hook sits on
             // this lookup-miss branch, so the hot path never pays for it.
             if let Some(res) = crate::runtime::worker_service::try_service_call(
                 self, mc, receiver, selector, &args,
@@ -5698,7 +5698,7 @@ impl<'gc> VmState<'gc> {
                 if let Value::Int(i) = index {
                     // Untagged (the whole pre-generics world): exactly the old
                     // body behind one `is_none`. Tagged lists take the
-                    // out-of-line checked path (docs/GENERICS_ARCH.md §6).
+                    // out-of-line checked path (docs/internal/GENERICS_ARCH.md §6).
                     let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
                         match l.elem {
                             None => Some(devirt_ops::list_set(l.get_vec_mut(), i, value)),

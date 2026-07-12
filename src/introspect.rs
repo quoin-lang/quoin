@@ -6,7 +6,7 @@
 //!
 //! Pure read: no Quoin code runs, no `Mutation` is needed. Anything heavier (a value's `.s`
 //! repr, a method's source body, the real `Value`) is the caller's job; this hands back only
-//! names, signatures, and flags. Design notes: `docs/INTROSPECTION.md`.
+//! names, signatures, and flags. Design notes: `docs/internal/INTROSPECTION.md`.
 
 use crate::value::{Class, Value};
 use crate::vm::VmState;
@@ -44,7 +44,7 @@ pub struct ClassInfo {
     /// `None` for native classes and `-e`/REPL definitions.
     pub source: Option<SourceLoc>,
     /// A native class's `.class_doc(..)` text. Quoin classes answer `None` here — their doc
-    /// is the `"*` block above `source`, extracted lazily (docs/DOCS_ARCH.md §4/§6).
+    /// is the `"*` block above `source`, extracted lazily (docs/internal/DOCS_ARCH.md §4/§6).
     pub doc: Option<String>,
     /// Every statically-named reopen site (`Name <-- { … }`), in load order. The doc block
     /// above a reopen documents the *extension*; for a native class this is where its qnlib
@@ -70,7 +70,7 @@ pub struct MethodVariant {
     pub native: bool,
     pub source: Option<SourceLoc>,
     /// A native variant's `.doc(..)` text. Quoin variants answer `None` — their doc is the
-    /// `"*` block above `source`, extracted lazily (docs/DOCS_ARCH.md §4/§6).
+    /// `"*` block above `source`, extracted lazily (docs/internal/DOCS_ARCH.md §4/§6).
     pub doc: Option<String>,
 }
 
@@ -222,7 +222,7 @@ pub fn describe_class<'gc>(vm: &VmState<'gc>, name: &str) -> Option<ClassInfo> {
 
 /// The reference doc for the class named `name`: a native class's `.class_doc(..)` text,
 /// else the `"*` block above its definition, else the block above its first documented reopen
-/// (docs/DOCS_ARCH.md §6). Lazy — source is read (embedded stdlib or disk) only when asked.
+/// (docs/internal/DOCS_ARCH.md §6). Lazy — source is read (embedded stdlib or disk) only when asked.
 pub fn doc_of_class<'gc>(vm: &VmState<'gc>, name: &str) -> Option<String> {
     let key = crate::value::NamespacedName::parse(name);
     let meta = vm.class_meta.get(&key)?;

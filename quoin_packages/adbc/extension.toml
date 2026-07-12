@@ -1,4 +1,4 @@
-# The `adbc` extension package — a `use`-able folder (docs/EXT_PACKAGING.md). It lives on the
+# The `adbc` extension package — a `use`-able folder (docs/internal/EXT_PACKAGING.md). It lives on the
 # default search root (`./quoin_packages/`), so from the repo root `use adbc:*` loads it (the
 # resolver synthesizes `Extension loadPackage: '<this-dir>'`). The explicit `loadPackage:` works too.
 

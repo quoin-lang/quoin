@@ -1,4 +1,4 @@
-//! The `Worker` class — C2 v1 isolates (docs/CONCURRENCY_ARCH.md §5).
+//! The `Worker` class — C2 v1 isolates (docs/internal/CONCURRENCY_ARCH.md §5).
 //!
 //! Parent side: `Worker.spawn:'unit.qn'` boots a fresh VM on its own OS
 //! thread and returns a handle; `handle.send:` deep-copies a data value in,
@@ -160,7 +160,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
              `Worker.send:` are the mirror lanes, and `Worker.worker?` says which side you \
              are on. Messages deep-copy plain data (numbers, strings, booleans, nil, Bytes, \
              Lists, Maps); symbols, instances, and resources refuse -- and blocks cross \
-             only as a whole thread-backed message. See docs/CONCURRENCY_ARCH.md.\n\n\
+             only as a whole thread-backed message. See docs/internal/CONCURRENCY_ARCH.md.\n\n\
              ```\n\
              var w = Worker.spawn:'jobs/indexer.qn';\n\
              w.send:#( 'index' 'docs/' );\n\
@@ -255,7 +255,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
              (templates are in-process references), so 'process' refuses loudly -- put the \
              code in a unit and `Worker.spawn:backing:` it instead.",
         )
-        // Portable blocks (docs/CONCURRENCY_ARCH.md §10): ship the block's
+        // Portable blocks (docs/internal/CONCURRENCY_ARCH.md §10): ship the block's
         // template by reference plus a deep-copied SNAPSHOT of its free
         // reads; join returns the block's value. The portability scan
         // refuses write-captures, ^^, self/@fields, guarded blocks, and

@@ -124,10 +124,10 @@ pub fn build_task_class() -> NativeClassBuilder {
              structured `Async.gather:`. `Task.spawn:` starts one and answers a handle for \
              observing and controlling it: `join` for the result, `cancel` for cooperative \
              cancellation, `status` / `done?` to poll. Tasks interleave on one scheduler and \
-             their I/O overlaps. See docs/ASYNC_ARCH.md.",
+             their I/O overlaps. See docs/internal/ASYNC_ARCH.md.",
         )
         // Task.spawn:aBlock -> spawn a detached task running the block; returns a
-        // handle. The spawner keeps running (fire-and-forget). See docs/ASYNC_ARCH.md.
+        // handle. The spawner keeps running (fire-and-forget). See docs/internal/ASYNC_ARCH.md.
         .class_method("spawn:", |vm, _mc, _receiver, args| {
             let block_gc = match args.first() {
                 Some(Value::Object(obj)) => match &obj.borrow().payload {

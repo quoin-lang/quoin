@@ -92,7 +92,7 @@ async-fs = "2"
 # (libc above) — the Child itself is exclusively borrowed by an in-flight wait.
 async-process = "2"
 futures-lite = "2"
-# The compute-offload pool's completion bridge (docs/CONCURRENCY_ARCH.md §4);
+# The compute-offload pool's completion bridge (docs/internal/CONCURRENCY_ARCH.md §4);
 # already in-tree transitively via the smol family.
 async-channel = "2"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }

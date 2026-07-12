@@ -281,7 +281,7 @@ fn multimethod_variants_and_guards_are_not_candidates() {
 
 #[test]
 fn unsealed_class_is_an_open_owner_candidate() {
-    // B2 (docs/BLOCK_AOT_ARCH.md §3): an OPEN owner's method may compile, marked
+    // B2 (docs/internal/BLOCK_AOT_ARCH.md §3): an OPEN owner's method may compile, marked
     // `open_owner` so the translator emits no direct sibling calls — every send
     // crosses a dispatch-equivalent seam, and a reopen simply dispatches to its
     // new template (per-dispatch minting; the stale entry stops being reachable).
@@ -305,7 +305,7 @@ fn unsealed_class_is_an_open_owner_candidate() {
 
 #[test]
 fn unannotated_method_is_a_speculative_candidate() {
-    // S0 (docs/SPECULATIVE_AOT_ARCH.md): an unannotated param or an absent
+    // S0 (docs/internal/SPECULATIVE_AOT_ARCH.md): an unannotated param or an absent
     // return annotation no longer ends candidacy — the candidate collects as
     // SPECULATIVE (Obj placeholders, spec flags set) and waits on a runtime
     // kind profile instead of compiling at unit load.

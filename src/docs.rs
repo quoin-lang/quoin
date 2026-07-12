@@ -1,5 +1,5 @@
 //! Doc extraction: the `"*` block above a definition is its reference doc
-//! (docs/DOCS_ARCH.md §4).
+//! (docs/internal/DOCS_ARCH.md §4).
 //!
 //! The parser drops comments (pest trivia), so docs are recovered from *source text* at the
 //! location introspection reports (`MethodVariant::source`, `ClassInfo::source`). Extraction

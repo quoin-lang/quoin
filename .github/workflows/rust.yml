@@ -30,7 +30,7 @@ jobs:
     - name: Run Quoin tests
       run: cargo run --verbose -- test qnlib/tests
     # Every fenced example in the reference docs and the language book must run and match
-    # its `"* -> value` annotations (docs/DOCS_ARCH.md phase 3 / RELEASE_PREP Tier 2).
+    # its `"* -> value` annotations (docs/internal/DOCS_ARCH.md phase 3 / RELEASE_PREP Tier 2).
     - name: Check documentation examples
       run: |
         cargo run -- doc --check --stdlib

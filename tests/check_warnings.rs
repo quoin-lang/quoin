@@ -1,5 +1,5 @@
 //! `qn check qnlib/warnings.qn` is the checker's demonstration gallery
-//! (docs/TYPE_SYSTEM_ARCH.md): every "should warn" entry must fire and every "must emit NO
+//! (docs/internal/TYPE_SYSTEM_ARCH.md): every "should warn" entry must fire and every "must emit NO
 //! warning" entry must stay silent. Nothing ran it in CI, which is how two drifts slipped in
 //! unnoticed (RELEASE_PREP Tier 4b): `badEachParam` fell silent when `each:` fusion started
 //! bypassing block-param seeding, and `wellFormed:` gained a false positive when a literal's

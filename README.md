@@ -459,7 +459,7 @@ To enforce this mechanically, the workspace ships a custom
 [Dylint](https://crates.io/crates/cargo-dylint) lint at
 `lint/no_gc_across_yield/`. It runs as a `LateLintPass`, finds yield points, and
 flags any `'gc`-lifetime local that is held live across a suspend — turning a
-memory-safety invariant into a compile-time check. See `docs/LINTER_DESIGN.md`.
+memory-safety invariant into a compile-time check. See `docs/internal/LINTER_DESIGN.md`.
 
 ### The `qn` CLI
 

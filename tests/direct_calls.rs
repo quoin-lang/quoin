@@ -1,4 +1,4 @@
-//! D3a — null retranslation (docs/DIRECT_CALLS_ARCH.md §3.5): with
+//! D3a — null retranslation (docs/internal/DIRECT_CALLS_ARCH.md §3.5): with
 //! QN_DIRECT_WARM set, warm AOT-IC sites queue their callers, the driver
 //! drains the queue between steps, and the registry entry is OVERWRITTEN
 //! with identically-generic code. Behavior must not change; VM.stats

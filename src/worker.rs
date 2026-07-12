@@ -1,4 +1,4 @@
-//! C2 v1 worker isolates (docs/CONCURRENCY_ARCH.md §5): one arena + one
+//! C2 v1 worker isolates (docs/internal/CONCURRENCY_ARCH.md §5): one arena + one
 //! `VmState` + one cooperative scheduler per OS thread, communicating by
 //! MESSAGE PASSING with deep copy — the extension wire's value taxonomy
 //! (data crosses, blocks/instances refuse), in-memory: the `WireData` tree
@@ -43,7 +43,7 @@ use crate::symbol::{Symbol, self_symbol};
 use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{VmOptions, VmState};
 
-/// A parent-initiated control request (docs/CONCURRENCY_ARCH.md §13.3).
+/// A parent-initiated control request (docs/internal/CONCURRENCY_ARCH.md §13.3).
 /// Each request CARRIES its reply lane, so any number may be in flight
 /// with no routing table; the worker's DRIVER answers opportunistically
 /// once per loop iteration — bounded staleness, no preemption.
@@ -128,7 +128,7 @@ pub enum WorkerMsg {
     Block(PortableBlock),
 }
 
-/// A block shipped across a worker boundary (docs/CONCURRENCY_ARCH.md §10):
+/// A block shipped across a worker boundary (docs/internal/CONCURRENCY_ARCH.md §10):
 /// the `Send` template reference, the deep-copied snapshot of its free
 /// reads (RECURSIVE — a captured block ships as its own `PortableBlock`),
 /// and the global names each level resolves — checked against the worker's
@@ -438,7 +438,7 @@ pub fn spawn_worker(path: String) -> WorkerChannels {
     spawn_worker_with(move |link| run_worker_unit(&path, link))
 }
 
-/// Spawn a worker running a portable block (docs/CONCURRENCY_ARCH.md §10):
+/// Spawn a worker running a portable block (docs/internal/CONCURRENCY_ARCH.md §10):
 /// same lanes, same lifecycle; `join` returns the BLOCK'S VALUE (copied),
 /// unlike unit workers' nil.
 pub fn spawn_worker_block(job: PortableBlock) -> WorkerChannels {
@@ -490,7 +490,7 @@ fn spawn_worker_with(
 }
 
 /// The generic service loop appended to a hosted unit's source
-/// (docs/CONCURRENCY_ARCH.md §10 L4): instantiate the hosted class, report
+/// (docs/internal/CONCURRENCY_ARCH.md §10 L4): instantiate the hosted class, report
 /// ready, then serve calls forever — one at a time, actor-style. Calls are
 /// reflective sends (`perform:args:`), so a missing method raises the same
 /// MessageNotUnderstood a direct send would, and it travels back as the
@@ -670,7 +670,7 @@ fn run_worker_block(job: PortableBlock, link: WorkerLink) -> Result<WireData, St
 }
 
 // =====================================================================
-// Process backing (docs/CONCURRENCY_ARCH.md §13.1): the SAME lanes, with a
+// Process backing (docs/internal/CONCURRENCY_ARCH.md §13.1): the SAME lanes, with a
 // PUMP on the other end — four small threads bridging the channels over a
 // unix socket (length-prefixed msgpack `DataValue` frames) to a child
 // `qn worker-serve` process, whose own pump feeds identical channels into

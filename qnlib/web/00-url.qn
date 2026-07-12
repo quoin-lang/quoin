@@ -7,7 +7,7 @@
 "*   [Web]Url.formDecode:'q=a+b'      "* #{ 'q':'a b' }  ('+' means space)
 "*
 "* Used by the [Web] router (per-segment path decoding) and the request
-"* conveniences (query / form). See docs/WEB_ARCH.md.
+"* conveniences (query / form). See docs/internal/WEB_ARCH.md.
 "* ===========================================================================
 
 "* The URL percent codec: component encoding/decoding plus query- and form-string

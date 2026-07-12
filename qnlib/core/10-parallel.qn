@@ -1,4 +1,4 @@
-"* L3 parallel combinators (docs/CONCURRENCY_ARCH.md §10): parallelCollect: /
+"* L3 parallel combinators (docs/internal/CONCURRENCY_ARCH.md §10): parallelCollect: /
 "* parallelReduce: run their per-item block across a lazily-started pool of
 "* warm worker isolates. The user's block ships as a portable block (capture
 "* snapshot; write-captures/self/^^ refuse), chunks deep-copy both ways, and
@@ -12,7 +12,7 @@
 "* `parallelReduce:`): a lazily-started pool of warm worker isolates, order-
 "* preserving chunk dispatch, and a one-flight-at-a-time gate. Programs
 "* normally call the combinators on List rather than this class directly
-"* (docs/CONCURRENCY_ARCH.md §10).
+"* (docs/internal/CONCURRENCY_ARCH.md §10).
 Parallel <- {
     .meta <-- {
         "* Inputs below this run serially. Chosen from the measured crossover

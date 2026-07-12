@@ -3,7 +3,7 @@
 //! while a line is edited, so the snapshot is never stale), via the read-only [`introspect`]
 //! API. [`complete_input`] is then a *pure* function of `(line, pos, &index)`, so the actual
 //! completion logic is unit-testable without a VM; the rustyline `Completer` is a thin
-//! adapter over it. Design notes: `docs/INTROSPECTION.md` and the REPL section of QUOIN_TODO.
+//! adapter over it. Design notes: `docs/internal/INTROSPECTION.md` and the REPL section of QUOIN_TODO.
 //!
 //! v1 scope: bare-word completion (globals, session locals, a few keywords), namespace names
 //! inside `[ … ]`, and selectors after `recv.` when the receiver's class is statically known

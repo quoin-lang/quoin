@@ -1,6 +1,6 @@
 # `numpy` — NumPy-backed arrays for Quoin
 
-An out-of-process extension package (`docs/FUTURE_EXT_ARCH.md`, `docs/EXT_PACKAGING.md`) exposing
+An out-of-process extension package (`docs/internal/FUTURE_EXT_ARCH.md`, `docs/internal/EXT_PACKAGING.md`) exposing
 real NumPy as the Quoin class **`[NumPy]Array`**. Arrays live in a Python subprocess; Quoin holds
 opaque handles, and bulk data crosses the socket only at explicit materialization points. The
 `[NumPy]` namespace marks this as the Python-backed implementation — `[Num]` is reserved for a

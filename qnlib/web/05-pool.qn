@@ -1,6 +1,6 @@
 "* Multi-core request execution over worker isolates — the pool behind
-"* [Web]App's serve:workers: (docs/WEB_ARCH.md workers;
-"* docs/CONCURRENCY_ARCH.md §13).
+"* [Web]App's serve:workers: (docs/internal/WEB_ARCH.md workers;
+"* docs/internal/CONCURRENCY_ARCH.md §13).
 "*
 "* Sockets never cross worker lanes — the transport VM keeps every
 "* connection, and REQUESTS TRAVEL AS DATA: a connection task ships

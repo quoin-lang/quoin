@@ -224,7 +224,7 @@ Tier 2 work builds toward it:
 - [x] `CHANGELOG.md` (`55bade1`). Heading is dated at tag time.
 - [x] Status-stamp the docs (`bfd59ca`). Every file under `docs/` now opens with a
   Status line from a fixed vocabulary, verified against the tree rather than from
-  memory, and `docs/README.md` splits the user-facing reference from the internal
+  memory, and `docs/internal/README.md` splits the user-facing reference from the internal
   design notes. Five docs made **false** claims — `DEBUGGER_ARCH` ("No debugger
   code exists yet"), `EXT_PACKAGING` ("not built"), `DIRECT_CALLS_ARCH` and
   `WINDOW_ARENA_ARCH` ("no slices implemented"), `TYPED_DEVIRT_ARCH` ("before any

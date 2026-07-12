@@ -4,7 +4,7 @@
 "*
 "*   qn qnlib/presentation/25-web-framework.qn
 "*
-"* See docs/WEB_ARCH.md for the architecture.
+"* See docs/internal/WEB_ARCH.md for the architecture.
 "* ===========================================================================
 use std:net/http
 use std:net/http_server

@@ -80,7 +80,7 @@ pub struct StaticBlock {
     pub param_types: Vec<String>,
     /// Per-param element-tag requirement for tag-aware dispatch: a
     /// `List(Integer)` param matches only Integer-tagged lists (the base class
-    /// lives in `param_types`; docs/GENERICS_ARCH.md §5). Empty = no
+    /// lives in `param_types`; docs/internal/GENERICS_ARCH.md §5). Empty = no
     /// requirements (every pre-generics block).
     pub param_elem_tags: Vec<Option<crate::runtime::elem_tag::ElemTag>>,
     pub bytecode: SharedBytecode,
@@ -104,7 +104,7 @@ pub struct StaticBlock {
     /// AOT materialization gates).
     pub is_init_literal: bool,
     /// Speculative-AOT observation state (spec::NOT_SPECULATIVE/OBSERVING/
-    /// RESOLVED, docs/SPECULATIVE_AOT_ARCH.md S0). Lives HERE so the
+    /// RESOLVED, docs/internal/SPECULATIVE_AOT_ARCH.md S0). Lives HERE so the
     /// method-entry gate is one byte off a template line that entry binding
     /// touches anyway — a side table would cost a dependent pointer chase on
     /// every method call. Shared by all closures of the literal (one `Arc`).
@@ -251,7 +251,7 @@ pub fn template_uses_self(sb: &StaticBlock) -> bool {
 
 /// One atomic byte (was `Cell<u8>`): the flag is shared by every closure of
 /// the literal through the template `Arc`, which must be `Send` for C2's
-/// portable blocks (docs/CONCURRENCY_ARCH.md §5/§10). Relaxed everywhere —
+/// portable blocks (docs/internal/CONCURRENCY_ARCH.md §5/§10). Relaxed everywhere —
 /// the flag is advisory tiering state; a racing observer only costs a
 /// conservative re-check. `Clone` gives the copy an independent flag, the
 /// same semantics `Cell` had under `#[derive(Clone)]`.
@@ -508,7 +508,7 @@ pub enum Instruction {
     // MessageNotUnderstood / a user-defined `if:else:`), leaving the receiver on the stack;
     // if it *is* a `Bool`, fall through to the inlined branch (which consumes it). Never pops.
     BranchIfNotBool(isize),
-    // Guard for fused `each:` loops (B1, docs/BLOCK_AOT_ARCH.md §3). Peeks the stack top
+    // Guard for fused `each:` loops (B1, docs/internal/BLOCK_AOT_ARCH.md §3). Peeks the stack top
     // (the `each:` receiver): a native List falls through to the inlined index loop —
     // List is sealed, so native-List-ness alone decides that dispatch would select the
     // `List#each:` primitive the loop implements. Anything else jumps to a cold path
@@ -531,7 +531,7 @@ pub enum Instruction {
     /// coerced). Emitted only when the condition is not statically `Bool`,
     /// so `{ i < n }`-style loops pay nothing.
     RequireBool,
-    /// Guard for fused instantiation (M2, docs/MATERIALIZATION_ARCH.md). Peeks the stack
+    /// Guard for fused instantiation (M2, docs/internal/MATERIALIZATION_ARCH.md). Peeks the stack
     /// top (the `new:` receiver): if `new:` on it resolves to the BUILT-IN
     /// `Callable::New` — no user `new:` anywhere in the class-side chain — and the class
     /// is instantiable, fall through to the inline field-expression path; otherwise jump
@@ -555,7 +555,7 @@ pub enum Instruction {
     NewSet(usize),  // num_elements
     /// Verify every element of the fresh collection literal on top of the
     /// stack against the tag, then stamp the tag (annotation-driven tagged
-    /// literals: `var x: List(Integer) = #(...)` — docs/GENERICS_ARCH.md §4.2).
+    /// literals: `var x: List(Integer) = #(...)` — docs/internal/GENERICS_ARCH.md §4.2).
     TagCollection(crate::runtime::elem_tag::ElemTag),
     NewRegex,
     DefineClass {
@@ -563,13 +563,13 @@ pub enum Instruction {
         parent_name: Option<NamespacedName>,
         instance_vars: Vec<String>,
         /// Where the definition sits in source, recorded into `VmState::class_meta` so doc
-        /// extraction can find the `"*` block above it (docs/DOCS_ARCH.md §4). Methods carry
+        /// extraction can find the `"*` block above it (docs/internal/DOCS_ARCH.md §4). Methods carry
         /// their own location on the template; classes had nowhere to keep one until this.
         source: Option<SourceInfo>,
     },
     ExecuteBlockWithSelf,
     /// A statically-named class reopen (`Name <-- { … }`) records where it happened, so the
-    /// `"*` block above the reopen is reachable for docs (docs/DOCS_ARCH.md §4 — extension
+    /// `"*` block above the reopen is reachable for docs (docs/internal/DOCS_ARCH.md §4 — extension
     /// sites list beneath the definition's doc). No stack effect; emitted just before the
     /// reopen's `ExecuteBlockWithSelf`. A computed-target reopen emits nothing.
     RecordClassSite {

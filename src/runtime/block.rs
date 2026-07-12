@@ -214,7 +214,7 @@ pub fn build_block_class() -> NativeClassBuilder {
              { 1 } == { 1 } \"* -> false\n\
              ```",
         )
-        // Shape-level portability check (docs/CONCURRENCY_ARCH.md §10): raises
+        // Shape-level portability check (docs/internal/CONCURRENCY_ARCH.md §10): raises
         // the scanner's refusal (write-captures, ^^, self/@fields, guarded,
         // class/method definition) or answers the block. The parallel
         // combinators call it on EVERY path — including serial fallbacks — so
@@ -230,7 +230,7 @@ pub fn build_block_class() -> NativeClassBuilder {
         })
         .doc(
             "Assert the block's shape can be shipped to a worker \
-             (docs/CONCURRENCY_ARCH.md): raises unless it is free of write-captures, `^^`, \
+             (docs/internal/CONCURRENCY_ARCH.md): raises unless it is free of write-captures, `^^`, \
              `self`/`@field` access, guards, and class/method definition; answers the block. \
              The parallel combinators check it on every path -- serial fallbacks included -- \
              so refusals don't depend on input size. (Whether the captured VALUES are \

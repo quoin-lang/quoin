@@ -19,7 +19,7 @@
 //! What remains is `Value<'gc>` (an opaque enum, built/inspected via `Host` +
 //! the `arg!`/`recv!` macros) and the `'gc` brand itself — the last gc_arena
 //! thing, removable only by the handle-projection step (the out-of-process tier;
-//! see `docs/FUTURE_EXT_ARCH.md` guardrail #6).
+//! see `docs/internal/FUTURE_EXT_ARCH.md` guardrail #6).
 //!
 //! Generic conveniences that can't live on a `dyn` trait (native-state
 //! construction) are provided by the blanket [`HostExt`] trait, implemented for

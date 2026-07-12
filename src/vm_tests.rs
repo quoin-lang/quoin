@@ -2211,7 +2211,7 @@ fn test_vm_options_at_runtime() {
 
 #[test]
 fn value_layout_facts() {
-    // The window-arena CONTRACT (docs/WINDOW_ARENA_ARCH.md §2.1): compiled
+    // The window-arena CONTRACT (docs/internal/WINDOW_ARENA_ARCH.md §2.1): compiled
     // code reads/writes slots natively against exactly this layout. A
     // failure here means the JIT's emission model is wrong for this build.
     use crate::value::Value;

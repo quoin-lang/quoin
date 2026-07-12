@@ -1,4 +1,4 @@
-//! `qn doc` end to end (docs/DOCS_ARCH.md §7): the generator boots a VM, walks the class
+//! `qn doc` end to end (docs/internal/DOCS_ARCH.md §7): the generator boots a VM, walks the class
 //! table, and emits HTML + JSON. What these pin:
 //!
 //!   * the ONE pipeline — a single class page carries docs from both worlds: `.doc(..)` text
@@ -441,7 +441,7 @@ fn coverage_reports_and_emits_nothing() {
     assert!(!out_dir.exists(), "--coverage must report, not generate");
 }
 
-/// The `--check` harness itself (docs/DOCS_ARCH.md phase 3 + RELEASE_PREP Tier 2): fenced
+/// The `--check` harness itself (docs/internal/DOCS_ARCH.md phase 3 + RELEASE_PREP Tier 2): fenced
 /// `quoin` blocks in markdown run; annotations assert; failures name their site. Pinned on a
 /// tiny fixture rather than the real corpora, which CI checks separately (they're slow).
 #[test]

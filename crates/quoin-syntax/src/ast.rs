@@ -109,7 +109,7 @@ pub struct BlockDeclNode {
 /// arguments (`List(Integer)`, `Map(String List(Integer))`). All four
 /// annotation positions (`var x: T`, `|x:T|`, block-local `- x:T`, `^T`)
 /// carry one of these; class-header type parameters are plain names on
-/// `ClassDefinitionNode` instead. See docs/GENERICS_ARCH.md.
+/// `ClassDefinitionNode` instead. See docs/internal/GENERICS_ARCH.md.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeRefNode {
     pub ident: Arc<IdentifierNode>,
@@ -147,7 +147,7 @@ pub struct ClassDefinitionNode {
     pub parent_identifier: Option<Arc<IdentifierNode>>,
     /// Class/mixin-header type parameters (`Iterate(T U) <- { … }`) — the type
     /// variables the body's method signatures may use. Checker-only; never
-    /// reaches the runtime (docs/GENERICS_ARCH.md §4.4).
+    /// reaches the runtime (docs/internal/GENERICS_ARCH.md §4.4).
     pub type_params: Vec<String>,
     pub block: Arc<BlockNode>,
 }

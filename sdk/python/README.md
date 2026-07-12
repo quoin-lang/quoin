@@ -1,7 +1,7 @@
 # quoin-ext (Python SDK)
 
 The Python client for writing out-of-process Quoin extensions (Tier 1; see
-`docs/FUTURE_EXT_ARCH.md`). It speaks the same MessagePack wire protocol
+`docs/internal/FUTURE_EXT_ARCH.md`). It speaks the same MessagePack wire protocol
 (`crates/quoin-ext-proto/PROTOCOL.md`) as the Rust `quoin-ext` crate, so a Quoin program
 spawns and talks to a Python extension exactly as it would a Rust one — this is the
 polyglot payoff of the out-of-process design.

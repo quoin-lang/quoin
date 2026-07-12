@@ -35,7 +35,7 @@ pub const IO_BUFFER_BYTES: usize = 16 * 1024;
 /// (TCP/TLS/file) is irrelevant once the handle is open — plus a clone of the VM's reap
 /// queue, and carries no `Gc` fields. The extra piece is `rbuf`: bytes read from the
 /// conduit but not yet consumed by QN (read-ahead). The fd is reaped on close/collection
-/// via the shared queue, exactly as for sockets. See `docs/ASYNC_ARCH.md` (Stage 6).
+/// via the shared queue, exactly as for sockets. See `docs/internal/ASYNC_ARCH.md` (Stage 6).
 pub struct NativeStream {
     id: StreamId,
     reap: Rc<RefCell<Vec<StreamId>>>,

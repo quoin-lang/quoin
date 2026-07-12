@@ -1,4 +1,4 @@
-//! `WorkerService` (L4, docs/CONCURRENCY_ARCH.md §10): host a class in a
+//! `WorkerService` (L4, docs/internal/CONCURRENCY_ARCH.md §10): host a class in a
 //! worker isolate, get a proxy whose ordinary sends become serialized RPC.
 //! Covers sticky state, error/MNU transparency, concurrent-caller
 //! serialization (exact totals through gather), IO inside hosted methods,

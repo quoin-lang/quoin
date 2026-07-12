@@ -1,4 +1,4 @@
-//! [Web]Pool — multi-core request serving (docs/WEB_ARCH.md workers): the
+//! [Web]Pool — multi-core request serving (docs/internal/WEB_ARCH.md workers): the
 //! same-unit provisioning model over real HTTP, both backings. Requests are
 //! raw HTTP/1.1 over TcpStream (no client-side qn), so this pins the whole
 //! path: parse -> lanes -> worker pipeline -> lanes -> serialize.

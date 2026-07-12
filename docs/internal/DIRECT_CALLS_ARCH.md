@@ -5,9 +5,9 @@ default-off.** D2.5a (`8489807`, skip the env swap for env-blind callees), D2.5b
 per-entry marshaling plans), D3a (`a2a29a9`, the `dispatch_epoch` ABI) and D3b (`7f966c2`, W0
 direct edges) are all on main via PR #75. The machinery is proven, but the direct-edge gate
 measured net-negative, so it is **off unless `QN_DIRECT_WARM` is set** (see also
-`QN_DIRECT_ONLY` / `QN_DIRECT_MAX` / `QN_DIRECT_NULL` in `docs/ENV_FLAGS.md`); code lives in
+`QN_DIRECT_ONLY` / `QN_DIRECT_MAX` / `QN_DIRECT_NULL` in `docs/internal/ENV_FLAGS.md`); code lives in
 `src/codegen/mod.rs` (`lane_plan`, `BakedW0`) with `tests/direct_calls.rs`. Successor arc:
-`docs/WINDOW_ARENA_ARCH.md`. Written 2026-07-06 at `2197545` as a plan; read it as one.*
+`docs/internal/WINDOW_ARENA_ARCH.md`. Written 2026-07-06 at `2197545` as a plan; read it as one.*
 
 ## 1. Problem statement, with numbers
 
@@ -143,7 +143,7 @@ recompile caller tid → new AotEntry, registry overwrite
   generic path → D2 refills → optionally re-retranslate. Entries are
   leaked `'static`; a stale baked `entry.raw` is never CALLED (guard
   fails first) and never dangles. This is the same no-deopt argument
-  as B2/S2 (docs/BLOCK_AOT_ARCH.md §6.2).
+  as B2/S2 (docs/internal/BLOCK_AOT_ARCH.md §6.2).
 - **Registry overwrite is already legal**: `register`/`lookup` go
   through the RwLock map (codegen/mod.rs:248); spec promotion already
   inserts at runtime. In-flight invocations of the OLD entry complete

@@ -1,4 +1,4 @@
-//! The §4 adjacency rules (docs/DOCS_ARCH.md), pinned: what attaches, what detaches, and
+//! The §4 adjacency rules (docs/internal/DOCS_ARCH.md), pinned: what attaches, what detaches, and
 //! exactly how the marker is stripped.
 
 use super::{doc_above, summary};

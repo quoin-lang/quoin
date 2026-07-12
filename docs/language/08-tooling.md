@@ -28,7 +28,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 > - **Environment**: `QUOIN_STDLIB=DIR` loads the stdlib from `DIR` instead of
 >   the copy embedded in the binary; `QUOIN_PATH=DIRS` adds extra roots to the
 >   extension-package search. Internal `QN_*` tuning knobs are catalogued in
->   `docs/ENV_FLAGS.md` and are not part of the language surface.
+>   `docs/internal/ENV_FLAGS.md` and are not part of the language surface.
 
 A program is just a `.qn` file; there is no required entry point — top-level
 statements run in order (Part I). Command-line arguments arrive as a list of

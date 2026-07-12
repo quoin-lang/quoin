@@ -19,7 +19,7 @@
 //! (so a breakpoint there fires every iteration), while the instruction after a call
 //! returns lands mid-line (so a breakpoint on the call's line does not re-fire on return).
 //! Step-out is the exception — it is depth-only and fires the moment the frame returns. See
-//! `docs/DEBUGGER_ARCH.md`.
+//! `docs/internal/DEBUGGER_ARCH.md`.
 
 use crate::error::QuoinError;
 use crate::fiber::YieldReason;

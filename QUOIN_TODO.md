@@ -130,7 +130,7 @@ This document outlines the language features, compiler updates, and VM modificat
     edit-a-`.qn`-without-rebuilding loop). `self_root` now anchors to the entry script's directory.
     The rest of `qnlib/` (`tests/`, `benchmark.qn`, the `use` fixtures) is deliberately NOT embedded
     — a source-tree feature. Standard-location search is only needed if a future installer ships
-    stdlib *source* alongside the binary. See `docs/RELEASE_PREP.md`.
+    stdlib *source* alongside the binary. See `docs/internal/RELEASE_PREP.md`.
 - [x] Change the file extension to `.qn` everywhere.
   - [x] Don't forget to update the plugin.
 - [x] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
@@ -295,7 +295,7 @@ both under `## Misc`.)
 - [ ] **Full Unicode identifiers.** Today `IDENT_PREFIX`/`IDENT_REST` are ASCII-closed
   (`[a-zA-Z_][a-zA-Z0-9?_]*`); eventually identifiers should support full Unicode (UAX #31
   `XID_Start`/`XID_Continue` or similar). **Coupling to watch:** the compiler's alpha-renaming
-  for control-flow fusion (docs/MATERIALIZATION_ARCH.md, M1) mints *source-unspellable* local
+  for control-flow fusion (docs/internal/MATERIALIZATION_ARCH.md, M1) mints *source-unspellable* local
   names by using a character outside the identifier charset (e.g. `·` U+00B7) — the
   collision-freedom/invisibility guarantee is pure grammar closure. U+00B7 is `XID_Continue`
   (Catalan), so naive Unicode identifiers would make the minted names spellable and break the
@@ -306,7 +306,7 @@ both under `## Misc`.)
 ## Networking & Async I/O
 
 The async-networking stack (Stages 0–7) shipped on `main` (PR #1; design + as-built notes in
-`docs/ASYNC_ARCH.md`): cooperative tasks/cancellation, `TcpSocket`/`TlsSocket`,
+`docs/internal/ASYNC_ARCH.md`): cooperative tasks/cancellation, `TcpSocket`/`TlsSocket`,
 `Async.timeout:`, the `[HTTP]` client (incl. chunked), `ByteStream`/`StringStream`, file
 streams, and `TcpListener` servers. These are the deferred refinements — none blocks the
 core, and each fits the existing narrow-waist seam (a thin backend op + a QN class, or pure
@@ -383,7 +383,7 @@ Quoin over the current sockets/streams).
 - [ ] **`Bytes` extras.** A mutable `BytesBuilder` (if concat churn shows up — body assembly
   is `bytes + chunk` today). (The `#b'HEX'` byte literal moved to `## Syntax`.)
 - [x] **(Separate, larger track) Polyglot extension system.** Out-of-process extensions over a
-  unix-domain socket — design in `docs/FUTURE_EXT_ARCH.md`. Shipped: Tier 0 (gc-free `Host`
+  unix-domain socket — design in `docs/internal/FUTURE_EXT_ARCH.md`. Shipped: Tier 0 (gc-free `Host`
   trait) + Tier 1 transport, structured values, host-reach, crash/timeout isolation, and
   extension-backed classes — INCLUDING the Python-SDK class-registration parity slice (3b:
   `sdk/python/quoin_ext`, `ext_vector.py` example), so Rust + Python SDKs are at parity
@@ -436,7 +436,7 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   history/Highlighter/Completer traits) vs `reedline` (nicer multiline + live highlighting,
   heavier). Needed for P1; choose before then.
 
-**P0 — MVP (a genuinely usable REPL): DONE** (branch `feat/repl`; design in `docs/REPL_DESIGN.md`).
+**P0 — MVP (a genuinely usable REPL): DONE** (branch `feat/repl`; design in `docs/internal/REPL_DESIGN.md`).
 - [x] `qn repl` wiring: `VmRunnerMode::Repl` + dispatch in `runner.rs`. Boots one VM with the
   prelude loaded, kept alive across the loop; native-class registration extracted to a shared
   `register_builtins`.
@@ -503,7 +503,7 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   match. A closed `[ns]` completes the fully-qualified name (`[IO]Fi`→`[IO]File`); else a bare word.
   The rustyline `Completer` (`CompletionType::List`) is a thin adapter. **v1 limit:** only receivers
   whose class genuinely needs evaluation (`@ivars`, `(expr)` groupings, chained sends) yield nothing.
-- [ ] **VM introspection API** (`src/introspect.rs`; design in `docs/INTROSPECTION.md`). Read-only
+- [ ] **VM introspection API** (`src/introspect.rs`; design in `docs/internal/INTROSPECTION.md`). Read-only
   surface metadata as plain owned structs (no `'gc`), owning the VM-internal walking so the REPL /
   completion / a future Quoin `Mirror` stay ignorant of internals. Exact: `globals` /
   `describe_class` / `describe_value` / `session_locals`; prefix finds: `find_globals` /
@@ -549,7 +549,7 @@ hand-rolled parser may be preferable to taking on a dependency's surface. Cross-
 primitives live under `## Networking & Async I/O`, and reflection-over-the-*running*-program is the
 deferred `Mirror` in `## REPL`.
 
-**Numbers & math** — all four shipped; see `docs/STDLIB_NUMBERS.md` for the build record.
+**Numbers & math** — all four shipped; see `docs/internal/STDLIB_NUMBERS.md` for the build record.
 - [x] ⭐ **Math** — number methods + `Math` namespace + `closeTo:` test assertion.
 - [x] **Decimal** — `BigDecimal` (`src/runtime/big_decimal.rs`, `rust_decimal`).
 - [x] **BigInt** — `BigInteger` (`src/runtime/big_integer.rs`, `num-bigint`); distinct type,
@@ -557,7 +557,7 @@ deferred `Mirror` in `## REPL`.
 - [x] **Statistics** — `qnlib/core/07-statistics.qn` (pure qnlib over the collection protocol).
 
 **Data formats & serialization** — parsers/generators all shipped; see
-`docs/STDLIB_DATA_FORMATS.md` for the build record.
+`docs/internal/STDLIB_DATA_FORMATS.md` for the build record.
 - [x] **JSON** — parse/generate with pretty option.
 - [x] ⭐ **base64 / hex** — `Bytes` ↔ `String` codecs.
 - [x] **CSV** — read/write with quoting/escaping.
@@ -571,7 +571,7 @@ deferred `Mirror` in `## REPL`.
   KeyValuePair), each round-tripping via the type's own `parse:`; Symbol/Block/Regex stay
   errors by default (opt in per class). One-way/untagged; reverse convention = class-side
   `fromData:`. The extension wire + worker frames keep strict walkers DELIBERATELY. As-built
-  in `docs/STDLIB_DATA_FORMATS.md`; tests `qnlib/tests/74-serialize.qn`; book §44.
+  in `docs/internal/STDLIB_DATA_FORMATS.md`; tests `qnlib/tests/74-serialize.qn`; book §44.
 
 **Text & presentation**
 - [x] **Pretty-printer** — structural, width-aware rendering of nested collections/objects
@@ -594,7 +594,7 @@ deferred `Mirror` in `## REPL`.
   now desugars to a plain `Log.warn:`. Tests `qnlib/tests/69-term-log.qn`. Later:
   `Log.includeLocation:` toggle, multiple sinks if fan-out-in-a-block ever hurts.
 
-**Time** — Phases 1+2+3 shipped (`docs/STDLIB_TIME.md`).
+**Time** — Phases 1+2+3 shipped (`docs/internal/STDLIB_TIME.md`).
 - [x] **DateTime** — zone-aware instants, RFC 3339, components, arithmetic (`jiff`).
 - [x] **Duration & monotonic clock** — `Duration` value type + `Instant.now`/elapsed.
 - [x] **Civil `Date`/`Time` + first-class `Span`** — `Date` (calendar date, no zone;
@@ -604,7 +604,7 @@ deferred `Mirror` in `## REPL`.
   convert; FIELDWISE `==:`, no `<:`; `asDuration` refuses calendar units) + the DateTime
   bridges (`± Span`, `until:`, `date`/`time`, `Date#atTime:zone:`/`inZone:`).
   `src/runtime/civil.rs` + `span.rs`; tests `qnlib/tests/68-civil-time.qn`; book §44;
-  full as-built spec in `docs/STDLIB_TIME.md` Phase 3. Named `Span` (jiff's term), not
+  full as-built spec in `docs/internal/STDLIB_TIME.md` Phase 3. Named `Span` (jiff's term), not
   `Period`.
   - [ ] Deferred from v1: strftime-style custom parse/format (`format:`/`parseFormat:`),
     week-of-year / quarter accessors, `Date` range iteration (`d1..d2` riding the range
@@ -752,7 +752,7 @@ deferred `Mirror` in `## REPL`.
 - [x] **Channels** — buffered/unbuffered async queues with scheduler park/wake
   (`src/runtime/channel.rs`, PR #10; the extension fair-queuing item above mirrors its park
   model). Remaining in this family: the structured-concurrency API itself (nurseries,
-  deadlines, detached spawn+join — `docs/ASYNC_ARCH.md` Stage 2b).
+  deadlines, detached spawn+join — `docs/internal/ASYNC_ARCH.md` Stage 2b).
 
 ## Bugs/Odd Behavior
 - [x] **`qn fmt` internal error: multi-line `#( … )` as `%`'s right operand inside a parenthesized

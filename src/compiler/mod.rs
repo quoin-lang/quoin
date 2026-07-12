@@ -72,7 +72,7 @@ pub(crate) fn type_from_ref_with_vars(tr: &TypeRefNode, vars: &[String]) -> Type
         return Type::from_annotation_name(&base);
     }
     // `Block(args… ^Ret)`: any arity (zero included — `Block()`); no `^`-tail
-    // means an `Any` return (docs/GENERICS_ARCH.md §11).
+    // means an `Any` return (docs/internal/GENERICS_ARCH.md §11).
     if base == "Block" {
         return Type::BlockOf {
             params: tr
@@ -389,7 +389,7 @@ pub(crate) fn fuse_bytecode(
 }
 
 // The static-type lattice lives in `crate::types::Type` (the shared substrate for the
-// resolver/checker; docs/TYPE_SYSTEM_ARCH.md). The optimizer below only *consumes* it: the
+// resolver/checker; docs/internal/TYPE_SYSTEM_ARCH.md). The optimizer below only *consumes* it: the
 // devirt gates act on `Int`/`List`/`Bool` and treat every other type — `Any` included — as
 // "no static knowledge", so untyped code compiles exactly as before. `Int` devirt is sound
 // only for values proven `Int`; list devirt has a runtime fallback (sound even for a `var`).
@@ -702,7 +702,7 @@ pub struct Compiler {
     /// last. A `^`/`^^` return or a block's tail expression is checked (and numeric literals
     /// promoted) against the top entry; `None` = no declared return → not checked. Phase 3a.
     return_type_stack: Vec<Option<Type>>,
-    /// Collect AOT candidates (docs/AOT_ARCH.md) while compiling: methods of
+    /// Collect AOT candidates (docs/internal/AOT_ARCH.md) while compiling: methods of
     /// sealed classes with all-scalar params and return. Only the runner's
     /// once-per-unit compiles opt in, and only when `QN_AOT=1`.
     collect_aot: bool,
@@ -768,7 +768,7 @@ impl Compiler {
         self
     }
 
-    /// AOT candidacy (docs/AOT_ARCH.md §3): a method of a sealed class whose
+    /// AOT candidacy (docs/internal/AOT_ARCH.md §3): a method of a sealed class whose
     /// params and return are all scalar, unguarded, and single-variant. The
     /// authoritative bytecode walk happens in `codegen::translate` — this is the
     /// cheap proof-of-eligibility filter; refusal there is silent and safe.
@@ -811,7 +811,7 @@ impl Compiler {
             );
             return;
         }
-        // B2 (docs/BLOCK_AOT_ARCH.md §3): an OPEN owner's method may compile —
+        // B2 (docs/internal/BLOCK_AOT_ARCH.md §3): an OPEN owner's method may compile —
         // marked so the translator emits no direct sibling calls (every send
         // crosses a dispatch-equivalent seam; a reopen then simply dispatches
         // to its new template, per-dispatch minting making the stale entry
@@ -885,7 +885,7 @@ impl Compiler {
     }
 
     /// Collect a nested block LITERAL as a block-template candidate (B3a,
-    /// docs/BLOCK_AOT_ARCH.md §3): invoked via `valueWithSelfOrArg:` from the
+    /// docs/internal/BLOCK_AOT_ARCH.md §3): invoked via `valueWithSelfOrArg:` from the
     /// combinator seams when the registry has a compiled entry. Cheap
     /// prefilter only — translation refusals do the real gating; the prescan
     /// skips the two shapes that always refuse (a nested literal push, a
@@ -3154,13 +3154,13 @@ impl Compiler {
         if self.try_compile_inlined_while(call, bytecode)? {
             return Ok(());
         }
-        // B1 (docs/BLOCK_AOT_ARCH.md §3): fuse `recv.each:{ |x| … }` into a guarded
+        // B1 (docs/internal/BLOCK_AOT_ARCH.md §3): fuse `recv.each:{ |x| … }` into a guarded
         // native index loop — closure-free per element on any native-List receiver,
         // with the real send as the cold path (the guard IS the dispatch).
         if self.try_compile_inlined_each(call, bytecode)? {
             return Ok(());
         }
-        // M2 (docs/MATERIALIZATION_ARCH.md): fuse `X.new:{ f=e; … }` on the plain-config
+        // M2 (docs/internal/MATERIALIZATION_ARCH.md): fuse `X.new:{ f=e; … }` on the plain-config
         // shape into a guarded inline instantiation — no config closure, no config frame,
         // no interpreted stores, with the real send as the cold path.
         if self.try_compile_fused_instantiation(call, bytecode)? {

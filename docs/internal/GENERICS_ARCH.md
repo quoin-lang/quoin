@@ -53,7 +53,7 @@ arc (§12), not scheduled.
 Design revisions from review: real type variables replace the earlier
 implicit-`Element` idea; `emptyLike` chosen over extending `default`;
 `collect:as:` dropped as redundant with inference + `ensure:`. The settled generics syntax
-(`docs/TYPE_SYSTEM_ARCH.md` §"Settled surface syntax": `Class(args)`,
+(`docs/internal/TYPE_SYSTEM_ARCH.md` §"Settled surface syntax": `Class(args)`,
 space-separated, nesting allowed) is design-locked but entirely unbuilt:
 `List(Integer)` is a hard parse error today. This doc designs the first
 implementation slice — **runtime-checked element types for List/Map/Set** —

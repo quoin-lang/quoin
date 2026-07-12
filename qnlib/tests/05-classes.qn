@@ -221,7 +221,7 @@
         .is:{ item } equalTo:7;
     };
 
-    "* M2 fused instantiation (docs/MATERIALIZATION_ARCH.md): a plain-config
+    "* M2 fused instantiation (docs/internal/MATERIALIZATION_ARCH.md): a plain-config
     "* `new:{ f=e; ... }` compiles to a guarded inline path - these pin that the
     "* hot path, the cold fallbacks, and the refused shapes all behave exactly
     "* as the classic config-frame path.
