@@ -276,6 +276,22 @@ pub enum IoRequest {
     /// through here: explicitly (`close` parks on this op), by the reap drain, or
     /// by backend teardown.
     FinishStream { id: StreamId },
+    /// Open `path` for RANDOM-ACCESS reading. The file lands in its own registry
+    /// (same id space as streams — the listener precedent): seeking needs the
+    /// concrete `async_fs::File`, and the `dyn AsyncStream` box erases
+    /// `AsyncSeek`. Resolves `Opened { id, size }`, the size from an open-time
+    /// stat (not a snapshot taken earlier — no staleness race).
+    OpenFileRandom { path: OsString },
+    /// Positioned read, pread-style — no cursor, so calls are independent and
+    /// there is no hidden position state: up to `max` bytes starting at byte
+    /// `offset`, short only at EOF. The file is leased for the op, like every
+    /// stream op; a concurrent second read on the same id errs rather than
+    /// interleaving seeks.
+    ReadAt {
+        id: StreamId,
+        offset: u64,
+        max: usize,
+    },
 }
 
 /// The plain-data outcome of an [`IoRequest`].
@@ -283,6 +299,11 @@ pub enum IoRequest {
 pub enum IoResult {
     Slept,
     Connected(StreamId),
+    /// A random-access file opened: its id plus the size from an open-time stat.
+    Opened {
+        id: StreamId,
+        size: u64,
+    },
     /// A bound listening socket: its id plus the *actual* local port (so a `:0`
     /// ephemeral bind is usable — the caller can read the port it got).
     Listening {
@@ -376,6 +397,8 @@ impl IoRequest {
             IoRequest::ChildWait { .. } => "proc: wait".to_string(),
             IoRequest::WrapStream { codec, .. } => format!("io: wrap {codec}"),
             IoRequest::FinishStream { .. } => "io: finish".to_string(),
+            IoRequest::OpenFileRandom { .. } => "io: open file (random)".to_string(),
+            IoRequest::ReadAt { .. } => "io: read at".to_string(),
         }
     }
 }
@@ -457,6 +480,8 @@ impl Drop for SmolInner {
                 }
             }
         }
+        // (Random-access files in `seekables` just drop with the struct — a
+        // read-only fd has nothing to finish.)
         // Finish (don't just drop) any write-codec stream still open: its encoder
         // writes the trailer in `poll_close`. This is the once-per-session end —
         // the driver's per-run exit flush already wrote the buffered bytes, and a
@@ -501,6 +526,9 @@ struct SmolInner {
     // Listening sockets live in their own registry: a `TcpListener` accepts connections
     // (it isn't an `AsyncStream`), so it can't share the `streams` map. Same id space.
     listeners: RefCell<HashMap<StreamId, async_net::TcpListener>>,
+    // Random-access files, likewise their own registry: `ReadAt` needs the concrete
+    // `async_fs::File` (the `dyn AsyncStream` box erases `AsyncSeek`). Same id space.
+    seekables: RefCell<HashMap<StreamId, async_fs::File>>,
     // Spawned children, addressed by their own ids (same counter as streams — the
     // spaces never meet). See `ChildSlot`.
     children: RefCell<HashMap<u64, Rc<ChildSlot>>>,
@@ -550,6 +578,13 @@ impl SmolInner {
         let id = StreamId(self.next_id.get());
         self.next_id.set(self.next_id.get() + 1);
         self.listeners.borrow_mut().insert(id, listener);
+        id
+    }
+
+    fn insert_seekable(&self, file: async_fs::File) -> StreamId {
+        let id = StreamId(self.next_id.get());
+        self.next_id.set(self.next_id.get() + 1);
+        self.seekables.borrow_mut().insert(id, file);
         id
     }
 
@@ -673,6 +708,7 @@ impl SmolBackend {
             inner: Rc::new(SmolInner {
                 streams: RefCell::new(HashMap::new()),
                 listeners: RefCell::new(HashMap::new()),
+                seekables: RefCell::new(HashMap::new()),
                 children: RefCell::new(HashMap::new()),
                 next_id: Cell::new(1),
                 tls_secure: OnceCell::new(),
@@ -790,6 +826,51 @@ impl Drop for ListenerLease {
                 drop(l); // closed mid-accept: release the port, don't resurrect it
             } else {
                 self.inner.listeners.borrow_mut().insert(self.id, l);
+            }
+        }
+    }
+}
+
+/// The random-access-file analogue of [`StreamLease`]: a cancelled `ReadAt`
+/// (a timeout around it) must not close the file out from under the handle.
+struct SeekableLease {
+    inner: Rc<SmolInner>,
+    id: StreamId,
+    file: Option<async_fs::File>,
+}
+
+impl SeekableLease {
+    fn take(inner: &Rc<SmolInner>, id: StreamId) -> Result<Self, IoError> {
+        let file = inner
+            .seekables
+            .borrow_mut()
+            .remove(&id)
+            .ok_or_else(|| IoError {
+                kind: std::io::ErrorKind::NotFound,
+                message: format!("unknown random-access file id {}", id.0),
+            })?;
+        inner.leased.borrow_mut().insert(id);
+        Ok(Self {
+            inner: inner.clone(),
+            id,
+            file: Some(file),
+        })
+    }
+
+    fn file(&mut self) -> &mut async_fs::File {
+        self.file.as_mut().expect("file is leased until drop")
+    }
+}
+
+impl Drop for SeekableLease {
+    fn drop(&mut self) {
+        self.inner.leased.borrow_mut().remove(&self.id);
+        self.inner.op_aborts.borrow_mut().remove(&self.id);
+        if let Some(f) = self.file.take() {
+            if self.inner.closed_while_leased.borrow_mut().remove(&self.id) {
+                drop(f); // closed mid-read: honor it, don't resurrect the fd
+            } else {
+                self.inner.seekables.borrow_mut().insert(self.id, f);
             }
         }
     }
@@ -958,10 +1039,12 @@ impl IoBackend for SmolBackend {
             }),
 
             IoRequest::Close { id } => Box::pin(async move {
-                // Drop the stream/listener (closing the fd) without holding the borrow
-                // across any await; missing ids are a no-op so double-close is harmless.
+                // Drop the stream/listener/file (closing the fd) without holding the
+                // borrow across any await; missing ids are a no-op so double-close is
+                // harmless.
                 let _ = inner.streams.borrow_mut().remove(&id);
                 let _ = inner.listeners.borrow_mut().remove(&id);
+                let _ = inner.seekables.borrow_mut().remove(&id);
                 IoResult::Closed
             }),
 
@@ -1043,6 +1126,69 @@ impl IoBackend for SmolBackend {
                 match stream.close().await {
                     Ok(()) => IoResult::Closed,
                     Err(e) => IoResult::Err(e.into()),
+                }
+            }),
+
+            IoRequest::OpenFileRandom { path } => Box::pin(async move {
+                // Open + stat in one op, so `size` is the truth at open time.
+                let file = match async_fs::File::open(&path).await {
+                    Ok(f) => f,
+                    Err(e) => return IoResult::Err(e.into()),
+                };
+                let size = match file.metadata().await {
+                    Ok(m) => m.len(),
+                    Err(e) => return IoResult::Err(e.into()),
+                };
+                IoResult::Opened {
+                    id: inner.insert_seekable(file),
+                    size,
+                }
+            }),
+
+            IoRequest::ReadAt { id, offset, max } => Box::pin(async move {
+                // Leased like the byte ops, and abortable by `close` on the handle;
+                // the seek+read pair is safe because the lease means one op owns
+                // the cursor at a time (pread semantics from the caller's view).
+                let lease = match SeekableLease::take(&inner, id) {
+                    Ok(l) => l,
+                    Err(e) => return IoResult::Err(e),
+                };
+                let (abort, reg) = AbortHandle::new_pair();
+                inner.op_aborts.borrow_mut().insert(id, abort);
+                let res = Abortable::new(
+                    async move {
+                        let mut lease = lease;
+                        let r = async {
+                            use futures_lite::AsyncSeekExt;
+                            lease.file().seek(std::io::SeekFrom::Start(offset)).await?;
+                            // Fill to `max` or EOF: a single read may return short
+                            // mid-file, and "short only at EOF" is the contract.
+                            let mut buf = vec![0u8; max];
+                            let mut filled = 0usize;
+                            while filled < max {
+                                let n = lease.file().read(&mut buf[filled..]).await?;
+                                if n == 0 {
+                                    break;
+                                }
+                                filled += n;
+                            }
+                            buf.truncate(filled);
+                            Ok::<Vec<u8>, std::io::Error>(buf)
+                        }
+                        .await;
+                        drop(lease);
+                        r
+                    },
+                    reg,
+                )
+                .await;
+                match res {
+                    Ok(Ok(bytes)) => IoResult::Read(bytes),
+                    Ok(Err(e)) => IoResult::Err(e.into()),
+                    Err(_aborted) => IoResult::Err(IoError {
+                        kind: std::io::ErrorKind::NotConnected,
+                        message: "file closed while a read was in flight".to_string(),
+                    }),
                 }
             }),
 
@@ -1272,6 +1418,7 @@ impl IoBackend for SmolBackend {
         // most code reaches (the async `IoRequest::Close` is test-only).
         let _ = self.inner.streams.borrow_mut().remove(&id);
         let _ = self.inner.listeners.borrow_mut().remove(&id);
+        let _ = self.inner.seekables.borrow_mut().remove(&id);
         // A drop-close is a complete close: nothing left to finish at teardown.
         let _ = self.inner.finish_pending.borrow_mut().remove(&id);
         // If the resource is leased out to an in-flight op, it is in neither map:
@@ -1423,10 +1570,17 @@ impl IoBackend for MockBackend {
                 self.next_id.set(self.next_id.get() + 1);
                 IoResult::Connected(id)
             }
-            IoRequest::Read { max, .. } | IoRequest::ReadTimed { max, .. } => {
+            IoRequest::Read { max, .. }
+            | IoRequest::ReadTimed { max, .. }
+            | IoRequest::ReadAt { max, .. } => {
                 let mut buf = self.reads.borrow_mut().pop_front().unwrap_or_default();
                 buf.truncate(max);
                 IoResult::Read(buf)
+            }
+            IoRequest::OpenFileRandom { .. } => {
+                let id = StreamId(self.next_id.get());
+                self.next_id.set(self.next_id.get() + 1);
+                IoResult::Opened { id, size: 0 }
             }
             IoRequest::RunProcess { .. }
             | IoRequest::SpawnProcess { .. }

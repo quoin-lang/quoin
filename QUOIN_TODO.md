@@ -634,8 +634,18 @@ deferred `Mirror` in `## REPL`.
   Verified against our own reader AND the system tar (`qnlib/tests/73-tar.qn` TarWrite suite).
   Defaults deliberate (0644/0755, uid/gid 0, mtime now); per-member mode/mtime overrides are
   future sugar if wanted.
-- [ ] **zip** (`zip`) — archive read/write; needs central-directory (non-streaming) reading, its
-  own design.
+- [x] **zip** — `[Archive]Zip`/`ZipEntry`/`ZipWriter` (`qnlib/core/17-zip.qn`, PURE QUOIN) on the
+  new **random-access read protocol** (`readAt:offset count:` + `size`): `Zip.open:` reads through
+  a `RandomAccessFile` (native class over `IoRequest::OpenFileRandom`/`ReadAt`, pread-style
+  seekables registry in the backend — the listener precedent), `Zip.of:` runs the same reader over
+  in-memory Bytes. EOCD tail scan (comment-length-validated), eager CD parse, lazy CRC-verified
+  content (`Bytes#crc32` native, flate2), stored+deflate, encrypted/multi-disk/zip64 refusals by
+  name, civil DOS date/time, confined `extractTo:`. Writer streams to any write stream (LFH+data
+  per add, CD+EOCD at close), stored-or-deflated whichever is smaller via new `encodeDeflateRaw`
+  (RFC 1951 — `encodeDeflate` was documented "raw" but is and stays ZLIB-wrapped, docs fixed;
+  `decodeDeflate` reads both). Interop verified both directions vs system zip/unzip
+  (`qnlib/tests/77-zip.qn`; the interop suite self-skips without the tools). Deferred: zip64
+  (>4 GiB / >65k entries), encrypted archives, positioned WRITE on RandomAccessFile.
 
 **System & process**
 - [x] ⭐ **Environment** — `[OS]Env` read/iterate shipped (`src/runtime/os.rs`, tests
@@ -692,6 +702,21 @@ deferred `Mirror` in `## REPL`.
   deadlines, detached spawn+join — `docs/ASYNC_ARCH.md` Stage 2b).
 
 ## Bugs/Odd Behavior
+- [ ] **`qn fmt` internal error: multi-line `#( … )` as `%`'s right operand inside a parenthesized
+  argument.** The self-verification catches it (aborts, no corruption), but the file can't be
+  formatted. Minimal repro (formats fine once the list is single-line, or when the `%` expression
+  is bound to a var first — the workaround used in `core/17-zip.qn` contentFor:):
+  ```
+  Foo <- {
+      m: -> { |entry|
+          ParseError.throw:('zip: %1 method %2' % #(
+              entry.name
+              entry.methodCode
+          ))
+      }
+  }
+  ```
+  Found writing the zip reader (2026-07-11). Fix lives in `crates/quoin-fmt`.
 - [x] **`List.new` / `Map.new` / `Set.new` produce broken shells.** FIXED for the
   collections (+ `Bytes.new`): native class methods now win the hierarchy lookup before the
   generic fallback — `new` constructs the real empty native value; `new:` raises a clear

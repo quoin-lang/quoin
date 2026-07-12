@@ -150,9 +150,11 @@ JSON.generate:#{ 'a':1 }    "* -> {"a":1}
 **Bytes** is immutable binary data. Text crosses the boundary *explicitly* —
 `'…'.asBytes` encodes, `asString` decodes (UTF-8) — so there is never a
 question of which encoding applied. Compression is built in as Bytes codecs:
-gzip and deflate both ways (`encodeGz`/`decodeGz`, `encodeDeflate`/
-`decodeDeflate`), zstandard decode (`decodeZstd`); malformed input raises a
-catchable `ParseError`. Compression also *streams*, both ways: `gunzip` on an
+gzip and deflate both ways (`encodeGz`/`decodeGz`, `encodeDeflate` — HTTP's
+zlib-wrapped form — plus `encodeDeflateRaw` for the bare RFC 1951 stream zip
+carries; `decodeDeflate` reads both), zstandard decode (`decodeZstd`);
+malformed input raises a catchable `ParseError`. `crc32` is the matching
+integrity stamp (zip's per-entry checksum). Compression also *streams*, both ways: `gunzip` on an
 unread `ByteStream`/`StringStream` wraps it in place, so a `.gz` file — or the
 `.gz` half of a `.tar.gz` — reads incrementally through the ordinary stream
 methods (`readAll`, `readLine`, `eachLine:`), nothing materialized; `gzip` on
@@ -178,6 +180,22 @@ metadata snapshot), and `addFolder:`; names over 100 bytes ride a pax `path=`
 header, and `close` writes the end blocks and closes the stream through the
 codec — system tar reads the result directly.
 
+**[Archive]Zip** is the random-access archive, and its reader is shaped by the
+format: a zip's truth is the *central directory at the end of the file*
+(trusting the local headers a streaming reader meets first is a classic
+correctness and security trap), so `Zip.open:` reads through a
+`RandomAccessFile` — the directory once, each member lazily by offset, nothing
+loaded whole — and `Zip.of:` runs the same reader over in-memory `Bytes` (a
+downloaded archive). Entries are a real `List`: the whole Iterate vocabulary,
+`at:'name'` addressing, contents re-readable in any order — no one-pass
+constraint. Every content read is CRC-32-verified; stored and deflated members
+both decode; encrypted, multi-disk, and zip64 archives refuse with a
+`ParseError` naming the reason; timestamps come back as civil `date` / `time`
+(that is what DOS times are — local wall clock, no zone). `extractTo:`
+confines exactly like tar's. Writing streams naturally (data first, directory
+at `close`), so `Zip.writeTo:` takes any write stream; each member is stored
+or deflated, whichever is smaller — what real zip tools do.
+
 ```quoin
 'hello'.asBytes.encodeGz.decodeGz.asString    "* -> hello
 ```
@@ -198,6 +216,12 @@ streams, so code written against a stream doesn't care what's underneath.
 An `[IO]File` value from `open:` also carries a metadata snapshot: `size` in
 bytes and `modified` as a Timestamp — what a tar header or a Content-Length
 needs before any content is read.
+For random-access *formats*, `randomAccess` opens the file for positioned
+reads instead: a **RandomAccessFile** answers `readAt:offset count:` and
+`size` — pread-style, no cursor, reads independent and repeatable. That pair
+is the informal random-access read protocol; `Bytes` speaks it too, which is
+how `[Archive]Zip` reads a file on disk and a downloaded buffer with the same
+code.
 `[IO]Stdout` / `[IO]Stderr` are writable handles, `[IO]Stdin` reads without
 blocking other tasks, and **[IO]Folder** is an Iterate-able directory listing.
 

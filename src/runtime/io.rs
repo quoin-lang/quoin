@@ -372,6 +372,28 @@ pub fn build_io_file_class() -> NativeClassBuilder {
             "The file's last-modification time as a Timestamp, from the metadata snapshot \
              taken when the [IO]File was created.",
         )
+        // randomAccess -> open the file for positioned reads (pread-style; see the
+        // RandomAccessFile class). Like byteStream, a fresh fd per call; the size
+        // comes from an open-time stat, not this [IO]File's snapshot.
+        .instance_method("randomAccess", |vm, mc, receiver, _args| {
+            let path = receiver
+                .with_native_state(|io: &NativeIoFile| io.path.clone())
+                .map_err(QuoinError::Other)?;
+            match vm.await_io(IoRequest::OpenFileRandom { path })? {
+                IoResult::Opened { id, size } => Ok(
+                    crate::runtime::random_access::make_random_access(vm, mc, id, size),
+                ),
+                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
+                other => Err(QuoinError::Other(format!(
+                    "randomAccess: unexpected I/O result {other:?}"
+                ))),
+            }
+        })
+        .doc(
+            "Open the file for positioned reads and answer a RandomAccessFile — \
+             `readAt:offset count:` anywhere in the file, no cursor. What a \
+             random-access format (zip) reads through; a fresh fd per call.",
+        )
         .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_path = receiver.with_native_state(|io: &NativeIoFile| io.path.clone())?;
             let rhs_path = args[0].with_native_state(|io: &NativeIoFile| io.path.clone());
