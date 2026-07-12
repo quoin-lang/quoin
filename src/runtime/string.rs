@@ -437,7 +437,7 @@ pub fn build_string_class() -> NativeClassBuilder {
              in the caller's scope and splice in the result's `.s` rendering. A malformed \
              expression raises a catchable ParseError.\n\n\
              ```\n\
-             'x = %{1 + 2}'.mod     \"* -> x = 3\n\
+             %'x = %{1 + 2}'     \"* -> x = 3\n\
              ```",
         )
         .instance_method("length", |vm, mc, receiver, _args| {
