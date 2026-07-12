@@ -226,16 +226,25 @@ fn inline(text: &str, rewrite: bool) -> String {
     let parts: Vec<&str> = escaped.split('`').collect();
     // An even part count means an odd number of backticks: the tail one is literal.
     let unpaired_tail = parts.len() % 2 == 0;
-    let mut out = String::new();
+    // Swap code spans for control-char placeholders before the prose layer, so a
+    // [label](url) whose label is (or contains) a code span still parses as one
+    // link; markdown source can't contain the \u{1} delimiter.
+    let mut protected = String::new();
+    let mut spans: Vec<String> = Vec::new();
     for (i, part) in parts.iter().enumerate() {
         if i % 2 == 1 && !(unpaired_tail && i == parts.len() - 1) {
-            let _ = write!(out, "<code>{part}</code>");
+            let _ = write!(protected, "\u{1}{}\u{1}", spans.len());
+            spans.push(format!("<code>{part}</code>"));
         } else {
             if i % 2 == 1 {
-                out.push('`');
+                protected.push('`');
             }
-            out.push_str(&prose(part, rewrite));
+            protected.push_str(part);
         }
+    }
+    let mut out = prose(&protected, rewrite);
+    for (n, span) in spans.iter().enumerate() {
+        out = out.replace(&format!("\u{1}{n}\u{1}"), span);
     }
     out
 }

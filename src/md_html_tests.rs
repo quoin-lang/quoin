@@ -25,6 +25,18 @@ fn code_spans_shield_emphasis_and_links() {
 }
 
 #[test]
+fn code_span_labels_still_linkify() {
+    // The book index's chapter links: the label IS a code span.
+    let html = render("### Part I · [`01-foundations.md`](01-foundations.md)\n", true);
+    assert!(
+        html.contains("<a href=\"01-foundations.html\"><code>01-foundations.md</code></a>"),
+        "a [label](url) whose label is a code span is one link: {html}"
+    );
+    let html = render("see [the `qn` CLI](08-tooling.md) for more\n", true);
+    assert!(html.contains("<a href=\"08-tooling.html\">the <code>qn</code> CLI</a>"));
+}
+
+#[test]
 fn unpaired_markers_stay_literal() {
     assert!(render("a ` b\n", false).contains("a ` b"));
     assert!(
