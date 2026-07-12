@@ -38,7 +38,7 @@ pub enum YieldReason<'gc> {
     },
     /// A fiber is suspending to perform async I/O. The plain-data request bubbles to
     /// the scheduler, which fulfills it via the `IoBackend` and resumes the fiber with
-    /// the result in `Scheduler::wake`. See `docs/ASYNC_ARCH.md`.
+    /// the result in `Scheduler::wake`. See `docs/internal/ASYNC_ARCH.md`.
     AwaitIo {
         #[collect(require_static)]
         req: IoRequest,
@@ -46,14 +46,14 @@ pub enum YieldReason<'gc> {
     /// The running task is spawning one child task per block and parking until all
     /// of them complete (`Async.gather:`). The blocks carry `Gc` just like
     /// `CallBlock`; the scheduler spawns the children and resumes the parent with the
-    /// list of results in `Scheduler::wake`. See `docs/ASYNC_ARCH.md` (Stage 2a).
+    /// list of results in `Scheduler::wake`. See `docs/internal/ASYNC_ARCH.md` (Stage 2a).
     Gather {
         blocks: Vec<Gc<'gc, Block<'gc>>>,
     },
     /// The running task is parking in `join` on another (detached) task. The plain
     /// `TaskId` bubbles to the scheduler; the joiner was already added to the target's
     /// waiter list, and is resumed with the outcome in `Scheduler::wake` when the
-    /// target completes. See `docs/ASYNC_ARCH.md` (Stage 2b).
+    /// target completes. See `docs/internal/ASYNC_ARCH.md` (Stage 2b).
     Join {
         #[collect(require_static)]
         task: TaskId,
@@ -62,7 +62,7 @@ pub enum YieldReason<'gc> {
     /// of `ms` milliseconds, whichever fires first (`Async.timeout:do:`). The scheduler
     /// arms a deadline timer alongside the join; the first to resolve wins and the loser
     /// is disarmed. Resumes with the join outcome, or `Wake::TimedOut` on the deadline.
-    /// See `docs/ASYNC_ARCH.md` (Stage 5a).
+    /// See `docs/internal/ASYNC_ARCH.md` (Stage 5a).
     JoinTimed {
         #[collect(require_static)]
         task: TaskId,

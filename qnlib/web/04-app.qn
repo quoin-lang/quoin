@@ -16,7 +16,7 @@
 "* the transport driving it. Handler blocks may take the request as a
 "* parameter ({ |req| ... }) or address it as self ({ .param:'id' }); their
 "* return value is normalized by the respondTo: conventions below.
-"* See docs/WEB_ARCH.md.
+"* See docs/internal/WEB_ARCH.md.
 "* ===========================================================================
 
 "* The [Web] layer's request conveniences, layered onto the transport request
@@ -66,7 +66,7 @@
 "* Handler blocks may take the request as a parameter ({ |req| … }) or address it as
 "* self ({ .param:'id' }); the return value is normalized by the respondTo:
 "* conventions. app.handle:req is the whole app as a pure function — request in,
-"* response out, no sockets — so apps unit-test in-process. See docs/WEB_ARCH.md.
+"* response out, no sockets — so apps unit-test in-process. See docs/internal/WEB_ARCH.md.
 [Web]App <- { | @router @middleware @debug @pool @poolMain @logRequests |
     "* Internal: an empty router and middleware chain, debug off, request
     "* logging on.
@@ -218,7 +218,7 @@
     poolMain: -> { |flag| @poolMain = flag; self };
 
     "* start: with the pure pipeline running on a pool of `n` worker isolates
-    "* (docs/CONCURRENCY_ARCH.md §13): the transport VM keeps the sockets and
+    "* (docs/internal/CONCURRENCY_ARCH.md §13): the transport VM keeps the sockets and
     "* ships requests as data; each pool worker re-runs THIS app's unit
     "* (`VM.unit` — the same-unit provisioning model), whose serve call lands
     "* in poolWorkerLoop below instead of binding. `backing` is 'thread' or

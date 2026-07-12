@@ -1,5 +1,5 @@
 //! `Extension` — the Quoin-facing handle to an out-of-process native extension
-//! (Tier 1; see `docs/FUTURE_EXT_ARCH.md`). Slice 1 is the **transport keystone**:
+//! (Tier 1; see `docs/internal/FUTURE_EXT_ARCH.md`). Slice 1 is the **transport keystone**:
 //! spawn a subprocess, connect a unix domain socket, and round-trip one scalar op —
 //! with the calling fiber parking on the socket fd through the existing reactor
 //! (`await_io` `Write` then `Read`), so a slow extension never stalls the VM.
@@ -7,7 +7,7 @@
 //! This is a legacy (`&mut VmState`) native class, not an `ext_sdk` one: it is itself
 //! an async/IO primitive that needs `await_io`, which lives below the SDK surface.
 //!
-//! Slice 3a adds the **handle table** (`docs/FUTURE_EXT_ARCH.md` §2): a `call:with:` is no
+//! Slice 3a adds the **handle table** (`docs/internal/FUTURE_EXT_ARCH.md` §2): a `call:with:` is no
 //! longer a one-shot request/reply but a re-entrant *conversation*. After sending the `Call`,
 //! the host services a loop of frames — each is either a host-op request the extension issued
 //! mid-call (answered with `HostOpReturn`) or the terminal `CallReturn`. Handles minted during
@@ -1419,7 +1419,7 @@ fn resolve_command(dir: &Path, command: &str) -> PathBuf {
     }
 }
 
-/// Load an extension *package* (a `use`-able folder; `docs/EXT_PACKAGING.md`): read its
+/// Load an extension *package* (a `use`-able folder; `docs/internal/EXT_PACKAGING.md`): read its
 /// `extension.toml`, spawn the subprocess, install the provided classes **under the package
 /// namespace** (so a package can never register a bare global — §4; an already-namespaced
 /// `ClassDecl` name is rejected), run the package's optional `init.qn` Quoin glue now that its
@@ -1511,7 +1511,7 @@ pub fn build_extension_class() -> NativeClassBuilder {
              extension.toml, install its classes under the package namespace, run its \
              init.qn glue) -- `use name:*` does this for you. The handle's `call:with:` \
              family is the raw op surface that package glue builds on. See \
-             docs/EXT_PACKAGING.md.",
+             docs/internal/EXT_PACKAGING.md.",
         )
         // `Extension spawn: '<path-to-binary>'` -> spawn the extension subprocess and connect to
         // it, returning an Extension handle. The unmanaged escape hatch (`EXT_PACKAGING.md` §4):

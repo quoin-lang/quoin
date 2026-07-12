@@ -20,7 +20,7 @@ pub enum MethodBody {
         /// Declared checker return type (Fork-1b native half), e.g. `Some("String")`. Compile-time
         /// only — never consulted at dispatch; surfaced via `introspect` for the type checker.
         ret_type: Option<String>,
-        /// Reference-doc text (`.doc(..)` on the builder; docs/DOCS_ARCH.md §5). Never
+        /// Reference-doc text (`.doc(..)` on the builder; docs/internal/DOCS_ARCH.md §5). Never
         /// consulted at dispatch; surfaced via `introspect` for `qn doc` and `$doc`.
         doc: Option<String>,
     },

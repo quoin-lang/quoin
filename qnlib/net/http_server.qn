@@ -19,7 +19,7 @@
 "* Content-Length — RFC 7230 requests have no close-delimited bodies) and share
 "* [HTTP]Body; a Generator response body streams as chunked output.
 "*
-"* Limits and their over-limit behavior (see docs/WEB_ARCH.md):
+"* Limits and their over-limit behavior (see docs/internal/WEB_ARCH.md):
 "*   maxHeadBytes (16 KiB)   -> 431, close
 "*   maxBodyBytes (8 MiB)    -> 413 (preflight on CL; cumulative on chunked), close
 "*   headTimeoutMs (30 s)    -> 408, close

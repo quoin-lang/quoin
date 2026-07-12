@@ -1,4 +1,4 @@
-//! Portable blocks (docs/CONCURRENCY_ARCH.md §10): `Worker.start:{...}`
+//! Portable blocks (docs/internal/CONCURRENCY_ARCH.md §10): `Worker.start:{...}`
 //! ships a block as (Send template reference + deep-copied snapshot of its
 //! free reads); join returns the block's value. The portability scan
 //! refuses — loudly, at submit time — everything that can't cross:

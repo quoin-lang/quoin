@@ -6,7 +6,8 @@ import sys
 import os
 import threading
 
-sys.path.insert(0, "/Users/damon/code/building_blocks_vm/sdk/python")
+REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+sys.path.insert(0, os.path.join(REPO_ROOT, "sdk", "python"))
 sys.setrecursionlimit(2_000_000)
 
 from quoin_ext import serve

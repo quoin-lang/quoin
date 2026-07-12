@@ -10,7 +10,7 @@ inline recovery, and the rest of Phase 5.*
 
 Actionable plan for evolving Quoin's static types from a *targeted optimization aid* into a real
 *gradual type checker* with good error ergonomics — while keeping the dynamic-by-default feel.
-Companion to `docs/FUTURE_ARCH.md` (the two converge — see "Synergy").
+Companion to `docs/internal/FUTURE_ARCH.md` (the two converge — see "Synergy").
 
 ## Where it is today (grounding)
 
@@ -294,7 +294,7 @@ Reuse the existing span + caret renderer. Deliver:
 
 ### Phase 5 — feed the optimizer
 Let devirt/inlining consume the richer `Type` (receiver's exact class → method inlining; `List<Int>` →
-unboxed elements). Method inlining is the documented highest-ROI Tier-1 lever (`docs/FUTURE_ARCH.md`) and
+unboxed elements). Method inlining is the documented highest-ROI Tier-1 lever (`docs/internal/FUTURE_ARCH.md`) and
 subsumes the "skip lookup" win *without* the ruled-out per-call-site inline cache. Key enabler: a **sealed
 class can't be subclassed** (`ensure_not_sealed`), so a self-send to its own method is provably monomorphic
 at compile time — the compiler already proves this for `CallSelfDirect` (which today is a no-op = `Send`;
@@ -400,6 +400,6 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
 ## Synergy with the perf roadmap
 
 Not a detour from perf: **the real `Type` representation is the same substrate Tier-1 method inlining
-needs** (`docs/FUTURE_ARCH.md`) — inlining requires knowing the receiver's exact class, which the
+needs** (`docs/internal/FUTURE_ARCH.md`) — inlining requires knowing the receiver's exact class, which the
 4-value lattice cannot express. Build the `Type` representation once; both the checker's diagnostics and
 the next perf tier benefit. Ergonomics and performance converge on the same investment.

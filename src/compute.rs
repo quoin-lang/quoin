@@ -1,4 +1,4 @@
-//! The C1 compute-offload pool (docs/CONCURRENCY_ARCH.md §4): CPU-bound
+//! The C1 compute-offload pool (docs/internal/CONCURRENCY_ARCH.md §4): CPU-bound
 //! native ops on DETACHED, owned data run on a small fixed thread pool while
 //! the calling task parks exactly like an IO wait — other tasks keep running
 //! on the VM thread, and `Async.gather:` over N offloading calls

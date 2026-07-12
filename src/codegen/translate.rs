@@ -1,4 +1,4 @@
-//! Bytecode → Cranelift translation (docs/AOT_ARCH.md §4.2, v0.2).
+//! Bytecode → Cranelift translation (docs/internal/AOT_ARCH.md §4.2, v0.2).
 //!
 //! One JIT module per candidate *group* (one class body / `.meta` extension).
 //! Members that fail translation are refused individually (a retry loop
@@ -830,7 +830,7 @@ fn bkind_type(k: BKind) -> Type {
 enum VarSlot {
     Scalar(Variable, AotKind),
     /// Scratch-slot number in the frame window, plus what the translator can
-    /// PROVE about the value it holds (tag-backed; docs/GENERICS_ARCH.md §8).
+    /// PROVE about the value it holds (tag-backed; docs/internal/GENERICS_ARCH.md §8).
     Obj(u32, Option<DynProof>),
 }
 
@@ -1044,7 +1044,7 @@ impl<'a> Translator<'a> {
             // (and waste) theirs, so the window layout coincides exactly with
             // the [receiver, args…] window every outcall/send caller already
             // pushed for rooting, letting `invoke` reuse it instead of
-            // building a second copy (D1, docs/OUTCALL_ARCH.md).
+            // building a second copy (D1, docs/internal/OUTCALL_ARCH.md).
             AotRole::Method => 1 + self.cand.params.len() as u32,
             // 0 = self (the vWSOA arg), 1 = the param's own cell, 2 = the
             // block object (env access) — see `invoke_block`.
@@ -1055,7 +1055,7 @@ impl<'a> Translator<'a> {
         Ok(k)
     }
 
-    /// A3 native slot access (docs/WINDOW_ARENA_ARCH.md §3): load the slot
+    /// A3 native slot access (docs/internal/WINDOW_ARENA_ARCH.md §3): load the slot
     /// head's (ptr, len). Loaded fresh per access sequence — every growth
     /// helper re-syncs the head at exit, so any head read after a helper
     /// call sees truth (the vm_mc canary enforces the discipline in debug).
@@ -1617,7 +1617,7 @@ impl<'a> Translator<'a> {
                         stack.push(AV::Dyn(recv_idx));
                     }
                     Instruction::BranchIfNotList(..) => {
-                        // The fused-`each:` guard (B1, docs/BLOCK_AOT_ARCH.md §3). A
+                        // The fused-`each:` guard (B1, docs/internal/BLOCK_AOT_ARCH.md §3). A
                         // PROVEN native-List receiver takes the hot path
                         // unconditionally — no branch is emitted, so nothing ever
                         // jumps to the cold path (the literal re-materialization +
@@ -2802,7 +2802,7 @@ impl<'a> Translator<'a> {
             }
             Constant::Block(rc) => {
                 // B3b: materialize a real closure over a SNAPSHOT of the whole
-                // frame environment (docs/BLOCK_AOT_ARCH.md §3). Gated to
+                // frame environment (docs/internal/BLOCK_AOT_ARCH.md §3). Gated to
                 // read-only captures, no `^^`, no nested literals, no guard
                 // block — anything else still refuses.
                 let rc = rc.clone();
@@ -3102,7 +3102,7 @@ impl<'a> Translator<'a> {
             .ins()
             .iconst(types::I64, (ip as i64) | ((i64::from(site)) << 32));
 
-        // D3b (docs/DIRECT_CALLS_ARCH.md §3.4): a baked W0 site emits a
+        // D3b (docs/internal/DIRECT_CALLS_ARCH.md §3.4): a baked W0 site emits a
         // guarded DIRECT edge — live-epoch check (native), receiver+fiber
         // guard (mini-helper), then one uniform call_indirect straight into
         // the callee's raw entry, with the generic helper call as the guard-

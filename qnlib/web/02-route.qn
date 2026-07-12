@@ -13,7 +13,7 @@
 "* order-independent multimethod spirit; the only possible tie is a duplicate
 "* shape, which throws AT REGISTRATION (the router's AmbiguousMethodError
 "* analog). Percent-decoding happens per segment after splitting on '/', so an
-"* encoded %2F can never create a segment boundary. See docs/WEB_ARCH.md.
+"* encoded %2F can never create a segment boundary. See docs/internal/WEB_ARCH.md.
 "* ===========================================================================
 
 "* One compiled path pattern: static segments, ':name' (captures exactly one segment,

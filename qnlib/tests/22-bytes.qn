@@ -1,6 +1,6 @@
 "* Stage 3a: the `Bytes` primitive — immutable binary data, the currency of the
 "* socket/TLS/HTTP layers. Text crosses at the edges via `String.asBytes` /
-"* `Bytes.asString`. See `docs/ASYNC_ARCH.md`.
+"* `Bytes.asString`. See `docs/internal/ASYNC_ARCH.md`.
 (TestSuite.new:{ var name = 'Bytes' }).add:{
     "* UTF-8 round-trips through Bytes and back.
     .test:stringRoundTrip -> { .is:{ 'hello, world'.asBytes.asString } equalTo:'hello, world' };

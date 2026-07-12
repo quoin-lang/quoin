@@ -1,5 +1,5 @@
 //! The extension handle table — the GC-boundary crux of the out-of-process extension
-//! tier (Tier 1; `docs/FUTURE_EXT_ARCH.md` §2).
+//! tier (Tier 1; `docs/internal/FUTURE_EXT_ARCH.md` §2).
 //!
 //! An extension lives in another process and can never touch the host heap directly: a
 //! `Value<'gc>` carries a lifetime brand that cannot cross a dynamic boundary, and a bare

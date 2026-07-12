@@ -390,7 +390,7 @@ globals-borrowing fallbacks.
 - **Cookies/sessions, multipart, static files, HTTP/2** — post-v1, in roughly that
   order.
 
-## Workers: multi-core serving (docs/CONCURRENCY_ARCH.md §13)
+## Workers: multi-core serving (docs/internal/CONCURRENCY_ARCH.md §13)
 
 ```quoin
 app.serve:':8080' workers:4                     "* thread isolates

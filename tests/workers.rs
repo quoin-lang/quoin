@@ -1,4 +1,4 @@
-//! C2 v1 worker isolates (docs/CONCURRENCY_ARCH.md §5): spawn-by-unit-path,
+//! C2 v1 worker isolates (docs/internal/CONCURRENCY_ARCH.md §5): spawn-by-unit-path,
 //! deep-copy message lanes, join with error transparency — and the L2
 //! property: a worker wait IS a parked task, so `Async.gather:` and
 //! `Async.timeout:do:` compose over it with no new vocabulary.

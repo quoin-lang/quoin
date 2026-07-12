@@ -212,7 +212,7 @@ unsafe impl<'gc> Collect<'gc> for NativeFunc {
 
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
-/// FIXED LAYOUT (the window-arena contract, docs/WINDOW_ARENA_ARCH.md §2.1):
+/// FIXED LAYOUT (the window-arena contract, docs/internal/WINDOW_ARENA_ARCH.md §2.1):
 /// `#[repr(C, u64)]` — tag qword at offset 0, payload qword at offset 8,
 /// 16 bytes total (pinned by `value_layout_facts`). Compiled code reads and
 /// writes slots natively against this layout; the scalar discriminants
@@ -1049,7 +1049,7 @@ pub struct NativeMethodDef {
     /// compile-time annotation — the VM never reads it; it flows to `ClassSig.method_returns`
     /// via `describe_class`. Set opt-in through the `.returns(..)` builder modifier.
     pub ret_type: Option<String>,
-    /// Reference-doc text (docs/DOCS_ARCH.md §5): first line is the summary, the rest the
+    /// Reference-doc text (docs/internal/DOCS_ARCH.md §5): first line is the summary, the rest the
     /// body. Never consulted at dispatch; surfaced via `describe_class` and `qn doc`. Set
     /// through the `.doc(..)` builder modifier — the native counterpart of the `"*` block a
     /// Quoin method carries in its source.
@@ -1187,7 +1187,7 @@ impl NativeClassBuilder {
     }
 
     /// Attach reference-doc text to the most-recently-registered method
-    /// (docs/DOCS_ARCH.md §5) — the native counterpart of the `"*` block above a Quoin
+    /// (docs/internal/DOCS_ARCH.md §5) — the native counterpart of the `"*` block above a Quoin
     /// method. First line is the summary; the rest is the body. Composes with `.returns(..)`
     /// in either order; no-op if no method was registered yet.
     pub fn doc(mut self, text: &str) -> Self {
@@ -1314,7 +1314,7 @@ mod tests {
         );
     }
 }
-/// The VM's slot stack (docs/WINDOW_ARENA_ARCH.md §2.2): a Vec with a
+/// The VM's slot stack (docs/internal/WINDOW_ARENA_ARCH.md §2.2): a Vec with a
 /// `#[repr(C)]` HEAD at a stable address — compiled code reads `(ptr, len)`
 /// through the head (passed via the raw ABI beside fuel/depth/epoch) and
 /// does native bounds-checked slot loads/stores against `Value`'s fixed
@@ -1366,7 +1366,7 @@ impl<'gc> SlotStack<'gc> {
     }
 
     /// The A5 canary: every extern helper that can grow the stack must
-    /// sync before returning into native code (docs/WINDOW_ARENA_ARCH.md
+    /// sync before returning into native code (docs/internal/WINDOW_ARENA_ARCH.md
     /// §5). `slot_write` asserts this in debug builds on every compiled
     /// slot write, so a missed exit-sync fails the corpus loudly instead
     /// of reading a reallocated-away buffer.

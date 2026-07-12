@@ -201,7 +201,7 @@ use std:web/*
 
 "* Handler-side fan-out composes with the concurrency library: a handler is
 "* just code in a Task, so Plan trees await inside it — the official idiom
-"* for aggregating backends (docs/WEB_ARCH.md).
+"* for aggregating backends (docs/internal/WEB_ARCH.md).
 (TestSuite.new:{ var name = 'WebPlan' }).add:{
     .test:
     planFanOutInsideAHandler -> {

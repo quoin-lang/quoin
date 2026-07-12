@@ -776,7 +776,7 @@ var results = Join.all:#(
 
 ### 13.5b First consumer: the web framework
 
-`[Web]App.serve:workers:` (docs/WEB_ARCH.md workers) consumes the stack
+`[Web]App.serve:workers:` (docs/internal/WEB_ARCH.md workers) consumes the stack
 end to end: requests ship as DATA over worker lanes (the pure `handle:`
 pipeline runs in pool isolates — sockets never cross), provisioning is
 the same-unit model via the `VM.unit` native (a pool worker re-runs the

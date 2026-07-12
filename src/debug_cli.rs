@@ -9,7 +9,7 @@
 //! Commands: control + breakpoints (`$continue`/`$step`/`$next`/`$finish`/`$break`/`$delete`/
 //! `$quit`, Slice 3a); inspection + source (`$frames`/`$up`/`$down`/`$locals`/`$list`/
 //! `$source`, 3b); and `$print` / bare-expression eval-in-frame (3c). See
-//! `docs/DEBUGGER_ARCH.md`.
+//! `docs/internal/DEBUGGER_ARCH.md`.
 
 use crate::debug::DebugAction;
 use crate::vm::VmState;

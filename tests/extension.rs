@@ -672,7 +672,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes("qn_ext_vector_python_test.qn", &script);
 }
 
-/// Slice 1 of extension packaging (`docs/EXT_PACKAGING.md`): `Extension loadPackage:` loads a
+/// Slice 1 of extension packaging (`docs/internal/EXT_PACKAGING.md`): `Extension loadPackage:` loads a
 /// *folder* — an `extension.toml` (launch spec + namespace) plus an optional `init.qn` of Quoin
 /// glue. The `ext_vector` fixture is packaged here with namespace `Vec` and an `init.qn` that
 /// reopens the installed class to add a convenience method. Proves: classes install **namespaced**
@@ -728,7 +728,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     let _ = std::fs::remove_dir_all(&pkg_dir);
 }
 
-/// Slice 2 of extension packaging (`docs/EXT_PACKAGING.md` §5): `use <pkg>:*` resolves a named
+/// Slice 2 of extension packaging (`docs/internal/EXT_PACKAGING.md` §5): `use <pkg>:*` resolves a named
 /// extension package on the search path to synthesized `Extension.loadPackage:` glue. The
 /// `ext_vector` fixture is dropped as `vectors/` under a temp `$QUOIN_PATH` root; `use vectors:*`
 /// then spawns it, installs `[Vec]Vector`, and runs the package's init.qn — all driven by the `use`

@@ -5,10 +5,8 @@ import sys
 import os
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..",
-                                "code", "building_blocks_vm", "sdk", "python"))
-# Fall back to absolute
-sys.path.insert(0, "/Users/damon/code/building_blocks_vm/sdk/python")
+REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+sys.path.insert(0, os.path.join(REPO_ROOT, "sdk", "python"))
 from quoin_ext import serve
 
 

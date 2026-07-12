@@ -1,4 +1,4 @@
-//! `Array` — a typed, contiguous numeric array (Tier 1 data plane; see `docs/FUTURE_EXT_ARCH.md`
+//! `Array` — a typed, contiguous numeric array (Tier 1 data plane; see `docs/internal/FUTURE_EXT_ARCH.md`
 //! §6/§7). Slice 6a is the **value type**: a homogeneous column of `Float64` or `Int64` held as a
 //! single buffer behind a native-state handle, **distinct from `List`** — it is never exploded
 //! into per-element `Value`s. The buffer is Apache Arrow's non-nullable primitive layout

@@ -1,8 +1,8 @@
 # The outcall seam: three fixes on one branch
 
-*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED**, merged to main via PR #61 —
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED**, merged to main via PR 61 —
 `perf/ic-direct-calls` is history, not a live branch. The doc's closing line "D3 remains the
-recorded future arc" is stale: D3 has since shipped too (see `docs/DIRECT_CALLS_ARCH.md`).*
+recorded future arc" is stale: D3 has since shipped too (see `docs/internal/DIRECT_CALLS_ARCH.md`).*
 
 *Detail: F1 + F2 + D1 + D2 SHIPPED on `perf/ic-direct-calls` (base
 `449dc84`). Cumulative: **btrees −13.8%, richards −13.9%, combinators
@@ -138,7 +138,7 @@ noise; corpus ×5 per slice; canary healthy.
 
 ### D3 (recorded, likely its own arc) — native direct inner calls
 
-Detailed implementation plan: **docs/DIRECT_CALLS_ARCH.md** (D2.5
+Detailed implementation plan: **docs/internal/DIRECT_CALLS_ARCH.md** (D2.5
 interior specialization + the D3 direct-call tier: warmth-triggered
 retranslation, baked guards, windowless-first tiering).
 

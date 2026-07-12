@@ -1,7 +1,7 @@
 # Release prep — v0.1.0 "public preview"
 
 Working checklist for bringing Quoin to a releasable state. Assessment date
-2026-07-08, on `chore/release-prep` (stacked on `fix/bug-hunt`, PR #77).
+2026-07-08, on `chore/release-prep` (stacked on `fix/bug-hunt`, PR 77).
 
 ## Goal: definition of done
 
@@ -20,7 +20,10 @@ A stranger with no context can:
 Out of scope for v0.1 (document as experimental): the extension system as an
 *installable* surface (`quoin_packages/adbc` points at a relative pre-built
 binary; `numpy` assumes an ambient Python env), the Python SDK on PyPI,
-LSP/VSCode tooling, Windows.
+LSP/VSCode tooling, Windows. Decided 2026-07-12: `crates/adbc` is deferred
+with the rest of the extension surface — the release CI does NOT build or
+ship it, and nothing extension-facing is advertised until the ext API
+releases post-v0.1.
 
 ## Tier 1 — engineering blockers
 
@@ -212,9 +215,21 @@ Tier 2 work builds toward it:
   tests and reported green; `--workspace` runs all 585. The 132 it skipped were
   all of `quoin-syntax`, `quoin-fmt`, `quoin-ext` and `quoin-ext-proto` —
   including every parser test written for the `#(-1 -2)` fix.
+- [ ] **Move the repo to `quoin-lang/quoin`** (prep on `release/v0.1-prep`; unblocks
+  the two DEFERRED items below). Tree scrub done on that branch: the old working-copy
+  name is gone from tracked files (vim README install paths; the two audit ext
+  fixtures resolve `sdk/python` relative to `__file__` now), `.idea/` is untracked
+  and gitignored, and PR references are written `PR N` so GitHub can't auto-link
+  them against the new repo's *own* future PR numbers. The move itself, still to do:
+  force-push the complete history over the placeholder (`main` only — no old feature
+  branches, no `pre-resign` tag), repoint local `origin`, archive the old private
+  repo. History ships unrewritten: the old name survives only in one commit message
+  and a few historic blobs, as a bare directory name with no account attached.
 - [ ] **DEFERRED until the repo moves org.** CI: macOS runner, `cargo fmt --check`
-  + clippy, doc-example harness, dependency caching, build `crates/adbc`. Swap
-  `cargo test` for `cargo nextest run` (see below) — ~4× less wall time.
+  + clippy, doc-example harness, dependency caching. Swap `cargo test` for
+  `cargo nextest run` (see below) — ~4× less wall time. (`crates/adbc` was on
+  this list; dropped 2026-07-12 — deferred past v0.1 with the extension
+  surface, see "Out of scope" above.)
 - [ ] **DEFERRED until the repo moves org.** Release workflow producing binaries
   (macOS arm64 + Linux x86_64). Whenever it is written: it must smoke-test the
   built binary **from outside the source tree** (`cd $(mktemp -d) && qn -e …`),
@@ -224,7 +239,7 @@ Tier 2 work builds toward it:
 - [x] `CHANGELOG.md` (`55bade1`). Heading is dated at tag time.
 - [x] Status-stamp the docs (`bfd59ca`). Every file under `docs/` now opens with a
   Status line from a fixed vocabulary, verified against the tree rather than from
-  memory, and `docs/README.md` splits the user-facing reference from the internal
+  memory, and `docs/internal/README.md` splits the user-facing reference from the internal
   design notes. Five docs made **false** claims — `DEBUGGER_ARCH` ("No debugger
   code exists yet"), `EXT_PACKAGING` ("not built"), `DIRECT_CALLS_ARCH` and
   `WINDOW_ARENA_ARCH` ("no slices implemented"), `TYPED_DEVIRT_ARCH` ("before any

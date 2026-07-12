@@ -3,7 +3,7 @@
 "* only — applying these to non-numbers errors at the underlying arithmetic. Empty collections
 "* return nil (mean/median/variance/stddev/percentile:/mode); `modes` returns an empty list.
 "* Design decisions (sample vs population, interpolation, tie handling) are in
-"* docs/STDLIB_NUMBERS.md. Guards use `^^` (non-local return) since they sit inside `if:`/`else:`
+"* docs/internal/STDLIB_NUMBERS.md. Guards use `^^` (non-local return) since they sit inside `if:`/`else:`
 "* blocks; a plain `^` would only exit the block.
 Iterate <-- {
     "* Arithmetic mean. Forces Double division so integer inputs don't truncate.

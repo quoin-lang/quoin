@@ -134,11 +134,11 @@ impl FsResolver {
     }
 
     /// Roots searched for a named package `<name>/`: `./quoin_packages/` first, then each entry of
-    /// `$QUOIN_PATH` (platform path-separated). `docs/EXT_PACKAGING.md` §6 — drop a folder on a
+    /// `$QUOIN_PATH` (platform path-separated). `docs/internal/EXT_PACKAGING.md` §6 — drop a folder on a
     /// search path; no install/registry yet.
     ///
     /// Deliberately CWD-relative rather than `self_root`-relative: extension packaging is deferred
-    /// past v0.1 (`docs/RELEASE_PREP.md`), and following the script's directory would silently
+    /// past v0.1 (`docs/internal/RELEASE_PREP.md`), and following the script's directory would silently
     /// change where a script run from elsewhere finds its extensions.
     fn package_roots(&self) -> Vec<PathBuf> {
         let mut roots = vec![PathBuf::from("quoin_packages")];

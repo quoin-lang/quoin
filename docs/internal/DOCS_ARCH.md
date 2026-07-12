@@ -24,7 +24,7 @@ their docs serve source readers only. Remaining: phase 3 (doctests), extension-m
 docs.*
 
 *The three forks are settled: comment docs over a `.doc:` authoring API, plain adjacency over
-a new doc sigil, HTML + JSON output. Companion to `docs/INTROSPECTION.md` (the read-only
+a new doc sigil, HTML + JSON output. Companion to `docs/internal/INTROSPECTION.md` (the read-only
 surface this rides on). The language *reference book* (`docs/language/`, RELEASE_PREP Tier 2)
 is a separate, hand-written artifact; this system generates the per-class API reference that
 book links into.*
@@ -120,8 +120,8 @@ docstring-quality. Parsing Rust source (`syn` / rustdoc JSON) to harvest them au
 rejected: heavy, brittle, and impossible from an installed binary.
 
 **Extensions** get the pipeline for free once `ClassDecl` (the manifest an extension returns at
-spawn) gains optional per-class and per-selector doc strings — this is deferred decision #7
-from `docs/EXT_PACKAGING.md`, and this section is its design: manifest → `install_ext_class` →
+spawn) gains optional per-class and per-selector doc strings — this is deferred decision 7
+from `docs/internal/EXT_PACKAGING.md`, and this section is its design: manifest → `install_ext_class` →
 the same class metadata → `describe_class`. Ship it when a bundled extension wants docs.
 
 ## 6. Runtime query API — lazy, read-only

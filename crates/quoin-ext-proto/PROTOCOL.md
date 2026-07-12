@@ -4,7 +4,7 @@ The byte-level contract between the Quoin VM (the **host**) and an out-of-proces
 extension, in either implementation language. The reference codecs are
 `src/codec.rs` (Rust, hand-rolled, dependency-free) and the Python SDK
 (`sdk/python/quoin_ext`, on the C `msgpack` package). Architecture rationale lives in
-`docs/FUTURE_EXT_ARCH.md`; this file is only the wire.
+`docs/internal/FUTURE_EXT_ARCH.md`; this file is only the wire.
 
 Version 1 was a FlatBuffers envelope with negotiated MessagePack payloads; it is retired.
 Version 2 is MessagePack end to end: any language with a MessagePack library can

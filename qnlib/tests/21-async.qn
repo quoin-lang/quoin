@@ -1,7 +1,7 @@
 "* These suites (and the rest) are expected to stay green under a sweep of
 "* `QN_SCHED_STRESS=<seed>` runs, which preempt at every cooperative yield and
 "* pick ready tasks at random — exercising the per-task state swap and a wide
-"* range of interleavings. See `docs/ASYNC_ARCH.md` and `src/tuning.rs`.
+"* range of interleavings. See `docs/internal/ASYNC_ARCH.md` and `src/tuning.rs`.
 (TestSuite.new:{ var name = 'Async' }).add:{
     "* Stage 1 async I/O: `Async.sleep:` parks the running fiber via an AwaitIo
     "* suspension and resumes with a value, all driven by the async IoBackend.

@@ -1,5 +1,5 @@
 //! Method inlining (Phase 5): splicing a provably-monomorphic callee body at the call site
-//! instead of dispatching. See docs/TYPE_SYSTEM_ARCH.md.
+//! instead of dispatching. See docs/internal/TYPE_SYSTEM_ARCH.md.
 
 use super::*;
 

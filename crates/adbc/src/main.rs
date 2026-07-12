@@ -1,7 +1,7 @@
 //! `adbc` — Quoin's ADBC database extension (out-of-process, out-of-core). See `DESIGN.md`.
 //!
 //! The class chain (declared here with *simple* names; the `adbc` package installs them under the
-//! `[ADBC]` namespace — see `quoin_packages/adbc/extension.toml` and `docs/EXT_PACKAGING.md`): `Database` (open
+//! `[ADBC]` namespace — see `quoin_packages/adbc/extension.toml` and `docs/internal/EXT_PACKAGING.md`): `Database` (open
 //! SQLite / PostgreSQL) → `connect` → `Connection` (`query:` / `query:params:` → a streaming
 //! `ResultSet`; `execute:` / `execute:params:` → rows-affected; `prepare:` → a reusable `Statement`;
 //! `autocommit:` / `commit` / `rollback`), with the Arrow<->DataValue value mapping for both results

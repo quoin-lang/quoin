@@ -1,4 +1,4 @@
-//! Process backing (docs/CONCURRENCY_ARCH.md §13.1): the same lanes with a
+//! Process backing (docs/internal/CONCURRENCY_ARCH.md §13.1): the same lanes with a
 //! pump + child `qn worker-serve` on the other end. Covers data round-trips,
 //! the block refusal in BOTH directions, mixed thread/process psTree,
 //! process-backed services, and boot-failure contracts.

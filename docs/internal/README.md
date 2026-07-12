@@ -2,7 +2,7 @@
 
 ## Start here
 
-The **[language reference](language/)** is the user-facing documentation: syntax, objects,
+The **[language reference](../language/)** is the user-facing documentation: syntax, objects,
 blocks, errors, concurrency, and the library reference.
 
 - [`ENV_FLAGS.md`](ENV_FLAGS.md) — every environment variable `qn` reads, user-facing and

@@ -1,4 +1,4 @@
-# The `numpy` extension package — a `use`-able folder (docs/EXT_PACKAGING.md). From the repo root
+# The `numpy` extension package — a `use`-able folder (docs/internal/EXT_PACKAGING.md). From the repo root
 # `use numpy:*` loads it (the resolver synthesizes `Extension loadPackage: '<this-dir>'`).
 #
 # The extension is a Python process wrapping real NumPy (sdk/python SDK over the extension wire

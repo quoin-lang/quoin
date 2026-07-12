@@ -4,7 +4,7 @@
 //! `qnlib/` is compiled into the binary: the prelude, the test framework, and the
 //! `core/` `net/` `web/` trees. Everything else in `qnlib/` (the language's own test
 //! suite, benchmarks, stress corpora, presentation) is a source-tree feature and
-//! stays on disk — see `docs/RELEASE_PREP.md`.
+//! stays on disk — see `docs/internal/RELEASE_PREP.md`.
 //!
 //! The table is generated rather than pulled in with `include_dir!` for two reasons:
 //! it needs no dependency, and it lets us emit an exact `rerun-if-changed` per file

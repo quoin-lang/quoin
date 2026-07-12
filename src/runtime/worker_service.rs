@@ -1,4 +1,4 @@
-//! `WorkerService` — L4 of the concurrency stack (docs/CONCURRENCY_ARCH.md
+//! `WorkerService` — L4 of the concurrency stack (docs/internal/CONCURRENCY_ARCH.md
 //! §10): host a class in a dedicated worker isolate and get a PROXY whose
 //! ordinary method sends become RPC over the worker lanes. Sticky state,
 //! serialized access — an actor, effectively.
@@ -296,7 +296,7 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
              forwards as RPC and parks for the reply, so calls compose with `Async.gather:` \
              / `timeout:do:` like any parked wait.",
         )
-        // Backing is a spawn-time choice by DESIGN (docs/CONCURRENCY_ARCH.md
+        // Backing is a spawn-time choice by DESIGN (docs/internal/CONCURRENCY_ARCH.md
         // §10): 'thread' is this v1; 'process' — the sanctioned escape from
         // the macOS cluster ceiling for compute-heavy services — is the
         // extension wire verbatim and lands separately. Reserve the surface,

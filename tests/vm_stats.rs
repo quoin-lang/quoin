@@ -1,4 +1,4 @@
-//! `VM.stats` / `VM.aotRefusals` — the AOT coverage counters (docs/AOT_ARCH.md
+//! `VM.stats` / `VM.aotRefusals` — the AOT coverage counters (docs/internal/AOT_ARCH.md
 //! observability): compiled totals, distinct refusals/skips with per-kind
 //! counts, and the per-member drill-down. Run under `QN_AOT_WARM=1` so lazily
 //! tiered members compile on first use inside the script.

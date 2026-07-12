@@ -19,7 +19,7 @@ impl Compiler {
         // op falls back to the real send if the runtime receiver isn't the expected native state.
         // A checked collection (`List(Integer)`) is its bare type at runtime; the
         // ops' interpreter arms carry the tag gate, so tagged receivers keep the
-        // fast path (docs/GENERICS_ARCH.md §6).
+        // fast path (docs/internal/GENERICS_ARCH.md §6).
         match (self.static_type(subject), selector, num_args) {
             (Type::List | Type::ListOf(_), "at:", 1) => Some(Instruction::ListGet),
             (Type::List | Type::ListOf(_), "at:put:", 2) => Some(Instruction::ListSet),
@@ -412,7 +412,7 @@ impl Compiler {
         }
     }
 
-    /// M2 fused instantiation (docs/MATERIALIZATION_ARCH.md): compile
+    /// M2 fused instantiation (docs/internal/MATERIALIZATION_ARCH.md): compile
     /// `X.new:{ f1=e1; …; fn=en }` on the plain-config shape into the guarded
     /// dual form — the option-C pattern applied to the instantiation seam:
     ///
@@ -690,7 +690,7 @@ impl Compiler {
         Ok(true)
     }
 
-    /// A literal block acceptable for `each:` fusion (B1, docs/BLOCK_AOT_ARCH.md §3): at
+    /// A literal block acceptable for `each:` fusion (B1, docs/internal/BLOCK_AOT_ARCH.md §3): at
     /// most one parameter, no name / header decls / decl-block, no top-level local
     /// declaration (it would splice a binding into the method scope), and nothing
     /// anywhere in its tree the fusion would mis-bind or escape (`each_fusion_blocker`).
@@ -783,7 +783,7 @@ impl Compiler {
         }
     }
 
-    /// B1 (docs/BLOCK_AOT_ARCH.md §3): fuse `recv.each:{ |x| … }` into a guarded native
+    /// B1 (docs/internal/BLOCK_AOT_ARCH.md §3): fuse `recv.each:{ |x| … }` into a guarded native
     /// index loop. The hot path — a native-List receiver, for which sealed `List#each:`
     /// fully determines dispatch — runs the block body spliced INLINE in the method
     /// frame: no closure, no per-element frame/env/send, captures are the frame's own

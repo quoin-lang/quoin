@@ -426,7 +426,7 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
              walk it; the REPL's `$ps` shows the same snapshot as a table.",
         )
         // `VM.psTree` — `VM.ps` plus each worker row's 'ps' filled with the
-        // worker's OWN tree, recursively (docs/CONCURRENCY_ARCH.md §13.4):
+        // worker's OWN tree, recursively (docs/internal/CONCURRENCY_ARCH.md §13.4):
         // one control request per worker (its driver answers between task
         // resumes), bounded deadline, 'unresponsive' for the silent.
         // Pull-based: the whole topology costs exactly one call.
@@ -498,7 +498,7 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
         .doc(
             "`VM.ps` plus each worker row's 'ps' slot filled with that worker's OWN tree, \
              recursively -- the whole process topology in one call \
-             (docs/CONCURRENCY_ARCH.md). Each worker answers between task resumes under a \
+             (docs/internal/CONCURRENCY_ARCH.md). Each worker answers between task resumes under a \
              bounded deadline; a silent one reads 'unresponsive'.",
         )
         // `VM.unit` — the ENTRY unit this VM runs (canonicalized path), nil

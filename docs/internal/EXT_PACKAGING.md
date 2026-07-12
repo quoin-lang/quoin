@@ -7,12 +7,12 @@
 Tests: `src/packages_tests.rs`, `qnlib/tests/43-adbc.qn`. Package roots are resolved against the
 CWD, not the script — see `FsResolver::package_roots`. The v1 scope below is what got built.*
 
-Companion to `docs/FUTURE_EXT_ARCH.md` (the extension protocol / runtime) and `docs/USE_ARCH.md`
+Companion to `docs/internal/FUTURE_EXT_ARCH.md` (the extension protocol / runtime) and `docs/internal/USE_ARCH.md`
 (the `use` / package-resolution machinery this hooks into).
 
 ## 1. Goal
 
-An out-of-process extension (`docs/FUTURE_EXT_ARCH.md`) is currently loadable only by a manual
+An out-of-process extension (`docs/internal/FUTURE_EXT_ARCH.md`) is currently loadable only by a manual
 runtime call — `Extension spawn: '<binary>'` — which spawns the subprocess and installs the classes
 it provides. **Packaging** makes a third-party extension a **folder** that loads like any other Quoin
 package:
@@ -28,7 +28,7 @@ The author ships a directory; the consumer drops it on a search path and `use`s 
 
 ## 2. Why this fits cleanly
 
-The `use` system already does the hard parts (`docs/USE_ARCH.md`, `src/packages.rs`,
+The `use` system already does the hard parts (`docs/internal/USE_ARCH.md`, `src/packages.rs`,
 `src/runtime/runtime.rs`):
 
 - **`use` executes code on import.** A unit is resolved to source text and *run* in a nested frame.
@@ -36,7 +36,7 @@ The `use` system already does the hard parts (`docs/USE_ARCH.md`, `src/packages.
   of import — no new "on-import hook" is needed.
 - **Resolution is a pluggable seam.** `PackageResolver` (`src/packages.rs`) maps `(package, path)` to
   source; the VM never touches `std::fs`. **Named packages (`vectors:`) return `None` today** — the
-  explicit, reserved hook for exactly this (`docs/USE_ARCH.md`: "manifest/fetch/versions slot in
+  explicit, reserved hook for exactly this (`docs/internal/USE_ARCH.md`: "manifest/fetch/versions slot in
   *behind* resolution without touching syntax").
 - **Run-once** is keyed on `(package, path)` → loading a package twice is idempotent (no double-spawn).
 - **Class installation already exists.** `install_ext_class` (`src/vm.rs`) installs an extension's
@@ -150,18 +150,18 @@ A `README.md` in the package covers human docs for now. The intended direction i
 format that lives in a folder inside the package** (e.g. `doc/`), **not** embedded in the manifest —
 the manifest stays a thin launch/identity descriptor. A structured doc format (and how it surfaces —
 e.g. flowing per-class/per-selector doc strings through the manifest-at-spawn `ClassDecl` into the
-REPL's `$class` / `describe_class` introspection, `docs/INTROSPECTION.md`) is its own project, taken
+REPL's `$class` / `describe_class` introspection, `docs/internal/INTROSPECTION.md`) is its own project, taken
 up separately.
 
 ## 9. Deferred / out of scope (v1)
 
-- **Distribution:** a registry, fetch/download, version resolution, lockfiles. (`docs/USE_ARCH.md`
+- **Distribution:** a registry, fetch/download, version resolution, lockfiles. (`docs/internal/USE_ARCH.md`
   notes these slot in behind the resolver later, no syntax change.)
 - **Per-platform prebuilt binaries** in the launch spec — only meaningful once packages are
   distributed, not hand-placed.
 - **Publishing the SDK crates** (`quoin-ext` + `quoin-ext-proto`) to crates.io, so a third-party
   author writes `quoin-ext = "0.1"` rather than git-depending this repo — the prerequisite for
-  building extensions out-of-tree (§13; Tier 0.5 in `docs/FUTURE_EXT_ARCH.md` §9).
+  building extensions out-of-tree (§13; Tier 0.5 in `docs/internal/FUTURE_EXT_ARCH.md` §9).
 - **Version / protocol-compat enforcement** — the manifest may carry a version; the host doesn't gate
   on it yet.
 - **Auto-respawn / circuit breaker** for a crashed package extension (§7).
@@ -180,7 +180,7 @@ up separately.
 
 ## 10. Trust
 
-Extensions are a **single trust domain** (`docs/FUTURE_EXT_ARCH.md` §4): no per-extension sandbox.
+Extensions are a **single trust domain** (`docs/internal/FUTURE_EXT_ARCH.md` §4): no per-extension sandbox.
 **Installing a third-party extension runs their native code** — `cargo install`-grade trust. v1 makes
 that explicit (and a one-time "this package runs native code, continue?" confirmation is a reasonable
 low-cost guardrail). Cryptographic signatures / supply-chain verification are deferred until the
@@ -265,6 +265,6 @@ binary against their own SDK (`sdk/python/quoin_ext`, …); to the host it is ju
 the whole repo. They are self-contained — they depend on the `quoin` VM crate **not at all** — and on
 nothing else (`quoin-ext-proto` is dependency-free) — so making them external is mechanical: publish both to
 crates.io (turning the path dep into a version dep) so an author can write `quoin-ext = "0.1"`. This is
-the **Tier 0.5 "extract / publish the SDK crates"** item (`docs/FUTURE_EXT_ARCH.md` §9 / build-order
+the **Tier 0.5 "extract / publish the SDK crates"** item (`docs/internal/FUTURE_EXT_ARCH.md` §9 / build-order
 note) — the missing link that makes "out-of-crate" real, and a prerequisite for third-party authoring
 even though the packaging machinery (§3–§7) does not otherwise depend on it.

@@ -365,7 +365,7 @@ fn maybe_print_spec_stats(arena: &mut ReplArena) {
     });
 }
 
-/// In-flight recursive ps collection (docs/CONCURRENCY_ARCH.md §13.3/§13.4):
+/// In-flight recursive ps collection (docs/internal/CONCURRENCY_ARCH.md §13.3/§13.4):
 /// a `PsTree` control request fans out to this worker's own workers and
 /// assembles their subtrees WITHOUT blocking the driver — `progress` runs
 /// once per loop iteration, and a deadline turns silent children into

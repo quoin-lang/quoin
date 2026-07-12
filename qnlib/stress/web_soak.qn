@@ -148,7 +148,7 @@ server.close;
 };
 
 "* --- phase 2: the SAME app served across a 2-worker pool ------------------
-"* (docs/CONCURRENCY_ARCH.md §13 / WEB_ARCH.md workers): requests as data
+"* (docs/internal/CONCURRENCY_ARCH.md §13 / WEB_ARCH.md workers): requests as data
 "* over the lanes, per-worker isolate state, streams materialized.
 var wServer = app.start:'127.0.0.1:0' workers:2;
 var wBase = 'http://127.0.0.1:' + wServer.port;

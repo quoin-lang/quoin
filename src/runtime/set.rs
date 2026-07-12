@@ -22,7 +22,7 @@ use std::mem::transmute;
 pub struct NativeSetState {
     entries: Vec<(u64, Value<'static>)>,
     index: FxHashMap<u64, Vec<u32>>,
-    /// Checked element type (docs/GENERICS_ARCH.md). `None` = untagged.
+    /// Checked element type (docs/internal/GENERICS_ARCH.md). `None` = untagged.
     pub elem: Option<ElemTag>,
 }
 
@@ -245,7 +245,7 @@ pub fn build_set_class() -> NativeClassBuilder {
              #<1 2>.add:2     \"* -> #<1 2>\n\
              ```",
         )
-        // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6) ---
+        // --- checked generics (docs/internal/GENERICS_ARCH.md §4.2/§6) ---
         .sdk_class_method("new", |host, _receiver, _args| {
             Ok(host.new_native_state(
                 host.get_or_create_builtin_class("Set"),

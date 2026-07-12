@@ -342,6 +342,12 @@ source (.qn)  →  parse  →  compile  →  bytecode  →  VM step loop  →  r
                               gc-arena heap · corosensei fibers
 ```
 
+Optimization is layered over that pipeline: the compiler devirtualizes and
+inlines message sends using type annotations and sealed classes, and at runtime
+inline caches and observed-type speculation feed an AOT tier that translates
+hot methods and blocks into compiled frames — so untyped code reaches typed
+speed once its concrete types stabilize.
+
 ### Parser
 
 The parser lives in its own crate,
@@ -447,7 +453,7 @@ wants (call a block, cooperatively yield, resume/yield another fiber, return).
 The runner owns the fiber pointers and performs context switches by saving and
 restoring each fiber's stack and frames.
 
-### The `no_gc_across_yield` lint
+### The yield-safety lints
 
 A subtle hazard: when a fiber suspends, its native Rust stack is frozen, and any
 `Gc<'gc, T>`/`Value<'gc>` living only in a local on that frozen stack is
@@ -459,7 +465,15 @@ To enforce this mechanically, the workspace ships a custom
 [Dylint](https://crates.io/crates/cargo-dylint) lint at
 `lint/no_gc_across_yield/`. It runs as a `LateLintPass`, finds yield points, and
 flags any `'gc`-lifetime local that is held live across a suspend — turning a
-memory-safety invariant into a compile-time check. See `docs/LINTER_DESIGN.md`.
+memory-safety invariant into a compile-time check.
+
+A companion lint, `lint/no_borrow_across_yield/`, guards the other suspend
+hazard: a `RefCell`/`RefLock` borrow guard still alive at a yield point. Any
+other borrow of the same cell — from another task, or re-entrantly from the
+Quoin code the suspended call was running — panics "already borrowed", and the
+guard doesn't have to be *used* after the yield for that to happen, so this
+lint reasons about drop scopes rather than uses. Both lints run under
+`cargo lint` and in CI; see `docs/internal/LINTER_DESIGN.md`.
 
 ### The `qn` CLI
 

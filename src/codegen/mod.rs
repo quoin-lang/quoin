@@ -1,4 +1,4 @@
-//! AOT native compilation of the typed subset (docs/AOT_ARCH.md).
+//! AOT native compilation of the typed subset (docs/internal/AOT_ARCH.md).
 //!
 //! The compiler collects [`AotCandidate`]s — methods of in-unit `sealed!` classes
 //! whose params and return are all scalar (`Integer`/`Double`/`Boolean`) — and the
@@ -129,13 +129,13 @@ pub struct AotCandidate {
     pub params: Vec<AotParam>,
     pub ret: AotRet,
     pub role: AotRole,
-    /// The owner class is OPEN (B2, docs/BLOCK_AOT_ARCH.md §3): the compiled
+    /// The owner class is OPEN (B2, docs/internal/BLOCK_AOT_ARCH.md §3): the compiled
     /// form must contain no direct sibling calls — every send crosses a
     /// dispatch-equivalent seam, so a later reopen simply dispatches to its
     /// new template and the stale entry stops being reachable (the same
     /// per-dispatch minting argument as §6.2's no-deopt case).
     pub open_owner: bool,
-    /// Speculative-AOT (S0, docs/SPECULATIVE_AOT_ARCH.md): `true` per param
+    /// Speculative-AOT (S0, docs/internal/SPECULATIVE_AOT_ARCH.md): `true` per param
     /// whose kind is UNANNOTATED — `params[i]` holds an Obj placeholder and
     /// the runtime profile supplies the real kind at compile time. All-false
     /// for classic annotated candidates.
@@ -250,7 +250,7 @@ pub struct AotEntry {
     /// The body materializes ANY closure (superset of `materializes_nlr`).
     /// `vm.aot.enclosing_env` is consulted only by `make_closure`, so an
     /// entry that never materializes never reads it — `invoke` skips the
-    /// env swap/restore entirely (D2.5a, docs/DIRECT_CALLS_ARCH.md §2).
+    /// env swap/restore entirely (D2.5a, docs/internal/DIRECT_CALLS_ARCH.md §2).
     pub materializes: bool,
     /// The template is CLOSED (no captures/self/`^^`): its closures are
     /// cached per VM (constant-closure promotion), which makes baked
@@ -265,7 +265,7 @@ pub struct AotEntry {
     /// The body computes ANY absolute slot index (`abs_slot` — self reads,
     /// Dyn locals, field helpers, scratch). False = truly windowless: the
     /// entry never dereferences `slot_base`, so a baked W0 edge may pass a
-    /// poison base (D3b, docs/DIRECT_CALLS_ARCH.md §3.2).
+    /// poison base (D3b, docs/internal/DIRECT_CALLS_ARCH.md §3.2).
     pub uses_slot_base: bool,
     /// D2.5b marshaling plan, one i8 per param: for a verbatim-eligible
     /// scalar param (declared Scalar(K), S1 precondition absent or == K)
@@ -277,7 +277,7 @@ pub struct AotEntry {
     pub lane_plan: Box<[i8]>,
 }
 
-/// W0 tier criteria (docs/DIRECT_CALLS_ARCH.md §3.2): a callee a baked
+/// W0 tier criteria (docs/internal/DIRECT_CALLS_ARCH.md §3.2): a callee a baked
 /// direct edge may call with NO window — all-scalar params, scalar ret, no
 /// scratch, never touches its slot window, materializes nothing, and no
 /// direct_self (its redef-epoch gate lives in `entry_gates`, which the
@@ -425,10 +425,10 @@ pub fn bump_redef_epoch() {
 /// tombstone): new dispatches stop minting `AotCall`; call sites whose
 /// inline caches still hold the entry keep failing its precondition and
 /// Bailing — correct, just interpreted.
-/// Mint a D2 outcall-site id (docs/OUTCALL_ARCH.md): the index of this
+/// Mint a D2 outcall-site id (docs/internal/OUTCALL_ARCH.md): the index of this
 /// compiled call site's cell in `VmState::aot_sites`. Monotonic and never
 /// reused; retried translations waste a few — harmless.
-/// D3a (docs/DIRECT_CALLS_ARCH.md §3.3): retained retranslation inputs —
+/// D3a (docs/internal/DIRECT_CALLS_ARCH.md §3.3): retained retranslation inputs —
 /// the candidate (the re-translation source) and the outcall site ids its
 /// first translation minted per bytecode ip. The SAME ids must be reused on
 /// retranslation so the D2 cells and the generic fallback keep working.
@@ -1099,7 +1099,7 @@ fn finish_frame<'gc>(
 /// nil-initialized scratch — all GC-rooted by construction), run the compiled
 /// body, and box the result.
 ///
-/// D1 (docs/OUTCALL_ARCH.md): when the caller already pushed the
+/// D1 (docs/internal/OUTCALL_ARCH.md): when the caller already pushed the
 /// `[receiver, args…]` rooting window (`window = Some(recv_start)` — every
 /// outcall and interpreted send does, A2c/A2d), that window IS the frame's
 /// slot window: nothing is re-pushed but the scratch. The translator's slot

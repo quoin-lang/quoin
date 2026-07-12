@@ -1,4 +1,4 @@
-"* Plan — the join graph (docs/CONCURRENCY_ARCH.md §13.5).
+"* Plan — the join graph (docs/internal/CONCURRENCY_ARCH.md §13.5).
 "*
 "* A Plan is a LAZY spec tree: constructors build it, nothing runs until
 "* `await`. Leaf methods name WHERE the code runs; composites name shape:

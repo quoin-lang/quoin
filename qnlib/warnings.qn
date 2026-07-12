@@ -82,7 +82,7 @@ ArgGallery <- {
     staleHintStaysSilent -> { var x = 5; x = 'now a string'; x.upper }
 }
 
-"* --- generic annotations (G0, checker-only: docs/GENERICS_ARCH.md) ---
+"* --- generic annotations (G0, checker-only: docs/internal/GENERICS_ARCH.md) ---
 "* Malformed generic shapes each get a targeted diagnostic; a declared
 "* class-header type variable (T) is silently in scope for that body.
 GenericGallery(T) <- {

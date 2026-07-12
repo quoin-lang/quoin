@@ -1,4 +1,4 @@
-//! The C1 compute-offload pool (docs/CONCURRENCY_ARCH.md §4): gated codec
+//! The C1 compute-offload pool (docs/internal/CONCURRENCY_ARCH.md §4): gated codec
 //! ops offload to pool threads while the task parks like an IO wait. One
 //! script asserts identical VALUES and identical ERRORS across forced
 //! offload, the kill switch (inline), and defaults — plus concurrency via

@@ -1,5 +1,5 @@
 //! quoin-ext — the **extension-side** SDK for out-of-process Quoin extensions
-//! (Tier 1 of the extension architecture; see `docs/FUTURE_EXT_ARCH.md`).
+//! (Tier 1 of the extension architecture; see `docs/internal/FUTURE_EXT_ARCH.md`).
 //!
 //! An extension is a separate process the Quoin VM spawns and talks to over a unix
 //! domain socket. This crate is the thin per-language client an extension links

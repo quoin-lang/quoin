@@ -17,7 +17,7 @@ use std::rc::Rc;
 /// registry, outside the arena) plus a clone of the VM's reap queue. No `Gc` fields. On
 /// close/collection the fd is reaped: `close` pushes the id directly; the `Drop`
 /// (collection of an un-closed handle) pushes it as the backstop. The driver sync-closes
-/// drained ids. See `docs/ASYNC_ARCH.md`.
+/// drained ids. See `docs/internal/ASYNC_ARCH.md`.
 pub struct NativeSocket {
     id: StreamId,
     reap: Rc<RefCell<Vec<StreamId>>>,

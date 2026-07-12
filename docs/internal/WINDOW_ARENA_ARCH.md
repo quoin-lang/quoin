@@ -6,7 +6,7 @@ access + closure promotion) are on main; `src/value.rs` and `src/vm_tests.rs` ci
 layout contract by name, and `slot_peek`/`slot_set` live in `src/codegen/`. A3 returned the edge
 family's "final verdict" — the remaining crossing removal did not pay — so **A4 (W1 method
 edges) and A5 (hardening) were not built**. Successor to the direct-calls arc
-(docs/DIRECT_CALLS_ARCH.md). Written at `70030c5` as a design; the plan below is what was run.*
+(docs/internal/DIRECT_CALLS_ARCH.md). Written at `70030c5` as a design; the plan below is what was run.*
 
 ## 1. Why: the triple proof
 

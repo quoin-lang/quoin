@@ -1,4 +1,4 @@
-"* Checked generic collections (docs/GENERICS_ARCH.md): runtime element tags.
+"* Checked generic collections (docs/internal/GENERICS_ARCH.md): runtime element tags.
 "* G1 semantics — insertion enforcement, construction, ensure:, introspection,
 "* tag-aware dispatch. Untagged collections are the entire pre-existing world
 "* and must behave exactly as before (the corpus is that regression test).

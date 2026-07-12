@@ -125,7 +125,7 @@ impl Compiler {
         // checks/promotes the initializer against it; un-annotated decls compile plainly.
         let annotated = decl.type_hint.as_ref().map(|h| self.resolve_annotation(h));
         match &annotated {
-            // Annotation-driven tagged literals (docs/GENERICS_ARCH.md §4.2): a
+            // Annotation-driven tagged literals (docs/internal/GENERICS_ARCH.md §4.2): a
             // collection LITERAL initializing a generic-annotated decl constructs
             // tagged — elements verified, tag stamped — instead of being checked
             // against the annotation (which would always mismatch: the bare

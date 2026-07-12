@@ -1,5 +1,5 @@
 //! The static `Type` lattice — the shared substrate for the optimizer (devirtualization
-//! today) and the resolver/checker (Phases 2–3, see docs/TYPE_SYSTEM_ARCH.md). Gradual:
+//! today) and the resolver/checker (Phases 2–3, see docs/internal/TYPE_SYSTEM_ARCH.md). Gradual:
 //! `Any` is the top (an unannotated or un-inferable value — never devirtualized on, never
 //! complained about), `Never` the bottom (a diverging expression).
 //!
@@ -20,7 +20,7 @@ pub enum Type {
     String,
     Nil,
     // Collection / callable builtins. The bare forms are the untagged/any-element
-    // types; the `*Of` forms carry a checked element type (docs/GENERICS_ARCH.md).
+    // types; the `*Of` forms carry a checked element type (docs/internal/GENERICS_ARCH.md).
     List,
     Map,
     Set,
@@ -425,7 +425,7 @@ pub const BUILTIN_CLASS_NAMES: &[&str] = &[
 /// The set of class names known so far during compilation: the builtins plus every class a
 /// unit compiled up to this point has defined. Shared (via `Rc`) across every `Compiler` the
 /// runner and VM spawn, so a later unit "sees" the classes earlier units defined — the basis
-/// for the resolver's `unknown type Foo` diagnostic (docs/TYPE_SYSTEM_ARCH.md Phase 2). The VM
+/// for the resolver's `unknown type Foo` diagnostic (docs/internal/TYPE_SYSTEM_ARCH.md Phase 2). The VM
 /// is single-threaded (gc_arena), so `Rc<RefCell<…>>` is sufficient.
 #[derive(Clone, Debug)]
 pub struct SeenTypes(Rc<RefCell<HashSet<Arc<str>>>>);

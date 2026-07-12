@@ -10,7 +10,7 @@ use crate::vm::VmState;
 
 /// The `Bytes` class — immutable binary data (Stage 3a). The raw `Vec<u8>` lives in
 /// `ObjectPayload::Bytes`; this is the QN-facing surface. Text crosses at the edges
-/// via `String.asBytes` / `Bytes.asString`. See `docs/ASYNC_ARCH.md`.
+/// via `String.asBytes` / `Bytes.asString`. See `docs/internal/ASYNC_ARCH.md`.
 pub fn build_bytes_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Bytes", Some("Object"))
         .construct_with("use Bytes.of: / Bytes.empty (or 'abc'.bytes)")
@@ -225,7 +225,7 @@ pub fn build_bytes_class() -> NativeClassBuilder {
         // decode (ruzstd), all pure Rust. Malformed input throws a catchable ParseError.
         // zstd encode is intentionally absent (no pure-Rust compressor; see compress.rs).
         // Legacy (`&mut VmState`) style rather than the SDK surface: big inputs OFFLOAD
-        // to the compute pool (docs/CONCURRENCY_ARCH.md §4), which parks the task via
+        // to the compute pool (docs/internal/CONCURRENCY_ARCH.md §4), which parks the task via
         // `await_io` — below `QN_COMPUTE_MIN` (or with the pool disabled) they run
         // inline exactly as before.
         .instance_method("decodeGz", |vm, mc, receiver, _args| {

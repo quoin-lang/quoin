@@ -43,7 +43,7 @@ pub struct NativeMapState {
     /// hash → entry indices (buckets are almost always length 1).
     index: FxHashMap<u64, Vec<u32>>,
     /// Checked *value* type (`Map(String V)`).
-    /// `None` = untagged, no checks (docs/GENERICS_ARCH.md).
+    /// `None` = untagged, no checks (docs/internal/GENERICS_ARCH.md).
     pub elem: Option<ElemTag>,
 }
 
@@ -343,6 +343,61 @@ pub(crate) fn map_put_any<'gc>(
     Ok(())
 }
 
+/// `bind:`'s key lookups, one per block parameter, pushing each hit (or nil)
+/// onto the traced value stack. The stack rather than a local Vec because a
+/// non-plain key's user `hash`/`==:` runs (and can yield) inside
+/// `map_get_any` — and could even mutate this map, leaving an already-fetched
+/// value reachable only from this frame.
+fn fetch_bind_args<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    map_val: Value<'gc>,
+    names: Vec<String>,
+) -> Result<(), QuoinError> {
+    for name in names {
+        let str_key = vm.new_string(mc, name.clone());
+        let hit = match map_get_any(vm, mc, map_val, str_key)? {
+            Some(v) => Some(v),
+            None => {
+                let sym_key = vm.new_symbol(mc, name);
+                map_get_any(vm, mc, map_val, sym_key)?
+            }
+        };
+        let v = hit.unwrap_or_else(|| vm.new_nil(mc));
+        vm.stack.push(v);
+    }
+    Ok(())
+}
+
+// `block` is args[0]: rooted for the whole call via `active_native_args`, and
+// gc-arena doesn't move objects, so this copy stays valid across the user-code
+// yields inside `map_get_any`. The fetched values ride the traced value stack
+// — see `fetch_bind_args`.
+#[allow(no_gc_across_yield)]
+fn map_bind<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let block = crate::arg!(args, Block, 0);
+    // The lookup runs backward, parameter → key (a Map key need not be
+    // an identifier, but every identifier is a candidate key): the
+    // param's name as a String key first, as a Symbol key second.
+    let names: Vec<String> = block
+        .template
+        .param_syms
+        .iter()
+        .map(|s| s.as_str().to_string())
+        .collect();
+    let base = vm.stack.len();
+    let fetched = fetch_bind_args(vm, mc, receiver, names);
+    let block_args = vm.stack[base..].to_vec();
+    vm.stack.truncate(base);
+    fetched?;
+    vm.execute_block(mc, block, block_args, None)
+}
+
 impl PrettyPrint for NativeMapState {
     fn pp_shape<'gc>(&self) -> PpShape<'gc> {
         // Insertion order. String keys keep their raw text (the renderer
@@ -429,31 +484,7 @@ pub fn build_map_class() -> NativeClassBuilder {
              #{'a': 1 'b': 2}.at:'a'     \"* -> 1\n\
              ```",
         )
-        .instance_method("bind:", |vm, mc, receiver, args| {
-            let block = crate::arg!(args, Block, 0);
-            // The lookup runs backward, parameter → key (a Map key need not be
-            // an identifier, but every identifier is a candidate key): the
-            // param's name as a String key first, as a Symbol key second.
-            let names: Vec<String> = block
-                .template
-                .param_syms
-                .iter()
-                .map(|s| s.as_str().to_string())
-                .collect();
-            let mut block_args = Vec::with_capacity(names.len());
-            for name in names {
-                let str_key = vm.new_string(mc, name.clone());
-                let hit = match map_get_any(vm, mc, receiver, str_key)? {
-                    Some(v) => Some(v),
-                    None => {
-                        let sym_key = vm.new_symbol(mc, name);
-                        map_get_any(vm, mc, receiver, sym_key)?
-                    }
-                };
-                block_args.push(hit.unwrap_or_else(|| vm.new_nil(mc)));
-            }
-            vm.execute_block(mc, block, block_args, None)
-        })
+        .instance_method("bind:", map_bind)
         .doc(
             "Destructure into a block: each parameter is looked up as a key — the \
              parameter's name as a String key first, then as a Symbol key — and an absent \
@@ -490,7 +521,7 @@ pub fn build_map_class() -> NativeClassBuilder {
              #{'a': 1 'b': 2}.remove:'a'     \"* -> 1\n\
              ```",
         )
-        // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6): the VALUE type
+        // --- checked generics (docs/internal/GENERICS_ARCH.md §4.2/§6): the VALUE type
         // is generic (`Map(String V)`). ---
         .class_method("new", |vm, mc, _receiver, _args| {
             Ok(vm.new_map(mc, Vec::new()))
@@ -632,23 +663,44 @@ pub fn build_map_class() -> NativeClassBuilder {
             if lhs_len != rhs_len {
                 return Ok(vm.new_bool(mc, false));
             }
-            let entries: Vec<(u64, Value, Value)> = receiver
-                .with_native_state::<NativeMapState, _, _>(|m| m.entries().to_vec())
+            // Snapshot the entries as (key, value) pairs on the traced value
+            // stack, not a local Vec: the per-entry `hash`/`==:` below runs
+            // user code that can yield — and could mutate either map, leaving
+            // snapshot values reachable only from this frame. The cached
+            // hashes are plain data and stay local.
+            let base = vm.stack.len();
+            let hashes: Vec<u64> = receiver
+                .with_native_state::<NativeMapState, _, _>(|m| {
+                    m.entries()
+                        .iter()
+                        .map(|(h, k, v)| {
+                            vm.stack.push(*k);
+                            vm.stack.push(*v);
+                            *h
+                        })
+                        .collect()
+                })
                 .map_err(QuoinError::Other)?;
-            for (h, k, lhs_val) in entries {
-                // Reuse the cached hash — an instance key's `hash` method
-                // ran once at insert, not again per comparison.
-                let Some(idx) = map_find_prehashed(vm, mc, args[0], k, h)? else {
-                    return Ok(vm.new_bool(mc, false));
-                };
-                let rhs_val = args[0]
-                    .with_native_state::<NativeMapState, _, _>(|m| m.value_at(idx))
-                    .map_err(QuoinError::Other)?;
-                if !vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true() {
-                    return Ok(vm.new_bool(mc, false));
+            let eq = (|| -> Result<bool, QuoinError> {
+                for (i, h) in hashes.iter().enumerate() {
+                    // Reuse the cached hash — an instance key's `hash` method
+                    // ran once at insert, not again per comparison.
+                    let k = vm.stack[base + 2 * i];
+                    let Some(idx) = map_find_prehashed(vm, mc, args[0], k, *h)? else {
+                        return Ok(false);
+                    };
+                    let rhs_val = args[0]
+                        .with_native_state::<NativeMapState, _, _>(|m| m.value_at(idx))
+                        .map_err(QuoinError::Other)?;
+                    let lhs_val = vm.stack[base + 2 * i + 1];
+                    if !vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true() {
+                        return Ok(false);
+                    }
                 }
-            }
-            Ok(vm.new_bool(mc, true))
+                Ok(true)
+            })();
+            vm.stack.truncate(base);
+            Ok(vm.new_bool(mc, eq?))
         })
         .doc(
             "Entry-wise equality: true when the other value is a Map of the same size holding, \

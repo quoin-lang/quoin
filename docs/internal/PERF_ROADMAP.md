@@ -111,7 +111,7 @@ already proved this path matters (~21% fib from the hasher swap alone).
 
 ## Tier 2 — the marquee bet: AOT-compile the typed subset
 
-*Full design now in `docs/AOT_ARCH.md` (grounded in the current runtime:
+*Full design now in `docs/internal/AOT_ARCH.md` (grounded in the current runtime:
 candidate selection in the compiler, `template_id`-keyed code registry,
 `Callable::AotFn`, fuel checkpoints via the established native-suspend
 mechanism, and the resume-segment GC rule). The sketch below is the
@@ -199,7 +199,7 @@ richards, combinators, strings, maps, json) and an A/B runner
 (`bench/run.py`). See `bench/README.md`.
 
 Still missing, next in line: an HTTP/web macro-benchmark once the web
-framework (PR #46) merges — that's the workload users will actually feel —
+framework (PR 46) merges — that's the workload users will actually feel —
 and cross-language ports (Python/Ruby) of the six new benches to re-baseline
 the "vs CPython" multiplier beyond fib.
 

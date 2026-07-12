@@ -54,7 +54,7 @@ Two value conventions coexist (noted per flag below):
 
 ### `QN_COMPUTE_THREADS` / `QN_COMPUTE_MIN`
 
-The C1 compute-offload pool (docs/CONCURRENCY_ARCH.md §4): gated CPU-bound
+The C1 compute-offload pool (docs/internal/CONCURRENCY_ARCH.md §4): gated CPU-bound
 native ops on detached buffers — today the `Bytes` codec family
 (`encodeGz`/`decodeGz`/`encodeDeflate`/`decodeDeflate`/`decodeZstd`) — run on
 a small fixed thread pool while the calling task parks like an IO wait, so
@@ -70,7 +70,7 @@ from offloading, so inputs under `QN_COMPUTE_MIN` run inline
 ### `QN_AOT`
 **`0` disables; anything else (or unset) leaves it on.** Read in
 `src/tuning.rs` (`aot_enabled`). The kill switch for the whole native tier
-(docs/AOT_ARCH.md), default ON since v0.3 (PR #52). The interpreter path is
+(docs/internal/AOT_ARCH.md), default ON since v0.3 (PR 52). The interpreter path is
 untouched either way — the compiled registry is a pure overlay — so disabling
 is always safe, and `QN_AOT=0` vs default is the standing parity axis the
 corpus runs under.
@@ -119,7 +119,7 @@ annotated candidates and block templates compile regardless.
 ### `QN_DIRECT_WARM`
 
 Site-hit threshold for the direct-call tier's retranslation queue
-(docs/DIRECT_CALLS_ARCH.md §3.3): a warm AOT-IC site that reaches this
+(docs/internal/DIRECT_CALLS_ARCH.md §3.3): a warm AOT-IC site that reaches this
 many consecutive fast-path hits queues its CALLER for retranslation at
 the next driver boundary. **Unset or `0` = the tier is off.** D3b shipped
 the baked direct edges, but the gate measured net-negative, so the tier
@@ -171,13 +171,13 @@ switch back to the driver (which re-enters the GC arena), so batching amortizes
 it (~2× on compute-bound programs, B0). I/O parks and guest-fiber yields
 suspend deeper in `step` and are unaffected, so responsiveness is preserved.
 Also feeds the compiled tier's fuel budget (checkpoints per
-`docs/AOT_ARCH.md` §5). Forced to 1 under either stress mode. The tuning
+`docs/internal/AOT_ARCH.md` §5). Forced to 1 under either stress mode. The tuning
 harness lives in `profiling/batch-sweep/`.
 
 ### `QN_GC_SLEEP`
 **Float, default 4.0.** Read in `src/vm.rs` (`gc_pacing`). gc-arena pacing
 `sleep_factor` — how much allocation headroom the collector grants between
-collection work (PR #37). Higher = fewer collections, more memory; the default
+collection work (PR 37). Higher = fewer collections, more memory; the default
 was chosen by measurement. Ignored under `QN_GC_STRESS` (see above).
 
 ### `QN_BATCH_STATS`
@@ -220,7 +220,7 @@ and the `use`-fixtures. A bare `./target/debug/qn` uses the embedded copy.
 
 ### `QUOIN_PATH`
 **Colon-separated directories.** Read in `src/packages.rs`. Extra roots searched for extension
-packages, on top of `quoin_packages/` under the CWD (`docs/EXT_PACKAGING.md`).
+packages, on top of `quoin_packages/` under the CWD (`docs/internal/EXT_PACKAGING.md`).
 
 ### `QUOIN_ADBC_<NAME>_PATH`
 **A driver path.** Read in `crates/adbc/src/main.rs`. Per-driver override for the ADBC extension,

@@ -3,8 +3,9 @@
 *Status (verified 2026-07-09 at `dbe188d`): **SHIPPED.** `lint/no_gc_across_yield/` is a real
 Dylint `LateLintPass`, and a companion this document does not mention — `lint/no_borrow_across_yield/`
 — ships alongside it. Both are workspace members registered under `[workspace.metadata.dylint]`,
-run by `cargo lint` and by CI's `lint` job (`no_borrow_across_yield` is deny-level, the other
-advisory). They need the nightly `rustc-private` toolchain they pin themselves, which is why the
+run by `cargo lint` and by CI's `lint` job (both deny-level since 2026-07-12 — warn-level let
+four real findings accumulate unseen behind a green job; audited `#[allow]`s are the escape
+hatch). They need the nightly `rustc-private` toolchain they pin themselves, which is why the
 main `cargo build --workspace` excludes them. Read "Proposed Lint" below as the design that got
 built.*
 

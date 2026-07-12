@@ -1,4 +1,4 @@
-"* AOT parity (docs/AOT_ARCH.md): this file must pass identically with and
+"* AOT parity (docs/internal/AOT_ARCH.md): this file must pass identically with and
 "* without `QN_AOT=1`. `AotSpin` is a v0 compile candidate (sealed, all-scalar
 "* params/returns), so under AOT these methods run as native code — asserting
 "* that arithmetic results, error identity (division by zero), scheduling
@@ -166,7 +166,7 @@ AotNilIf <- {
     }
 }
 
-"* B1 (docs/BLOCK_AOT_ARCH.md): fused each: loops. The literal block is spliced
+"* B1 (docs/internal/BLOCK_AOT_ARCH.md): fused each: loops. The literal block is spliced
 "* into the method frame behind a native-List guard - no closure, no per-element
 "* frame. Semantics pinned in both modes: captured-local mutation, ^^ escape,
 "* zero-param bodies, the stale loop bound, the cold path (a non-List receiver

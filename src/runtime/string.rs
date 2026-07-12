@@ -119,7 +119,7 @@ pub fn build_string_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, out))
         })
         // asBytes -> the string's UTF-8 bytes as a `Bytes` (infallible). The inverse
-        // is `Bytes.asString` (which can fail). See `docs/ASYNC_ARCH.md`.
+        // is `Bytes.asString` (which can fail). See `docs/internal/ASYNC_ARCH.md`.
         .instance_method("asBytes", |vm, mc, receiver, _args| {
             let s = recv!(receiver, String);
             Ok(vm.new_bytes(mc, s.as_bytes().to_vec()))
@@ -437,7 +437,7 @@ pub fn build_string_class() -> NativeClassBuilder {
              in the caller's scope and splice in the result's `.s` rendering. A malformed \
              expression raises a catchable ParseError.\n\n\
              ```\n\
-             'x = %{1 + 2}'.mod     \"* -> x = 3\n\
+             %'x = %{1 + 2}'     \"* -> x = 3\n\
              ```",
         )
         .instance_method("length", |vm, mc, receiver, _args| {

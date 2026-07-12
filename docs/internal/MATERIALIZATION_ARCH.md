@@ -1,7 +1,7 @@
 # Cheap materialization: fusion first, thin closures second
 
 *Status: ARC COMPLETE — M1 + M2 + M3 SHIPPED on
-`perf/cheap-materialization` (stacked on `perf/alloc-churn`, PR #59).
+`perf/cheap-materialization` (stacked on `perf/alloc-churn`, PR 59).
 M1 (alpha-renamed fusion): btrees −31.8%, richards −14.4%, json −2.6%.
 M2 (fused instantiation): btrees a further −34.6%. M3 (cold-span gate
 lift): combinators −16.3%. Arc cumulative: **btrees 2.31×,
@@ -21,7 +21,7 @@ experiments in `profiling/cheap-materialization/`.*
 
 ## 1. Why: the measured shape
 
-The alloc-churn arc (docs/ALLOC_ARCH.md §A3) ended on a data point: with
+The alloc-churn arc (docs/internal/ALLOC_ARCH.md §A3) ended on a data point: with
 the recursion gate lifted, compiling btrees' `makeTree` made the bench
 **+7% SLOWER** (re-reproduced this pass: 0.95s → 1.02s interleaved
 10-run). Every tree node paid a full-frame snapshot materialization

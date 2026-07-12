@@ -11,14 +11,14 @@ use gc_arena::Gc;
 /// primitive for now: it runs a list of zero-arg blocks as concurrent tasks whose
 /// I/O overlaps, and returns their results as a list once all complete. The
 /// underlying machinery is distinct from guest `Fiber`s (asymmetric coroutines);
-/// the surfaced API will be revisited as it grows. See `docs/ASYNC_ARCH.md`.
+/// the surfaced API will be revisited as it grows. See `docs/internal/ASYNC_ARCH.md`.
 pub fn build_async_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Async", Some("Object"))
         .abstract_class()
         .class_doc(
             "Structured concurrency over the task scheduler: run blocks as concurrent tasks \
              whose I/O overlaps (`gather:`), park without blocking other tasks (`sleep:`), \
-             and put a deadline on anything (`timeout:do:`). See docs/ASYNC_ARCH.md.",
+             and put a deadline on anything (`timeout:do:`). See docs/internal/ASYNC_ARCH.md.",
         )
         // `Async.gather:[ {…}, {…} ] -> list` — spawn one task per block, overlap
         // their I/O, and return the results in order. Propagates the first error.
@@ -54,7 +54,7 @@ pub fn build_async_class() -> NativeClassBuilder {
              ```",
         )
         // `Async.sleep:` — park the running fiber via the async IoBackend, without blocking other
-        // fibers (Stage 1 — see docs/ASYNC_ARCH.md). Accepts a bare ms count or a Duration; nil.
+        // fibers (Stage 1 — see docs/internal/ASYNC_ARCH.md). Accepts a bare ms count or a Duration; nil.
         .typed_class_method("sleep:", &["Integer"], |vm, mc, _receiver, args| {
             vm.await_io(IoRequest::Sleep {
                 ms: arg!(args, Int, 0).max(0) as u64,

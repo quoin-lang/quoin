@@ -1,4 +1,4 @@
-//! Runtime helpers called from compiled code (docs/AOT_ARCH.md v0.2).
+//! Runtime helpers called from compiled code (docs/internal/AOT_ARCH.md v0.2).
 //!
 //! Compiled frames keep every GC value in a *slot window* on `vm.stack`
 //! (rooted by construction — registers carry only scalars and slot indices),
@@ -788,7 +788,7 @@ unsafe extern "C" fn outcall_impl(
     let site = (ip_site >> 32) as u32;
     let receiver = decode(vm, recv_kind, recv_bits);
     let n = argc as usize;
-    // D2 fast path (docs/OUTCALL_ARCH.md), receiver phase FIRST — a site
+    // D2 fast path (docs/internal/OUTCALL_ARCH.md), receiver phase FIRST — a site
     // whose target is not compiled (native, polymorphic) pays a few loads
     // here and then takes the classic path untouched. On a receiver hit the
     // lanes decode once into a fixed window buffer (compiled sites cap at 8),
@@ -1023,7 +1023,7 @@ pub(super) unsafe extern "C" fn load_global(
     }
 }
 // ============================================================
-// A3 exit-sync wrappers (docs/WINDOW_ARENA_ARCH.md §5): these helpers can
+// A3 exit-sync wrappers (docs/internal/WINDOW_ARENA_ARCH.md §5): these helpers can
 // GROW vm.stack (their own window pushes, or transitively via interpreted
 // dispatch), so the lazy slot head must be refreshed before control
 // returns to native code holding future slot reads. `slot_write`'s debug
