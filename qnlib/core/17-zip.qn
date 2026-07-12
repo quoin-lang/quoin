@@ -242,11 +242,10 @@ Bytes <-- {
         else:{
             (entry.methodCode == 8).if:{ out = data.decodeDeflate }
             else:{
-                var msg = 'zip: \'%1\' uses unsupported compression method %2' % #(
+                ParseError.throw:('zip: \'%1\' uses unsupported compression method %2' % #(
                     entry.name
                     entry.methodCode
-                )
-                ParseError.throw:msg
+                ))
             }
         }
         (out.crc32 == entry.crc).else:{

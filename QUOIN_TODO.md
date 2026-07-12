@@ -702,21 +702,16 @@ deferred `Mirror` in `## REPL`.
   deadlines, detached spawn+join — `docs/ASYNC_ARCH.md` Stage 2b).
 
 ## Bugs/Odd Behavior
-- [ ] **`qn fmt` internal error: multi-line `#( … )` as `%`'s right operand inside a parenthesized
-  argument.** The self-verification catches it (aborts, no corruption), but the file can't be
-  formatted. Minimal repro (formats fine once the list is single-line, or when the `%` expression
-  is bound to a var first — the workaround used in `core/17-zip.qn` contentFor:):
-  ```
-  Foo <- {
-      m: -> { |entry|
-          ParseError.throw:('zip: %1 method %2' % #(
-              entry.name
-              entry.methodCode
-          ))
-      }
-  }
-  ```
-  Found writing the zip reader (2026-07-11). Fix lives in `crates/quoin-fmt`.
+- [x] **`qn fmt` internal error: multi-line `#( … )` as `%`'s right operand inside a parenthesized
+  argument.** The self-verification caught it (aborted, no corruption), but the file couldn't be
+  formatted — `ParseError.throw:('… %1 …' % #(\n a\n b\n ))` lost the outer closing `)`. Root
+  cause: `lower_stmt`'s collection arm was the one dispatch that renders purely from the node's
+  OWN span, dropping the region residue around it — the wrapping `(`/`)` captured by
+  `statement_content_start` / left before `content_end`. FIXED (2026-07-11) by re-attaching both
+  residues around the lowered collection (`crates/quoin-fmt/src/format.rs`); regression tests
+  `keeps_wrapping_parens_*` in format_tests.rs cover throw-arg, parenthesized rvalue, and
+  mid-send positions. The `core/17-zip.qn` contentFor: workaround was reverted to the natural
+  form as the end-to-end proof.
 - [x] **`List.new` / `Map.new` / `Set.new` produce broken shells.** FIXED for the
   collections (+ `Bytes.new`): native class methods now win the hierarchy lookup before the
   generic fallback — `new` constructs the real empty native value; `new:` raises a clear

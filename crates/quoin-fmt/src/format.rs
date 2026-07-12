@@ -311,7 +311,27 @@ fn lower_stmt(
         NodeValue::MethodExtension(m) => lower_def(content_start, &m.block, source, comments),
         NodeValue::Block(b) => lower_block(b, source, comments),
         NodeValue::List(_) | NodeValue::Set(_) | NodeValue::Map(_) | NodeValue::UserList(_) => {
-            lower_collection(stmt, source, comments)
+            // A collection renders from its own span — re-attach the region's residue:
+            // wrapping parens captured by `statement_content_start` on the left, and their
+            // closers before `content_end` on the right. Without this, the closing `)` of
+            // `throw:('…' % #( … ))` vanished when the multi-line list was re-lowered
+            // (QUOIN_TODO "multi-line #( … ) as %'s right operand" bug).
+            let doc = lower_collection(stmt, source, comments)?;
+            let si = stmt.source_info.as_ref()?;
+            let lead = source[content_start..si.start.max(content_start)].trim();
+            let trail = if si.end <= content_end {
+                source[si.end..content_end].trim()
+            } else {
+                ""
+            };
+            if lead.is_empty() && trail.is_empty() {
+                return Some(doc);
+            }
+            Some(Doc::concat(vec![
+                Doc::verbatim(lead.to_string()),
+                doc,
+                Doc::verbatim(trail.to_string()),
+            ]))
         }
         NodeValue::MethodCall(_) => lower_send(stmt, content_start, content_end, source, comments),
         // `<lvalues> = <rvalue>` and `^^`/`^`/`^>` returns: the prefix through the assignment/return
