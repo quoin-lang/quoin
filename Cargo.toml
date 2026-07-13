@@ -24,6 +24,7 @@ members = [
     "crates/quoin-fmt",
     "crates/quoin-ext",
     "crates/quoin-ext-proto",
+    "crates/quoin-wasm",
     "lint/no_gc_across_yield",
     "lint/no_borrow_across_yield",
 ]

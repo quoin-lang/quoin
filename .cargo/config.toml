@@ -25,7 +25,13 @@ nt = "nextest run --workspace --exclude no_gc_across_yield --exclude no_borrow_a
 QUOIN_STDLIB = { value = "qnlib", relative = true }
 
 # getrandom 0.3 requires this opt-in cfg (its `wasm_js` cargo feature alone is not
-# enough) to use the JS CSPRNG on browser wasm; 0.4 selects by feature alone. Scoped
-# to the wasm target so native builds are untouched.
+# enough) to use the JS CSPRNG on browser wasm; 0.4 selects by feature alone. The
+# link-arg raises the wasm shadow stack from the 1 MiB default to the 16 MiB the
+# native coroutine stacks use — blocks recurse on the real stack (`execute_block`),
+# and 1 MiB overflowed under S1 promotion natively (src/fiber.rs). Scoped to the
+# wasm target so native builds are untouched; link-args are inert for cargo check.
 [target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+rustflags = [
+    '--cfg', 'getrandom_backend="wasm_js"',
+    '-C', 'link-arg=-zstack-size=16777216',
+]
