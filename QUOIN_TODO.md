@@ -211,12 +211,13 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Think about a better destructuring protocol than assuming `#at:` exists.
   - use an Iterator?
 - [x] Confirm `%'string%{eval}' is working.
-  - [ ] Optimize it into string concatenation by the compiler. (Today it recompiles the interpolated
-    expression at runtime with the caller's local *names* in scope — implicit local capture via the env
-    chain, see `string.rs`.) Lowering `%{expr}` directly to `String` concatenation at compile time removes
-    that runtime recapture — which also clears a blocker for the slot-based local plan (§9 "local-variable
-    slots", Plan B): with no implicit local capture left in interpolation, `(depth, slot)` resolution has
-    no cross-compilation-unit holes. If we go to B, insert this between steps A and B.
+  - [x] Optimize it into string concatenation by the compiler. `compile_interpolated_literal`
+    lowers a `%'…'` literal to a `+` chain at compile time: fragments compile inline in the
+    enclosing scope (fixing `%{@ivar}` reading nil, and lifting the Finding-5 AOT refusal for
+    these methods), a malformed fragment is now a compile error, and the slot-plan-B blocker
+    (§9 "local-variable slots") is cleared — no implicit local capture remains in literal
+    interpolation. Sending `%` to a *computed* string keeps the runtime reflective path
+    (locals only, catchable ParseError); both share the `quoin-syntax` `interp` splitter.
 - [x] Make sure case statements are tested and working.
 - [x] Make the `^>` yield operator usable in expression position.
   - Moved `yield_return` from `stmt` to `primary` in the pest grammar; it now works anywhere an expression does (e.g. `a = ^> v`), with greedy operand precedence matching `Fiber.yield:` (parenthesize to scope). ANTLR grammar (legacy/unused path) left as-is.

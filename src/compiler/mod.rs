@@ -5,8 +5,9 @@ use crate::instruction::{
 use crate::parser::ast::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, ClassDefinitionNode,
     DeclKind, DeclarationNode, IdentifierNode, IdentifierType, MethodCallNode, MethodSelectorNode,
-    Node, NodeValue, ProgramNode, TypeRefNode, UnaryOperatorNode, UnaryOperatorType,
+    Node, NodeValue, ProgramNode, StringNode, TypeRefNode, UnaryOperatorNode, UnaryOperatorType,
 };
+use crate::parser::interp::{InterpPart, split_interpolation};
 use crate::runtime::elem_tag::ElemTag;
 use crate::symbol::Symbol;
 use crate::types::{SeenTypes, Type};
@@ -3424,6 +3425,16 @@ impl Compiler {
         op: &UnaryOperatorNode,
         bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
+        // `%` on a string LITERAL lowers to a `+` concatenation chain here at
+        // compile time. Only a computed string (`%t`) takes the runtime
+        // reflective path via the `%` send below.
+        if op.operator == UnaryOperatorType::Mod
+            && let NodeValue::Str(s) = &op.right.value
+        {
+            let template = s.value.clone();
+            return self.compile_interpolated_literal(&template, &op.right, bytecode);
+        }
+
         // Compile operand (receiver)
         self.compile_node(&op.right, bytecode)?;
 
@@ -3448,6 +3459,97 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// Lower `%'…%{expr}…'` to `'…' + (expr) + '…'`: each fragment compiles
+    /// inline in the enclosing scope, so locals resolve lexically and
+    /// `@ivars` work (the runtime path reads `self` off the env chain, which
+    /// its synthesized block never binds — BUGS.md-era `%{@ivar}` renders
+    /// empty there). The chain is anchored on a leading String constant so it
+    /// dispatches `String#+:` throughout, whose argument coercion is the same
+    /// `.s` the runtime path applies.
+    fn compile_interpolated_literal(
+        &mut self,
+        template: &str,
+        lit_node: &Node,
+        bytecode: &mut CodeBlock,
+    ) -> Result<(), String> {
+        let parts = split_interpolation(template);
+        if !parts.iter().any(|p| matches!(p, InterpPart::Expr(_))) {
+            // Nothing to interpolate (including an unterminated `%{`, which
+            // stays literal): `%` is the identity here, skip the send.
+            return self.compile_node(lit_node, bytecode);
+        }
+
+        let si = &lit_node.source_info;
+        let mk_str = |v: String| Node {
+            source_info: si.clone(),
+            value: NodeValue::Str(StringNode { value: v }),
+        };
+        let mk_add = |left: Node, right: Node| Node {
+            source_info: si.clone(),
+            value: NodeValue::BinaryOperator(BinaryOperatorNode {
+                operator: BinaryOperatorType::Add,
+                left: Arc::new(left),
+                right: Arc::new(right),
+            }),
+        };
+
+        let mut chain: Option<Node> = None;
+        for part in parts {
+            let node = match part {
+                InterpPart::Lit(l) => mk_str(l),
+                InterpPart::Expr(src) => self.parse_interpolation_fragment(&src, si)?,
+            };
+            chain = Some(match chain {
+                Some(left) => mk_add(left, node),
+                // Anchor on a String even when the template begins with a
+                // fragment, so the whole chain is String concatenation.
+                None if matches!(node.value, NodeValue::Str(_)) => node,
+                None => mk_add(mk_str(String::new()), node),
+            });
+        }
+        // `parts` contains at least the one Expr checked above.
+        self.compile_node(&chain.unwrap(), bytecode)
+    }
+
+    /// Parse one `%{…}` fragment into a node that compiles in expression
+    /// position. A single non-declaration statement inlines directly;
+    /// anything else (multi-statement, `var`/`let`, comment-only) becomes
+    /// `{ … }.value` so declarations stay fragment-local, matching the
+    /// runtime path's synthesized block.
+    fn parse_interpolation_fragment(
+        &mut self,
+        src: &str,
+        si: &Option<SourceInfo>,
+    ) -> Result<Node, String> {
+        let at = si
+            .as_ref()
+            .map(|s| format!(" at {}:{}", s.filename, s.line))
+            .unwrap_or_default();
+        let single = |parsed: &Node| -> Option<Node> {
+            let NodeValue::Program(program) = &parsed.value else {
+                return None;
+            };
+            match program.expressions.as_slice() {
+                [stmt] if !matches!(stmt.value, NodeValue::Declaration(_)) => {
+                    Some(stmt.as_ref().clone())
+                }
+                _ => None,
+            }
+        };
+
+        let parsed = crate::parser::try_parse_quoin_string_named(src, "<interpolation>")
+            .map_err(|e| format!("in %{{…}} interpolation{at}: {e}"))?;
+        if let Some(node) = single(&parsed) {
+            return Ok(node);
+        }
+        // The newlines keep a trailing line comment in the fragment from
+        // swallowing the wrapper.
+        let wrapped = format!("{{\n{src}\n}}.value");
+        let parsed = crate::parser::try_parse_quoin_string_named(&wrapped, "<interpolation>")
+            .map_err(|e| format!("in %{{…}} interpolation{at}: {e}"))?;
+        single(&parsed).ok_or_else(|| format!("in %{{…}} interpolation{at}: not an expression"))
     }
 
     fn compile_block(&mut self, block: &BlockNode, bytecode: &mut CodeBlock) -> Result<(), String> {

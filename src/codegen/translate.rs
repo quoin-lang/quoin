@@ -2773,12 +2773,14 @@ impl<'a> Translator<'a> {
             Constant::Bool(x) => AV::C(b.ins().iconst(types::I8, *x as i64), AotKind::Bool),
             Constant::Nil => AV::Nil,
             Constant::String(s) => {
-                // BUGS.md Finding 5: `%{…}` interpolation reads the CALLER's
-                // locals by walking the frame env, which a compiled frame
-                // does not materialize — every local silently read as nil.
-                // A method whose string constants can be interpolation
-                // sources therefore stays interpreted (refusal = semantics
-                // preserved; interpolation is dynamic scope reflection).
+                // BUGS.md Finding 5: DYNAMIC `%{…}` interpolation (`%` sent
+                // to a computed string) reads the CALLER's locals by walking
+                // the frame env, which a compiled frame does not materialize
+                // — every local silently read as nil. A method whose string
+                // constants can be interpolation sources therefore stays
+                // interpreted (refusal = semantics preserved). A `%'…'`
+                // LITERAL never trips this: the compiler lowers it to a `+`
+                // chain, so no `%{` survives into its string constants.
                 if s.contains("%{") {
                     return Err(refuse(
                         RefusalKind::Structural,

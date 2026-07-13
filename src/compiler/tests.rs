@@ -2909,3 +2909,62 @@ fn type_var_nullable_return_is_a_candidate() {
         "an erased type-var return rides as Obj"
     );
 }
+
+#[test]
+fn interpolated_literal_lowers_to_concatenation() {
+    fn compile_src(src: &str) -> StaticBlock {
+        let node = crate::parser::parse_quoin_string(src);
+        let NodeValue::Program(p) = &node.value else {
+            panic!("expected a program");
+        };
+        Compiler::new().compile_program(p).unwrap()
+    }
+    // Does any send-family instruction dispatch `sel` (recursing into nested blocks)?
+    fn dispatches(sb: &StaticBlock, sel: Symbol) -> bool {
+        sb.bytecode.0.iter().any(|inst| match inst {
+            Instruction::Send(s, _)
+            | Instruction::SendLocal(_, s, _)
+            | Instruction::SendConst(_, s, _)
+            | Instruction::SendField(_, s, _)
+            | Instruction::SendLocalLocal(_, _, s, _)
+            | Instruction::SendLocalConst(_, _, s, _) => *s == sel,
+            Instruction::Push(Constant::Block(nested)) => dispatches(nested, sel),
+            _ => false,
+        })
+    }
+    let interp = Symbol::intern("%");
+    let plus = Symbol::intern("+:");
+
+    // `%'…%{x}…'` lowers to a `+` concatenation chain: no `%` send survives.
+    let sb = compile_src("var x = 1; %'a%{x}b'");
+    assert!(
+        !dispatches(&sb, interp),
+        "literal interpolation should lower"
+    );
+    assert!(dispatches(&sb, plus), "lowering concatenates with +");
+
+    // No fragments → the plain constant; the `%` identity send is dropped too.
+    let sb = compile_src("%'plain'");
+    assert!(!dispatches(&sb, interp));
+    assert!(!dispatches(&sb, plus));
+
+    // An unterminated `%{` is literal text, still just a constant.
+    let sb = compile_src("%'a%{ open'");
+    assert!(!dispatches(&sb, interp));
+    assert!(!dispatches(&sb, plus));
+
+    // `%` on a COMPUTED string keeps the runtime reflective send.
+    let sb = compile_src("var t = 'a%{1}b'; %t");
+    assert!(
+        dispatches(&sb, interp),
+        "dynamic interpolation stays a send"
+    );
+
+    // A malformed fragment is a compile-time error naming the interpolation.
+    let node = crate::parser::parse_quoin_string("%'bad %{)}'");
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let err = Compiler::new().compile_program(p).unwrap_err();
+    assert!(err.message.contains("%{…} interpolation"), "{err:?}");
+}

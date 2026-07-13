@@ -4,6 +4,7 @@
 
 pub use quoin_syntax::ast;
 pub use quoin_syntax::ast::*;
+pub use quoin_syntax::interp;
 
 // Public parsing entry points (same interface as before, plus the fallible
 // `try_parse_quoin_string_named` used by tooling such as the language server).

@@ -9,6 +9,7 @@
 pub mod ast;
 pub mod complete;
 pub mod highlight;
+pub mod interp;
 pub mod pest;
 pub mod pragmas;
 pub mod source_info;
@@ -16,6 +17,7 @@ pub mod source_info;
 pub use ast::*;
 pub use complete::complete_source;
 pub use highlight::highlight_resilient;
+pub use interp::{InterpPart, split_interpolation};
 pub use pragmas::scan_allow_pragmas;
 pub use source_info::{ParseError, SourceInfo};
 
