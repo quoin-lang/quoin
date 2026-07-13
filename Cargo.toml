@@ -181,6 +181,9 @@ getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 # whose JS backend the renamed entry above turns on.
 uuid = { version = "1", features = ["rng-getrandom"] }
 jiff = { version = "0.2", features = ["js"] }
+# Drop-in std::time::Instant/SystemTime on the JS clocks (std's panic on this target);
+# see src/clock.rs.
+web-time = "1"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to

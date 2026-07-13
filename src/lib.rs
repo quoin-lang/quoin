@@ -7,6 +7,7 @@
 // the module. Everything else compiles for wasm as-is.
 pub mod ansi_colorizer;
 pub mod class_table;
+pub mod clock;
 pub mod codegen;
 pub mod compiler;
 pub mod compute;

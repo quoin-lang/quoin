@@ -74,6 +74,14 @@ fn async_primitives_raise_catchable_errors_without_a_scheduler() {
 }
 
 #[test]
+fn the_monotonic_clock_is_readable() {
+    // `Instant` reads `crate::clock` — std here, `performance.now()` on wasm.
+    let (outcome, _stdout, _stderr) = run("Instant.now.elapsed.asNanoseconds >= 0");
+    assert_eq!(outcome.error, None);
+    assert_eq!(outcome.result.as_deref(), Some("true"));
+}
+
+#[test]
 fn runtime_exit_carries_its_status() {
     let (outcome, _stdout, _stderr) = run("Runtime.exit:3");
     assert_eq!(outcome.error, None);

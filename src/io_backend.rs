@@ -473,9 +473,12 @@ mod io_backend_smol;
 pub use io_backend_smol::SmolBackend;
 
 /// The concrete backend `VmState` embeds (a concrete type, not `Box<dyn IoBackend>`,
-/// so nothing changes in the native hot path). On wasm32 the placeholder is the
-/// canned-data `MockBackend` — every OS request comes back `Unsupported`/EOF — until
-/// the browser backend lands.
+/// so nothing changes in the native hot path). On wasm32 the slot is filled by the
+/// canned-data `MockBackend`, but it is inert in practice: with no scheduler,
+/// `await_io` raises its catchable "outside the VM scheduler" error before any
+/// request reaches a backend. A real browser backend (in-memory files, virtual
+/// stdin) would replace this alias *and* teach `await_io` a synchronous-completion
+/// path — that pair is the seam a future slice plugs into.
 #[cfg(not(target_arch = "wasm32"))]
 pub type DefaultBackend = SmolBackend;
 #[cfg(target_arch = "wasm32")]

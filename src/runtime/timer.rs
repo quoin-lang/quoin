@@ -1,6 +1,6 @@
 use crate::value::NativeClassBuilder;
 
-use std::time::Instant;
+use crate::clock::Instant;
 
 pub fn build_timer_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Timer", Some("Object"))
