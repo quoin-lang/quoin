@@ -5,3 +5,6 @@ profile.json.gz
 /profiling/*
 !/profiling/analyze.py
 __pycache__/
+
+# The wasm-pack output bundle (scripts/build_wasm.sh) — build artifact, not source.
+/playground/pkg/

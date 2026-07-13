@@ -183,6 +183,9 @@ impl DebugState {
     }
 }
 
+// The debug command surface is driven by the native drivers (CLI pauses, DAP); on
+// wasm32 nothing calls it yet, but it is target-clean, so allow rather than gate.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl<'gc> VmState<'gc> {
     /// Debugger checkpoint, called from `step_internal` before dispatching the instruction
     /// at `ip` in frame `frame_idx` — only while a debug session is attached. If a
@@ -704,6 +707,7 @@ impl<'gc> VmState<'gc> {
 /// line marked. When `colorize`, the source is syntax-highlighted (the whole file is run through
 /// `highlight_to_ansi` once — ANSI codes carry no newlines, so the per-line split stays exact);
 /// the marker and line number stay uncolored. Pure, so it's unit-testable without a VM.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // driver-only (native)
 fn render_source_window(content: &str, cur: usize, context: usize, colorize: bool) -> String {
     let highlighted = colorize.then(|| highlight_to_ansi(content));
     let lines: Vec<&str> = highlighted.as_deref().unwrap_or(content).lines().collect();

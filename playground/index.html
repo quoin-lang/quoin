@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quoin Playground</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1c1f26;
+    --panel-edge: #2a2e38;
+    --text: #d8dce4;
+    --dim: #8b92a0;
+    --accent: #d4a03c; /* quoin brass */
+    --err: #e06c75;
+    --ok: #98c379;
+    font-size: 15px;
+  }
+  /* The token stylesheet the VM generates (injected by app.js) is light-scheme by
+     default and switches to the terminal palette under prefers-color-scheme: dark,
+     so the page chrome follows the same media query. */
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f5f2;
+      --panel: #fffdf9;
+      --panel-edge: #ddd8ce;
+      --text: #2c2c2c;
+      --dim: #77716a;
+      --accent: #a97917;
+      --err: #b3261e;
+      --ok: #1f7a5c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.7rem 1rem 0.5rem;
+  }
+  header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+  header h1 .brand { color: var(--accent); }
+  header .sub { color: var(--dim); font-size: 0.85rem; }
+  header a { color: var(--dim); }
+  header .spacer { flex: 1; }
+
+  .toolbar {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0 1rem 0.6rem;
+  }
+  button, select {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--panel-edge);
+    border-radius: 6px;
+    padding: 0.35rem 0.9rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  button:hover:enabled { border-color: var(--accent); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  #run { background: var(--accent); color: #14161a; font-weight: 600; border-color: var(--accent); }
+  .toolbar .hint { color: var(--dim); font-size: 0.8rem; margin-left: auto; }
+
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.7rem;
+    padding: 0 1rem 1rem;
+    min-height: 0;
+  }
+  @media (max-width: 880px) { main { grid-template-columns: 1fr; grid-template-rows: 3fr 2fr; } }
+
+  .pane {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .pane .label {
+    padding: 0.35rem 0.75rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+    border-bottom: 1px solid var(--panel-edge);
+  }
+  /* One code-font rule for every code surface, matching the font stack the injected
+     token stylesheet declares — the editor textarea and its highlight underlay MUST
+     resolve to identical metrics or the caret drifts off the glyphs. */
+  #editor, #highlight, #output, #result {
+    font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-feature-settings: "ss05";
+    font-size: 0.92rem;
+    line-height: 1.45;
+  }
+
+  /* The editor is a transparent-text textarea over a highlighted <pre> underlay
+     (same box, same metrics); app.js keeps content and scroll in sync. Text stays
+     visible (hl-on absent) until the main-thread VM is ready to highlight. */
+  .editor-wrap { position: relative; flex: 1; min-height: 0; }
+  #editor, #highlight {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 0.75rem;
+    white-space: pre;
+    tab-size: 4;
+    overflow: auto;
+  }
+  #highlight {
+    overflow: hidden;
+    pointer-events: none;
+  }
+  #editor {
+    width: 100%;
+    height: 100%;
+    resize: none;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    caret-color: var(--text);
+  }
+  #editor.hl-on { color: transparent; }
+  #editor::selection { background: rgba(140, 150, 170, 0.35); }
+
+  #output {
+    flex: 1;
+    margin: 0;
+    padding: 0.75rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #output .err { color: var(--err); }
+  #output .meta { color: var(--dim); }
+  #result {
+    border-top: 1px solid var(--panel-edge);
+    padding: 0.45rem 0.75rem;
+    color: var(--ok);
+    min-height: 2.1em;
+  }
+  #result.error { color: var(--err); }
+  #result .tag { color: var(--dim); font-family: inherit; }
+  footer {
+    padding: 0 1rem 0.75rem;
+    color: var(--dim);
+    font-size: 0.78rem;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="brand">Quoin</span> Playground</h1>
+  <span class="sub" id="status">loading the VM…</span>
+  <span class="spacer"></span>
+  <span class="sub"><a href="https://quoinlang.dev">quoinlang.dev</a></span>
+</header>
+
+<div class="toolbar">
+  <button id="run" disabled>Run</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="format" disabled>Format</button>
+  <select id="examples" title="Load an example"></select>
+  <span class="hint">⌘⏎ / Ctrl⏎ to run</span>
+</div>
+
+<main>
+  <div class="pane">
+    <div class="label">program.qn</div>
+    <div class="editor-wrap">
+      <pre id="highlight" aria-hidden="true"></pre>
+      <textarea id="editor" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    </div>
+  </div>
+  <div class="pane">
+    <div class="label">output</div>
+    <pre id="output"></pre>
+    <div id="result"></div>
+  </div>
+</main>
+
+<footer>
+  Runs entirely in your browser as WebAssembly — nothing you type leaves this page.
+  Networking, files, subprocesses, and fibers need an OS, so here they raise ordinary
+  catchable errors; everything else is the real Quoin VM.
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -3,10 +3,10 @@ use crate::ext_sdk::{Host, HostExt};
 use crate::runtime::duration::make_duration;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 
+use crate::clock::Instant as StdInstant;
 use gc_arena::collect::Trace;
 use jiff::SignedDuration;
 use std::any::Any;
-use std::time::Instant as StdInstant;
 
 /// Native backing state for an `Instant`: a point on the **monotonic** clock
 /// (`std::time::Instant`) — forward-only and unaffected by wall-clock adjustments, for measuring

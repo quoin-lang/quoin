@@ -1,12 +1,19 @@
+#[cfg(not(target_arch = "wasm32"))]
 use crate::error::QuoinError;
 use crate::io_backend::IoRequest;
 use crate::value::{Block, Value};
-use crate::vm::{TaskId, VmState, VmStatus};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::vm::VmStatus;
+use crate::vm::{TaskId, VmState};
 
+#[cfg(not(target_arch = "wasm32"))]
 use corosensei::stack::{DefaultStack, Stack};
 use gc_arena::{Collect, Gc, Mutation};
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
+#[cfg(not(target_arch = "wasm32"))]
+use std::cell::RefCell;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub type VMCoroutine<'gc> = corosensei::ScopedCoroutine<
     'gc,
     VMContext<'gc>,
@@ -14,7 +21,28 @@ pub type VMCoroutine<'gc> = corosensei::ScopedCoroutine<
     Result<Value<'gc>, QuoinError>,
     DefaultStack,
 >;
+#[cfg(not(target_arch = "wasm32"))]
 pub type VMYielder<'gc> = corosensei::Yielder<VMContext<'gc>, YieldReason<'gc>>;
+
+/// wasm32 stand-in for the corosensei yielder: **uninhabited**, so `Option<&VMYielder>`
+/// is statically always `None` (nothing can ever register one — `Fiber`/`run_vm_loop`
+/// don't exist on wasm). Every `yielder.suspend(...)` site in the scheduler stays
+/// exactly as written and compiles to dead code; async/fiber/channel primitives take
+/// their existing "no scheduler" error paths instead. The wasm driver steps the VM
+/// directly on the caller's stack (no stack switching on this target).
+#[cfg(target_arch = "wasm32")]
+pub enum VMYielder<'gc> {
+    _Uninhabited(std::convert::Infallible, std::marker::PhantomData<&'gc ()>),
+}
+
+#[cfg(target_arch = "wasm32")]
+impl<'gc> VMYielder<'gc> {
+    pub fn suspend(&self, _reason: YieldReason<'gc>) -> VMContext<'gc> {
+        match *self {
+            VMYielder::_Uninhabited(never, _) => match never {},
+        }
+    }
+}
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -89,6 +117,7 @@ pub enum YieldReason<'gc> {
 /// the scheduler can run the GC. Fiber resume/yield happen deeper in `step`
 /// (inside the native `Fiber` methods) and bubble up as `YieldReason`s, so they
 /// are transparent here.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_vm_loop<'gc>(
     yielder: &VMYielder<'gc>,
     mut ctx: VMContext<'gc>,
@@ -162,6 +191,7 @@ pub fn run_vm_loop<'gc>(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     /// (full batches, sum wall-ns, sum GC bytes allocated) for the `QN_BATCH_STATS` harness.
     static BATCH_ACC: std::cell::Cell<(u64, u128, u128)> = const { std::cell::Cell::new((0, 0, 0)) };
@@ -169,6 +199,7 @@ thread_local! {
 
 /// Emit the accumulated per-batch stats to stderr (the `QN_BATCH_STATS` harness). One
 /// full batch = exactly `batch` instructions, so total steps = batches * batch.
+#[cfg(not(target_arch = "wasm32"))]
 fn report_batch_stats(batch: u32) {
     let (n, sum_ns, sum_bytes) = BATCH_ACC.with(|c| c.get());
     if n == 0 {
@@ -206,7 +237,11 @@ impl<'gc> VMContext<'gc> {
     }
 }
 
+/// On wasm32 the struct survives as a coroutine-less husk: `Task`/`NativeFiberState`
+/// embed `Gc<Fiber>` unconditionally, but nothing there can run (the driver and the
+/// guest `Fiber.new:` are native-only), so the husk is never resumed.
 pub struct Fiber<'gc> {
+    #[cfg(not(target_arch = "wasm32"))]
     pub coroutine: RefCell<Option<VMCoroutine<'gc>>>,
     /// Sticky: this fiber has entered AOT-compiled code at least once, so its
     /// suspended stack may hold Cranelift frames — which corosensei's forced
@@ -218,6 +253,8 @@ pub struct Fiber<'gc> {
     /// coroutine, which is how `execute_block` knows how much room is left — see
     /// `VmState::ensure_stack_headroom`.
     pub stack_limit: usize,
+    #[cfg(target_arch = "wasm32")]
+    _no_coroutine: std::marker::PhantomData<&'gc ()>,
 }
 
 /// Teardown for an abandoned fiber (a generator dropped mid-iteration by
@@ -237,6 +274,7 @@ pub struct Fiber<'gc> {
 /// Rust-frame residue of one suspended resume chain (interpreter locals'
 /// heap buffers), bounded per abandoned fiber — the price of admitting
 /// compiled frames into fibers at all.
+#[cfg(not(target_arch = "wasm32"))]
 impl<'gc> Drop for Fiber<'gc> {
     fn drop(&mut self) {
         if !self.ran_compiled.get() {
@@ -259,6 +297,20 @@ unsafe impl<'gc> Collect<'gc> for Fiber<'gc> {
     const NEEDS_TRACE: bool = false;
 }
 
+#[cfg(target_arch = "wasm32")]
+impl<'gc> Fiber<'gc> {
+    /// The husk constructor: satisfies `Task`/`NativeFiberState`'s embedded
+    /// `Gc<Fiber>` on wasm32, where nothing can ever resume one.
+    pub fn new_inert() -> Self {
+        Self {
+            ran_compiled: Cell::new(false),
+            stack_limit: 0,
+            _no_coroutine: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl<'gc> Fiber<'gc> {
     pub fn new<F>(f: F) -> Self
     where
