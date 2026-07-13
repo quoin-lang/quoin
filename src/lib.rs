@@ -17,6 +17,7 @@ pub mod debug;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod debug_cli;
 pub mod devirt_ops;
+pub mod direct_runner;
 pub mod dispatch;
 pub mod docs;
 pub mod error;
@@ -36,6 +37,7 @@ pub mod registry;
 pub mod repl_complete;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
+pub mod runner_core;
 pub mod runtime;
 pub mod stdlib;
 pub mod symbol;

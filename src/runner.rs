@@ -65,33 +65,11 @@ fn parse_source_or_exit(source: &str, display: &str) -> Node {
     }
 }
 
-/// Register every native (Rust-backed) class on a fresh `VmState`. Shared by all runner
-/// modes (run/test/benchmark/repl) so the builtin set can't drift between them.
-/// The once-per-unit compiler: template ids for shared inline caches, plus AOT
-/// candidate collection when `QN_AOT=1` (docs/internal/AOT_ARCH.md).
-pub(crate) fn unit_compiler() -> Compiler {
-    let c = Compiler::new().with_template_ids();
-    if crate::tuning::aot_enabled() {
-        c.with_aot()
-    } else {
-        c
-    }
-}
-
-/// Compile and register this unit's AOT candidates (no-op when `QN_AOT=0`).
-/// METHOD candidates compile eagerly (few, hot by construction); BLOCK
-/// templates stash as pending and compile lazily on first invocation
-/// (B3a — eager compilation of every literal cost ~+34ms startup).
-pub(crate) fn compile_unit_aot(vm: &mut VmState, compiler: &mut Compiler) {
-    if !crate::tuning::aot_enabled() {
-        return;
-    }
-    vm.register_aot_candidates(compiler.take_aot_candidates());
-}
-
-// Moved to `src/registry.rs` so the wasm build (no runner) registers the same builtin
-// set; re-exported here so the `crate::runner::register_builtins` path keeps working.
+// The builtin registry and the per-unit compile sequence live in `src/registry.rs` /
+// `src/runner_core.rs` so the wasm build (which compiles this runner out) shares them;
+// re-exported here so the `crate::runner::…` paths keep working.
 pub(crate) use crate::registry::register_builtins;
+pub(crate) use crate::runner_core::{compile_and_start, compile_unit_aot, unit_compiler};
 
 /// The persistent REPL arena: one `VmState` kept alive across all lines.
 pub(crate) type ReplArena = Arena<Rootable![VmState<'_>]>;
@@ -1520,39 +1498,15 @@ impl VmRunner {
                 break;
             }
 
-            // A compile error here is a *user* error — a typo, an undeclared local, a
-            // reassigned `let` — so it is reported and aborts the run like any other. It must
-            // not `panic!`: that printed a Rust backtrace note and exited 101, on exactly the
-            // two mistakes strict `var`/`let` invites.
+            // A compile error inside `compile_and_start` is a *user* error — a typo, an
+            // undeclared local, a reassigned `let` — so it is reported and aborts the run
+            // like any other (no `panic!`: that printed a Rust backtrace note and exited
+            // 101, on exactly the two mistakes strict `var`/`let` invites).
             let compiled = arena.mutate_root(|mc, vm| {
-                let program_node = match &ast.value {
-                    NodeValue::Program(p) => p,
-                    _ => {
-                        panic!("Error: Root AST node is not a ProgramNode");
-                    }
-                };
-
-                let mut compiler = unit_compiler();
-                compiler.set_seen_types(vm.options.seen_types.clone());
-                compiler.set_class_table(vm.options.class_table.clone());
-                crate::class_table::populate_from_vm(vm, &vm.options.class_table);
-                let program = match compiler.compile_program(program_node) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        // Rendered through the VM's stderr sink: `file:line:col: error: …`
-                        // plus the offending line and caret, like a type warning.
-                        vm.report_compile_error(&e);
-                        return Err(());
-                    }
-                };
-                vm.report_type_warnings(compiler.diagnostics());
-                compile_unit_aot(vm, &mut compiler);
-
-                let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
-                vm.start_block(mc, main_block, Vec::new(), None, None);
+                compile_and_start(mc, vm, &ast)?;
                 // Run this program unit as scheduler task #0; driven to completion below.
                 install_main_task(mc, vm);
-                Ok::<(), ()>(())
+                Ok::<(), crate::runner_core::CompileReported>(())
             });
             if compiled.is_err() {
                 ended = Some(UnitOutcome::Aborted);
@@ -1867,32 +1821,7 @@ impl VmRunner {
                 break;
             }
 
-            let compiled = arena.mutate_root(|mc, vm| {
-                let program_node = match &ast.value {
-                    NodeValue::Program(p) => p,
-                    _ => {
-                        panic!("Error: Root AST node is not a ProgramNode");
-                    }
-                };
-
-                let mut compiler = unit_compiler();
-                compiler.set_seen_types(vm.options.seen_types.clone());
-                compiler.set_class_table(vm.options.class_table.clone());
-                crate::class_table::populate_from_vm(vm, &vm.options.class_table);
-                let program = match compiler.compile_program(program_node) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        vm.report_compile_error(&e);
-                        return Err(());
-                    }
-                };
-                vm.report_type_warnings(compiler.diagnostics());
-                compile_unit_aot(vm, &mut compiler);
-
-                let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
-                vm.start_block(mc, main_block, Vec::new(), None, None);
-                Ok::<(), ()>(())
-            });
+            let compiled = arena.mutate_root(|mc, vm| compile_and_start(mc, vm, &ast));
             if compiled.is_err() {
                 aborted = true;
                 break;

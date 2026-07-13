@@ -5137,8 +5137,6 @@ impl<'gc> VmState<'gc> {
     /// `step_internal` do per instruction, so the result feeds `run_vm_loop` directly. Returns
     /// `Running` once the budget is spent (i.e. "yield now"). The held `Rc` keeps the bytecode
     /// alive across frame changes and GC, exactly as the per-step clone did.
-    // wasm32: dead only until the wasm driver (which steps this directly) lands.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn run_dispatch(
         &mut self,
         mc: &Mutation<'gc>,
