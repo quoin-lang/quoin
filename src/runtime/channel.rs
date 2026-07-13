@@ -357,6 +357,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         receiver: Value<'gc>,
     ) -> Result<(), QuoinError> {
+        #[allow(clippy::type_complexity)] // paired (task, seq) waiter lists
         let (recvs, sends): (Vec<(TaskId, u64)>, Vec<(TaskId, u64)>) = receiver
             .with_native_state_mut::<NativeChannelState, _, _>(mc, |ch| {
                 ch.closed = true;

@@ -1438,7 +1438,7 @@ fn test_compile_blocks() {
         name: None,
         is_nested_block: true,
         is_init_literal: false,
-        param_syms: crate::value::intern_param_syms(&vec!["x".to_string()]),
+        param_syms: crate::value::intern_param_syms(&["x".to_string()]),
         param_types: vec!["Object".to_string()],
         param_elem_tags: Vec::new(),
         bytecode: SharedBytecode(Arc::new(inner_bc)),
@@ -1581,7 +1581,7 @@ fn test_compile_class_and_method_definitions() {
         name: None,
         is_nested_block: true,
         is_init_literal: false,
-        param_syms: crate::value::intern_param_syms(&vec!["a".to_string(), "b".to_string()]),
+        param_syms: crate::value::intern_param_syms(&["a".to_string(), "b".to_string()]),
         param_types: vec!["Object".to_string(), "Object".to_string()],
         param_elem_tags: Vec::new(),
         bytecode: SharedBytecode(Arc::new(vec![
@@ -1617,10 +1617,7 @@ fn test_source_info_propagation() {
         assert_eq!(info.filename, "<string>");
         assert_eq!(info.line, 1);
         assert_eq!(info.column, 0);
-        assert_eq!(
-            info.source_text.as_ref().map(|s| s.as_str()),
-            Some("{ 1 + 2 };")
-        );
+        assert_eq!(info.source_text.as_deref(), Some("{ 1 + 2 };"));
     } else {
         panic!("Expected Program node");
     }
@@ -1647,10 +1644,7 @@ fn test_source_info_propagation() {
             assert_eq!(info.filename, "<string>");
             assert_eq!(info.line, 1);
             assert_eq!(info.column, 0);
-            assert_eq!(
-                info.source_text.as_ref().map(|s| s.as_str()),
-                Some("{ 1 + 2 }")
-            );
+            assert_eq!(info.source_text.as_deref(), Some("{ 1 + 2 }"));
         }
     }
     assert!(found_inner_block);

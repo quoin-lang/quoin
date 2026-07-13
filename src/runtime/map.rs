@@ -128,18 +128,21 @@ impl NativeMapState {
     }
 
     pub fn value_at<'gc>(&self, idx: u32) -> Value<'gc> {
-        unsafe { transmute(self.entries[idx as usize].2) }
+        unsafe { transmute::<Value<'static>, Value<'gc>>(self.entries[idx as usize].2) }
     }
 
     pub fn set_value_at(&mut self, idx: u32, v: Value<'_>) {
-        self.entries[idx as usize].2 = unsafe { transmute(v) };
+        self.entries[idx as usize].2 = unsafe { transmute::<Value<'_>, Value<'static>>(v) };
     }
 
     /// Append a NEW entry (caller has established the key is absent).
     pub fn append(&mut self, hash: u64, key: Value<'_>, value: Value<'_>) {
         let i = self.entries.len() as u32;
-        self.entries
-            .push((hash, unsafe { transmute(key) }, unsafe { transmute(value) }));
+        self.entries.push((
+            hash,
+            unsafe { transmute::<Value<'_>, Value<'static>>(key) },
+            unsafe { transmute::<Value<'_>, Value<'static>>(value) },
+        ));
         if self.indexed() {
             if self.index.is_empty() {
                 self.build_index(); // this push crossed the tier boundary
@@ -824,7 +827,7 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             }
 
             // Pop the block's return value to clean up the stack
-            let _block_ret = vm.pop().map_err(|e| QuoinError::Other(e))?;
+            let _block_ret = vm.pop().map_err(QuoinError::Other)?;
 
             // Retrieve environment from the last popped frame recorded in VmState
             let env_ref = vm.last_popped_env.ok_or_else(|| {

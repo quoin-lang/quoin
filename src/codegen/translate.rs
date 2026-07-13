@@ -493,6 +493,7 @@ fn eff_ret(c: &AotCandidate, ret_demoted: &HashSet<u32>) -> AotRet {
     }
 }
 
+#[allow(clippy::type_complexity)] // per-tid (entry, direct-call fixups) result rows
 fn compile_group(
     members: &[&AotCandidate],
     siblings: &SiblingMap,
@@ -976,17 +977,16 @@ fn scan_materialized_nest(
             Instruction::Push(Constant::Block(nb)) => {
                 scan_materialized_nest(nb, &defined, own_selector, out)?;
             }
-            Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s) => {
+            Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s)
                 // A `new:{...}` config literal's stores BIND LOCALLY by
                 // construction (StaticBlock::is_init_literal — static
                 // semantics, (E)); they are the field-binding DSL, never
                 // capture writes, so they need no write-back. This is what
                 // un-refuses `Class.new:{ field=local }` inside cold arms
                 // (btrees' makeTree).
-                if !rc.is_init_literal && !defined.contains(s) {
+                if !rc.is_init_literal && !defined.contains(s) => {
                     out.written_frees.push(*s);
                 }
-            }
             _ => {}
         }
     }
@@ -2870,6 +2870,7 @@ impl<'a> Translator<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // scalar-lowering helper threads codegen context
     fn local_scalar(
         &mut self,
         b: &mut FunctionBuilder,
@@ -2955,7 +2956,7 @@ impl<'a> Translator<'a> {
                 }
                 let val = self.narrow_to_scalar(b, fx, idx, k);
                 b.def_var(var, val);
-                return Ok(());
+                Ok(())
             }
             AV::Dyn(_) | AV::Nil | AV::SelfRef => {
                 let vproof = match &v {
@@ -3541,16 +3542,16 @@ impl<'a> Translator<'a> {
         blocks: &mut HashMap<usize, (CBlock, Vec<BKind>)>,
         work: &mut Vec<usize>,
         ip: usize,
-        stack: &mut Vec<AV>,
+        stack: &mut [AV],
     ) -> Result<(CBlock, Vec<BKind>), Refusal> {
         // A merge FORCED to all-Dyn by an earlier retry (mixed scalar/Dyn
         // predecessors, S3): box scalars before shape computation, so every
         // predecessor unifies. The interpreted value world is uniform —
         // boxing is exact, only the abstraction loses precision.
         if self.dyn_merges.contains(&ip) {
-            for i in 0..stack.len() {
-                if let AV::C(..) = stack[i] {
-                    stack[i] = self.box_av(b, fx, stack[i])?;
+            for slot in stack.iter_mut() {
+                if let AV::C(..) = *slot {
+                    *slot = self.box_av(b, fx, *slot)?;
                 }
             }
         }

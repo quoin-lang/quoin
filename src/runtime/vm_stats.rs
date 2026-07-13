@@ -43,40 +43,42 @@ fn aot_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'g
         reasons_map.push((k, vm.new_int(mc, n)));
     }
 
-    let mut aot = Vec::new();
-    aot.push((
-        "enabled".to_string(),
-        vm.new_bool(mc, crate::tuning::aot_enabled()),
-    ));
-    aot.push(("compiled".to_string(), vm.new_int(mc, compiled as i64)));
-    aot.push((
-        "entryBails".to_string(),
-        vm.new_int(mc, codegen::entry_bails() as i64),
-    ));
-    aot.push((
-        "retranslated".to_string(),
-        vm.new_int(
-            mc,
-            codegen::TOTAL_RETRANSLATED.load(std::sync::atomic::Ordering::Relaxed) as i64,
+    let aot = vec![
+        (
+            "enabled".to_string(),
+            vm.new_bool(mc, crate::tuning::aot_enabled()),
         ),
-    ));
-    aot.push((
-        "directSites".to_string(),
-        vm.new_int(
-            mc,
-            codegen::TOTAL_DIRECT_SITES.load(std::sync::atomic::Ordering::Relaxed) as i64,
+        ("compiled".to_string(), vm.new_int(mc, compiled as i64)),
+        (
+            "entryBails".to_string(),
+            vm.new_int(mc, codegen::entry_bails() as i64),
         ),
-    ));
-    aot.push((
-        "retranslateMs".to_string(),
-        vm.new_int(
-            mc,
-            (codegen::RETRANSLATE_NS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000) as i64,
+        (
+            "retranslated".to_string(),
+            vm.new_int(
+                mc,
+                codegen::TOTAL_RETRANSLATED.load(std::sync::atomic::Ordering::Relaxed) as i64,
+            ),
         ),
-    ));
-    aot.push(("refused".to_string(), vm.new_int(mc, refused)));
-    aot.push(("skipped".to_string(), vm.new_int(mc, skipped)));
-    aot.push(("reasons".to_string(), vm.new_map(mc, reasons_map)));
+        (
+            "directSites".to_string(),
+            vm.new_int(
+                mc,
+                codegen::TOTAL_DIRECT_SITES.load(std::sync::atomic::Ordering::Relaxed) as i64,
+            ),
+        ),
+        (
+            "retranslateMs".to_string(),
+            vm.new_int(
+                mc,
+                (codegen::RETRANSLATE_NS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000)
+                    as i64,
+            ),
+        ),
+        ("refused".to_string(), vm.new_int(mc, refused)),
+        ("skipped".to_string(), vm.new_int(mc, skipped)),
+        ("reasons".to_string(), vm.new_map(mc, reasons_map)),
+    ];
     vm.new_map(mc, aot)
 }
 
@@ -85,14 +87,15 @@ fn aot_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'g
 /// or with the pool disabled).
 fn compute_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
     let (submitted, completed, inline) = crate::compute::stats();
-    let mut m = Vec::new();
-    m.push(("submitted".to_string(), vm.new_int(mc, submitted as i64)));
-    m.push(("completed".to_string(), vm.new_int(mc, completed as i64)));
-    m.push(("inline".to_string(), vm.new_int(mc, inline as i64)));
-    m.push((
-        "threads".to_string(),
-        vm.new_int(mc, crate::compute::threads() as i64),
-    ));
+    let m = vec![
+        ("submitted".to_string(), vm.new_int(mc, submitted as i64)),
+        ("completed".to_string(), vm.new_int(mc, completed as i64)),
+        ("inline".to_string(), vm.new_int(mc, inline as i64)),
+        (
+            "threads".to_string(),
+            vm.new_int(mc, crate::compute::threads() as i64),
+        ),
+    ];
     vm.new_map(mc, m)
 }
 
@@ -100,10 +103,11 @@ fn compute_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Valu
 /// cross-worker messages copied).
 fn workers_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
     let (spawned, completed, messages) = crate::worker::stats();
-    let mut m = Vec::new();
-    m.push(("spawned".to_string(), vm.new_int(mc, spawned as i64)));
-    m.push(("completed".to_string(), vm.new_int(mc, completed as i64)));
-    m.push(("messages".to_string(), vm.new_int(mc, messages as i64)));
+    let m = vec![
+        ("spawned".to_string(), vm.new_int(mc, spawned as i64)),
+        ("completed".to_string(), vm.new_int(mc, completed as i64)),
+        ("messages".to_string(), vm.new_int(mc, messages as i64)),
+    ];
     vm.new_map(mc, m)
 }
 
@@ -357,11 +361,12 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                         m.push(("on".to_string(), vm.new_string(mc, on.clone())));
                     }
                     if let Some((cap, buffered, recv, send)) = t.channel {
-                        let mut c = Vec::new();
-                        c.push(("cap".to_string(), vm.new_int(mc, cap as i64)));
-                        c.push(("buffered".to_string(), vm.new_int(mc, buffered as i64)));
-                        c.push(("recvWaiters".to_string(), vm.new_int(mc, recv as i64)));
-                        c.push(("sendWaiters".to_string(), vm.new_int(mc, send as i64)));
+                        let c = vec![
+                            ("cap".to_string(), vm.new_int(mc, cap as i64)),
+                            ("buffered".to_string(), vm.new_int(mc, buffered as i64)),
+                            ("recvWaiters".to_string(), vm.new_int(mc, recv as i64)),
+                            ("sendWaiters".to_string(), vm.new_int(mc, send as i64)),
+                        ];
                         m.push(("channel".to_string(), vm.new_map(mc, c)));
                     }
                     if let Some(p) = t.parent {
@@ -383,14 +388,15 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                 .workers
                 .iter()
                 .map(|w| {
-                    let mut m = Vec::new();
-                    m.push(("id".to_string(), vm.new_int(mc, w.id as i64)));
-                    m.push(("unit".to_string(), vm.new_string(mc, w.unit.clone())));
-                    m.push(("label".to_string(), vm.new_string(mc, w.label.clone())));
-                    m.push((
-                        "backing".to_string(),
-                        vm.new_string(mc, w.backing.to_string()),
-                    ));
+                    let mut m = vec![
+                        ("id".to_string(), vm.new_int(mc, w.id as i64)),
+                        ("unit".to_string(), vm.new_string(mc, w.unit.clone())),
+                        ("label".to_string(), vm.new_string(mc, w.label.clone())),
+                        (
+                            "backing".to_string(),
+                            vm.new_string(mc, w.backing.to_string()),
+                        ),
+                    ];
                     if let Some(pid) = w.pid {
                         m.push(("pid".to_string(), vm.new_int(mc, pid as i64)));
                     }
@@ -404,17 +410,15 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                 })
                 .collect();
             root.push(("workers".to_string(), vm.new_list(mc, workers)));
-            let mut io = Vec::new();
-            io.push((
+            let io = vec![(
                 "inFlight".to_string(),
                 vm.new_int(mc, data.io_in_flight as i64),
-            ));
+            )];
             root.push(("io".to_string(), vm.new_map(mc, io)));
-            let mut comp = Vec::new();
-            comp.push((
+            let comp = vec![(
                 "inFlight".to_string(),
                 vm.new_int(mc, data.compute_in_flight as i64),
-            ));
+            )];
             root.push(("compute".to_string(), vm.new_map(mc, comp)));
             Ok(vm.new_map(mc, root))
         })
@@ -516,10 +520,11 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
              runs another copy of this program.",
         )
         .class_method("stats", |vm, mc, _receiver, _args| {
-            let mut sections = Vec::new();
-            sections.push(("aot".to_string(), aot_section(vm, mc)));
-            sections.push(("compute".to_string(), compute_section(vm, mc)));
-            sections.push(("workers".to_string(), workers_section(vm, mc)));
+            let sections = vec![
+                ("aot".to_string(), aot_section(vm, mc)),
+                ("compute".to_string(), compute_section(vm, mc)),
+                ("workers".to_string(), workers_section(vm, mc)),
+            ];
             Ok(vm.new_map(mc, sections))
         })
         .doc(
@@ -538,13 +543,14 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
             let records = codegen::refusal_snapshot();
             let mut out = Vec::with_capacity(records.len());
             for r in records {
-                let mut m = Vec::new();
-                m.push(("selector".to_string(), vm.new_string(mc, r.selector)));
-                m.push((
-                    "kind".to_string(),
-                    vm.new_string(mc, r.kind.name().to_string()),
-                ));
-                m.push(("reason".to_string(), vm.new_string(mc, r.why)));
+                let m = vec![
+                    ("selector".to_string(), vm.new_string(mc, r.selector)),
+                    (
+                        "kind".to_string(),
+                        vm.new_string(mc, r.kind.name().to_string()),
+                    ),
+                    ("reason".to_string(), vm.new_string(mc, r.why)),
+                ];
                 out.push(vm.new_map(mc, m));
             }
             Ok(vm.new_list(mc, out))

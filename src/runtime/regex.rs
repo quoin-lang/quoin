@@ -69,7 +69,7 @@ pub fn build_regex_class() -> NativeClassBuilder {
                 if let Value::Object(o) = args[0]
                     && let ObjectPayload::String(s) = &o.borrow().payload
                 {
-                    r.regex.is_match(&**s)
+                    r.regex.is_match(s)
                 } else {
                     false
                 }
@@ -88,7 +88,7 @@ pub fn build_regex_class() -> NativeClassBuilder {
             let s = crate::arg!(args, String, 0);
             let parts: Vec<Value> = receiver.with_native_state(|r: &NativeRegexState| {
                 r.regex
-                    .split(&**s)
+                    .split(&s)
                     .map(|part| host.new_string(part.to_string()))
                     .collect()
             })?;

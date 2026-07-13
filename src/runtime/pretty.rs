@@ -244,7 +244,7 @@ fn best(width: usize, doc: &Doc, colorize: bool) -> String {
                 Mode::Flat => {}
                 Mode::Break => {
                     out.push('\n');
-                    out.extend(std::iter::repeat(' ').take(indent));
+                    out.extend(std::iter::repeat_n(' ', indent));
                     col = indent;
                 }
             },

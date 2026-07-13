@@ -129,7 +129,7 @@ pub fn build_list_class() -> NativeClassBuilder {
         .instance_method("count", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
             Ok(vm.new_int(mc, len as i64))
         })
         .returns("Integer")
@@ -249,7 +249,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                     let vec = l.get_vec_mut();
                     vec.push(args[0]);
                 })
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
             Ok(receiver)
         })
         .doc(
@@ -271,7 +271,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                     let vec = l.get_vec_mut();
                     vec.insert(0, args[0]);
                 })
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
             Ok(receiver)
         })
         .doc(
@@ -423,7 +423,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                     // A slice's elements are already checked — carry the tag.
                     Ok(new_list_with_tag(vm, mc, sliced, l.elem))
                 })
-                .map_err(|e| QuoinError::Other(e))?
+                .map_err(QuoinError::Other)?
         })
         .returns("List(T)") // sliceFrom: carries the receiver's tag
         .doc(
@@ -452,7 +452,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                         // A slice's elements are already checked — carry the tag.
                         Ok(new_list_with_tag(vm, mc, sliced, l.elem))
                     })
-                    .map_err(|e| QuoinError::Other(e))?
+                    .map_err(QuoinError::Other)?
             },
         )
         .returns("List(T)") // sliceFrom:to: carries the receiver's tag
@@ -467,13 +467,13 @@ pub fn build_list_class() -> NativeClassBuilder {
         .instance_method("s", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
 
             let mut parts = Vec::new();
             for i in 0..len {
                 let val = receiver
                     .with_native_state::<NativeListState, _, _>(|l| l.get_vec().get(i).copied())
-                    .map_err(|e| QuoinError::Other(e))?
+                    .map_err(QuoinError::Other)?
                     .ok_or_else(|| QuoinError::Other("Index out of bounds".to_string()))?;
 
                 let result = vm.call_method(mc, val, "s", vec![])?;
@@ -500,7 +500,7 @@ pub fn build_list_class() -> NativeClassBuilder {
         .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
             let rhs_len_res =
                 args[0].with_native_state::<NativeListState, _, _>(|l| l.get_vec().len());
             let rhs_len = match rhs_len_res {
@@ -515,11 +515,11 @@ pub fn build_list_class() -> NativeClassBuilder {
             for i in 0..lhs_len {
                 let lhs_val = receiver
                     .with_native_state::<NativeListState, _, _>(|l| l.get_vec().get(i).copied())
-                    .map_err(|e| QuoinError::Other(e))?
+                    .map_err(QuoinError::Other)?
                     .ok_or_else(|| QuoinError::Other("Index out of bounds".to_string()))?;
                 let rhs_val = args[0]
                     .with_native_state::<NativeListState, _, _>(|l| l.get_vec().get(i).copied())
-                    .map_err(|e| QuoinError::Other(e))?
+                    .map_err(QuoinError::Other)?
                     .ok_or_else(|| QuoinError::Other("Index out of bounds".to_string()))?;
 
                 let eq_res = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
@@ -560,7 +560,7 @@ pub fn build_list_class() -> NativeClassBuilder {
         .instance_method("sort", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
 
             for i in 1..len {
                 let mut j = i;
@@ -603,7 +603,7 @@ pub fn build_list_class() -> NativeClassBuilder {
             let block_gc = arg!(args, Block, 0);
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
 
             let arity = block_gc.template.param_syms.len();
             if arity == 1 {

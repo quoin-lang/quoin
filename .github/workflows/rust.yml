@@ -52,10 +52,20 @@ jobs:
     - name: Check formatting
       run: cargo fmt --all --check
 
-  # Clippy is deliberately NOT gated yet: the tree carries ~160 style warnings plus one
-  # deny-by-default `clippy::mut_from_ref` on the intentional unsafe `Fiber::get`
-  # (src/fiber.rs). Running it down (an audited #[allow] there + the warnings) is a
-  # tracked post-v0.1 follow-up, not a release blocker. See docs/internal/RELEASE_PREP.md.
+  clippy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
+    - name: Install clippy
+      run: rustup component add clippy
+    # Same workspace scope as `test`: the two dylint crates link `rustc-private` and only
+    # build on their pinned nightly, so stable clippy excludes them (the `lint` job runs
+    # them). `--all-targets` covers tests/benches too; `-D warnings` fails CI on any lint.
+    - name: Run clippy
+      run: cargo clippy $WORKSPACE --all-targets -- -D warnings
 
   # Dylint lints: both yield-safety lints are deny-level -- a violation fails
   # this job; an audited #[allow] at the site is the escape hatch. The lint

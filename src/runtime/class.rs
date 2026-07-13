@@ -58,12 +58,11 @@ pub fn build_class_class() -> NativeClassBuilder {
         )
         .instance_method("class", |vm, _mc, _receiver, _args| {
             let class_key = NamespacedName::new(Vec::new(), "Class".to_string());
-            Ok(vm
+            Ok(*vm
                 .globals
                 .borrow()
                 .get(&class_key)
-                .expect("Class global not found")
-                .clone())
+                .expect("Class global not found"))
         })
         .doc(
             "The class `Class` itself -- every class is an instance of Class.\n\n\

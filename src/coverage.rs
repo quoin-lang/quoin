@@ -185,10 +185,10 @@ fn walk_code(
 
     // Recurse into nested closures, each keyed by its own span.
     for inst in bytecode {
-        if let Some(sb) = block_constant(inst) {
-            if let Some(child) = &sb.source_info {
-                walk_code(report, hits, span_of(child), &sb.source_map, &sb.bytecode);
-            }
+        if let Some(sb) = block_constant(inst)
+            && let Some(child) = &sb.source_info
+        {
+            walk_code(report, hits, span_of(child), &sb.source_map, &sb.bytecode);
         }
     }
 }

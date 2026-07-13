@@ -208,7 +208,7 @@ pub fn snapshot_block<'gc>(
 /// work (profiling/worker-scaling/notes.md). Localizing is a one-time,
 /// bytes-sized copy per shipped job that removes every cross-worker line.
 fn localize_template(sb: &StaticBlock) -> Arc<StaticBlock> {
-    let mut copy: StaticBlock = (**&sb).clone();
+    let mut copy: StaticBlock = (*sb).clone();
     let mut bytecode: Vec<Instruction> = copy.bytecode.iter().cloned().collect();
     for inst in bytecode.iter_mut() {
         match inst {
@@ -375,14 +375,14 @@ fn scan_nest(
             Instruction::IntBinLC(a, _, _) | Instruction::DoubleBinLC(a, _, _) => {
                 read(*a, &defined, free_reads, seen_reads)?
             }
-            Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s) => {
-                if !defined.contains(s) && !sb.is_init_literal {
-                    return Err(format!(
-                        "writes captured binding '{}' (the worker gets a snapshot; \
+            Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s)
+                if !defined.contains(s) && !sb.is_init_literal =>
+            {
+                return Err(format!(
+                    "writes captured binding '{}' (the worker gets a snapshot; \
                          writes could never reach the original)",
-                        s.as_str()
-                    ));
-                }
+                    s.as_str()
+                ));
             }
             Instruction::MethodReturn => {
                 return Err(
@@ -399,10 +399,8 @@ fn scan_nest(
             Instruction::SendField(f, _, _) => {
                 return Err(format!("touches instance state (@{f}) — not portable"));
             }
-            Instruction::LoadGlobal(n) => {
-                if seen_globals.insert(n.clone()) {
-                    globals.push(n.clone());
-                }
+            Instruction::LoadGlobal(n) if seen_globals.insert(n.clone()) => {
+                globals.push(n.clone());
             }
             _ => {}
         }
@@ -852,11 +850,7 @@ pub fn spawn_worker_process(
         let reader_grip = grip.clone();
         std::thread::spawn(move || {
             let mut done_sent = false;
-            loop {
-                let frame = match frame_read(&mut rsock) {
-                    Ok(f) => f,
-                    Err(_) => break,
-                };
+            while let Ok(frame) = frame_read(&mut rsock) {
                 let WireData::Map(pairs) = frame else {
                     continue;
                 };
@@ -953,11 +947,7 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
         };
         let ids = ctl_ids.clone();
         std::thread::spawn(move || {
-            loop {
-                let frame = match frame_read(&mut rsock) {
-                    Ok(f) => f,
-                    Err(_) => break,
-                };
+            while let Ok(frame) = frame_read(&mut rsock) {
                 let WireData::Map(pairs) = frame else {
                     continue;
                 };
@@ -987,16 +977,15 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
         let to_sock = to_sock_tx.clone();
         std::thread::spawn(move || {
             while let Ok(msg) = outbox_rx.recv_blocking() {
-                if let WorkerMsg::Data(dv) = msg {
-                    if to_sock
+                if let WorkerMsg::Data(dv) = msg
+                    && to_sock
                         .send(WireData::Map(vec![
                             ("t".into(), WireData::Str("d".into())),
                             ("v".into(), dv),
                         ]))
                         .is_err()
-                    {
-                        break;
-                    }
+                {
+                    break;
                 }
             }
         });
@@ -1008,17 +997,16 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
         std::thread::spawn(move || {
             while let Ok(msg) = ctl_reply_rx.recv_blocking() {
                 let id = ids.lock().expect("ctl ids").pop_front().unwrap_or(0);
-                if let WorkerMsg::Data(dv) = msg {
-                    if to_sock
+                if let WorkerMsg::Data(dv) = msg
+                    && to_sock
                         .send(WireData::Map(vec![
                             ("t".into(), WireData::Str("r".into())),
                             ("i".into(), WireData::Int(id as i64)),
                             ("v".into(), dv),
                         ]))
                         .is_err()
-                    {
-                        break;
-                    }
+                {
+                    break;
                 }
             }
         });

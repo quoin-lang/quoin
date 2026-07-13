@@ -992,10 +992,7 @@ fn run_in_frame_ctx<'gc>(
                 frames_len: vm.frames.len(),
                 stack_base: base,
             });
-            (
-                Some(id),
-                Some(std::mem::replace(&mut vm.aot.home_frame_id, Some(id))),
-            )
+            (Some(id), Some(vm.aot.home_frame_id.replace(id)))
         }
         HomeCtx::Propagate(h) => (None, Some(std::mem::replace(&mut vm.aot.home_frame_id, h))),
         HomeCtx::Untracked => (None, None),

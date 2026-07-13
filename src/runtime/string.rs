@@ -42,7 +42,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                 let s = recv!(receiver, String);
                 let to = arg!(args, String, 1);
                 let result = args[0].with_native_state::<NativeRegexState, _, _>(|r| {
-                    r.regex.replace_all(&*s, &**to).to_string()
+                    r.regex.replace_all(&s, &**to).to_string()
                 })?;
                 Ok(vm.new_string(mc, result))
             },
@@ -63,7 +63,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                 let s = recv!(receiver, String);
                 let from = arg!(args, String, 0);
                 let to = arg!(args, String, 1);
-                Ok(vm.new_string(mc, s.replace(&**from, &**to)))
+                Ok(vm.new_string(mc, s.replace(&**from, &to)))
             },
         )
         .instance_method("==:", |vm, mc, receiver, args| {
@@ -229,10 +229,10 @@ pub fn build_string_class() -> NativeClassBuilder {
             while let Some(c) = chars.next() {
                 if c == '%' {
                     if let Some(&next_c) = chars.peek() {
-                        if next_c.is_digit(10) {
+                        if next_c.is_ascii_digit() {
                             let mut num_str = String::new();
                             while let Some(&digit) = chars.peek() {
-                                if digit.is_digit(10) {
+                                if digit.is_ascii_digit() {
                                     num_str.push(digit);
                                     chars.next();
                                 } else {
@@ -571,7 +571,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                     .unwrap_or(s.len());
 
                 let mut result = s[..byte_offset].to_string();
-                result.push_str(&**sub);
+                result.push_str(&sub);
                 result.push_str(&s[byte_offset..]);
 
                 Ok(vm.new_string(mc, result))

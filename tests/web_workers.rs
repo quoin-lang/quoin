@@ -167,8 +167,7 @@ fn dechunk(body: &str) -> String {
     // Minimal HTTP/1.1 chunked decoder for test assertions.
     let mut out = String::new();
     let mut rest = body;
-    loop {
-        let Some(nl) = rest.find("\r\n") else { break };
+    while let Some(nl) = rest.find("\r\n") {
         let size = usize::from_str_radix(rest[..nl].trim(), 16).unwrap_or(0);
         if size == 0 {
             break;

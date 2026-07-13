@@ -239,11 +239,17 @@ the state on `release/v0.1-final`:
   `cargo test` → **`cargo nextest run`** (installed from nextest's own release endpoint,
   not a marketplace action; zero doctests so no coverage lost). **DEFERRED, by decision:**
   *macOS runner* — CI stays Linux-only for now; `release.yml` builds+smokes the macOS
-  binary at tag time, so the platform isn't unverified. *clippy* — the tree carries ~160
-  style warnings **plus a deny-by-default `clippy::mut_from_ref`** on the intentional
-  unsafe `Fiber::get` (`src/fiber.rs:200`, returns `&mut` from `&self`), so a clippy gate
-  reds CI in any form today; running it down (an audited `#[allow]` there + the warnings)
-  is a tracked **post-v0.1 follow-up**, not a release blocker. (`crates/adbc` dropped
+  binary at tag time, so the platform isn't unverified. *clippy* was the other deferral —
+  the tree carried ~160 style warnings **plus a deny-by-default `clippy::mut_from_ref`** on
+  the intentional unsafe `Fiber::get` (`src/fiber.rs`, returns `&mut` from `&self`), so a
+  clippy gate reddened CI in any form. **RESOLVED 2026-07-12** (`chore/clippy-clean`): the
+  tree is clippy-clean and **now gated** by a `clippy` job
+  (`cargo clippy $WORKSPACE --all-targets -- -D warnings`). `Fiber::get` carries an audited
+  `#[allow(clippy::mut_from_ref)]`; the structural lints
+  (`too_many_arguments`/`type_complexity`/`module_inception`) and a few genuine
+  false-positives (`if_same_then_else` on a side-effecting `else if`, `needless_range_loop`
+  over parallel arrays, `await_holding_refcell_ref` on the intentional `ProcWait` borrow)
+  carry justified per-site `#[allow]`s; the rest were fixed outright. (`crates/adbc` dropped
   2026-07-12 — deferred past v0.1 with the extension surface, see "Out of scope" above.)
 - [x] **Release workflow** (`.github/workflows/release.yml`, on `release/v0.1-final`):
   `v*` tag → matrix build (macOS arm64 on `macos-14`, Linux x86_64 on `ubuntu-22.04` for

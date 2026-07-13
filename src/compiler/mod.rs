@@ -102,6 +102,12 @@ pub struct CodeBlock {
     pub current_source: Option<SourceInfo>,
 }
 
+impl Default for CodeBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CodeBlock {
     pub fn new() -> Self {
         Self {
@@ -222,6 +228,7 @@ fn double_bin_kind(inst: &Instruction) -> Option<IntBinKind> {
 ///   `SendLocalLocal`/`SendLocalConst`), pushing two operands then dispatching.
 /// - assignment: `Dup; <store>; Pop` (statement position) → plain `<store>` (drops the Dup
 ///   *and* the Pop); `Dup; <store>` (expression position) → a store-and-keep variant.
+///
 /// See `profiling/superinstructions`.
 ///
 /// Jumps are relative and block-local, so removing an instruction requires: (a) never fusing
@@ -516,9 +523,10 @@ impl NarrowKey {
     fn from_ident(id: &IdentifierNode) -> Option<NarrowKey> {
         if id.identifier_type == IdentifierType::Instance {
             Some(NarrowKey::Field(id.name.clone()))
-        } else if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced {
-            None
-        } else if matches!(id.name.as_str(), "nil" | "true" | "false") {
+        } else if id.namespace.is_some()
+            || id.identifier_type == IdentifierType::Namespaced
+            || matches!(id.name.as_str(), "nil" | "true" | "false")
+        {
             None
         } else {
             Some(NarrowKey::Local(id.name.clone()))
@@ -617,9 +625,9 @@ pub struct Compiler {
     scopes: Vec<Scope>,
     temp_counter: usize,
     /// >0 while compiling the body of a `<-`/`<--` block whose target is an
-    /// immediate value type (Integer/Double/Boolean/Nil). Instance variables are
-    /// rejected there so the "value types have no fields" rule surfaces at compile
-    /// time rather than only when a method runs.
+    /// > immediate value type (Integer/Double/Boolean/Nil). Instance variables are
+    /// > rejected there so the "value types have no fields" rule surfaces at compile
+    /// > time rather than only when a method runs.
     value_type_def_depth: usize,
     /// One-shot flag set right before compiling the block argument of `X.new:{ … }`;
     /// consumed by the next `compile_block` to mark that block's scope `is_init`.
@@ -715,6 +723,12 @@ pub struct Compiler {
     /// compile per evaluation, and per-compile ids would grow the registry without
     /// bound. Default: off.
     mint_template_ids: bool,
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Compiler {
@@ -1475,14 +1489,14 @@ impl Compiler {
             Type::Nullable(inner) => inner.as_ref(),
             other => other,
         };
-        if let Type::Instance(class) = base {
-            if !self.seen_types.contains(class) {
-                self.warn(
-                    "unknown-type",
-                    format!("unknown type `{}`", class),
-                    tr.ident.source_info.as_ref(),
-                );
-            }
+        if let Type::Instance(class) = base
+            && !self.seen_types.contains(class)
+        {
+            self.warn(
+                "unknown-type",
+                format!("unknown type `{}`", class),
+                tr.ident.source_info.as_ref(),
+            );
         }
         ty
     }
@@ -1624,11 +1638,11 @@ impl Compiler {
         bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
         // Value-level promotion: an Integer *literal* where a Double is wanted becomes a Double.
-        if *expected == Type::Double {
-            if let NodeValue::Integer(i) = &node.value {
-                bytecode.push(Instruction::Push(Constant::Double(i.value as f64)));
-                return Ok(());
-            }
+        if *expected == Type::Double
+            && let NodeValue::Integer(i) = &node.value
+        {
+            bytecode.push(Instruction::Push(Constant::Double(i.value as f64)));
+            return Ok(());
         }
         self.compile_node(node, bytecode)?;
         self.check_type(node, expected);
@@ -2133,10 +2147,10 @@ impl Compiler {
             return;
         }
         // Instance subtyping may rescue (a Circle into List(Shape)).
-        if let (Type::Instance(sub), Type::Instance(sup)) = (&actual, &elem) {
-            if self.class_table.is_subtype(sub, sup) != Some(false) {
-                return;
-            }
+        if let (Type::Instance(sub), Type::Instance(sup)) = (&actual, &elem)
+            && self.class_table.is_subtype(sub, sup) != Some(false)
+        {
+            return;
         }
         self.warn(
             "element-type",

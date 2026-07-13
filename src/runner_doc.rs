@@ -979,16 +979,16 @@ fn doc_html(doc: &str) -> String {
     let mut fence: Option<Vec<&str>> = None;
     let flush_para = |out: &mut String, para: &mut Vec<&str>| {
         if !para.is_empty() {
-            let _ = write!(out, "<p>{}</p>\n", inline(&para.join(" ")));
+            let _ = writeln!(out, "<p>{}</p>", inline(&para.join(" ")));
             para.clear();
         }
     };
     for line in doc.lines() {
         if let Some(body) = &mut fence {
             if line.trim_start().starts_with("```") {
-                let _ = write!(
+                let _ = writeln!(
                     out,
-                    "{}\n",
+                    "{}",
                     crate::highlighter::highlight_to_html(&body.join("\n"))
                 );
                 fence = None;
@@ -1006,9 +1006,9 @@ fn doc_html(doc: &str) -> String {
     }
     if let Some(body) = fence {
         // Unclosed fence: render what we have rather than losing it.
-        let _ = write!(
+        let _ = writeln!(
             out,
-            "{}\n",
+            "{}",
             crate::highlighter::highlight_to_html(&body.join("\n"))
         );
     }
@@ -1142,9 +1142,9 @@ fn render_index(model: &DocModel) -> String {
                     )
                 })
                 .unwrap_or_default();
-            let _ = write!(
+            let _ = writeln!(
                 body,
-                "<li><code>bin/{}</code>{}</li>\n",
+                "<li><code>bin/{}</code>{}</li>",
                 esc(&cmd.name),
                 summary
             );
@@ -1164,9 +1164,9 @@ fn render_index(model: &DocModel) -> String {
                     )
                 })
                 .unwrap_or_default();
-            let _ = write!(
+            let _ = writeln!(
                 body,
-                "<li><a href=\"{}\"><code>{}</code></a>{}</li>\n",
+                "<li><a href=\"{}\"><code>{}</code></a>{}</li>",
                 page_name(&c.name),
                 esc(&c.name),
                 summary
@@ -1178,10 +1178,10 @@ fn render_index(model: &DocModel) -> String {
         body.push_str("<h2>Extensions</h2>\n<ul class=\"classlist\">\n");
         for group in &model.extensions {
             let n = group.instance_methods.len() + group.class_methods.len();
-            let _ = write!(
+            let _ = writeln!(
                 body,
                 "<li><a href=\"{}\"><code>{}</code></a><span class=\"summary\">{} added \
-                 method{}</span></li>\n",
+                 method{}</span></li>",
                 ext_page_name(&group.host),
                 esc(&group.host),
                 n,
@@ -1198,17 +1198,17 @@ fn render_index(model: &DocModel) -> String {
 /// `--stdlib-path` when set).
 fn render_extension(group: &ExtensionGroup, model: &DocModel) -> String {
     let mut body = String::new();
-    let _ = write!(body, "<p><a href=\"index.html\">← index</a></p>\n");
-    let _ = write!(
+    let _ = writeln!(body, "<p><a href=\"index.html\">← index</a></p>");
+    let _ = writeln!(
         body,
-        "<h1>Extensions to <code>{}</code></h1>\n",
+        "<h1>Extensions to <code>{}</code></h1>",
         type_link(&group.host, model)
     );
     if !group.sources.is_empty() {
         let srcs: Vec<String> = group.sources.iter().map(|s| source_html(s)).collect();
-        let _ = write!(
+        let _ = writeln!(
             body,
-            "<p class=\"meta-line\">extended at {}</p>\n",
+            "<p class=\"meta-line\">extended at {}</p>",
             srcs.join(" · ")
         );
     }
@@ -1222,7 +1222,7 @@ fn render_extension(group: &ExtensionGroup, model: &DocModel) -> String {
         if list.is_empty() {
             continue;
         }
-        let _ = write!(body, "<h2>{title}</h2>\n");
+        let _ = writeln!(body, "<h2>{title}</h2>");
         for m in list {
             let sigs: Vec<String> = m.signatures.iter().map(|s| esc(s)).collect();
             let _ = write!(
@@ -1247,7 +1247,7 @@ fn render_extension(group: &ExtensionGroup, model: &DocModel) -> String {
 
 fn render_class(class: &ClassDoc, model: &DocModel) -> String {
     let mut body = String::new();
-    let _ = write!(body, "<p><a href=\"index.html\">← index</a></p>\n");
+    let _ = writeln!(body, "<p><a href=\"index.html\">← index</a></p>");
     let mut badges = String::new();
     if class.is_abstract {
         badges.push_str("<span class=\"badge\">abstract</span>");
@@ -1255,12 +1255,7 @@ fn render_class(class: &ClassDoc, model: &DocModel) -> String {
     if class.is_sealed {
         badges.push_str("<span class=\"badge\">sealed</span>");
     }
-    let _ = write!(
-        body,
-        "<h1><code>{}</code>{}</h1>\n",
-        esc(&class.name),
-        badges
-    );
+    let _ = writeln!(body, "<h1><code>{}</code>{}</h1>", esc(&class.name), badges);
 
     let mut lineage: Vec<String> = Vec::new();
     if let Some(p) = &class.parent {
@@ -1274,16 +1269,16 @@ fn render_class(class: &ClassDoc, model: &DocModel) -> String {
         lineage.push(format!("defined at {}", source_html(src)));
     }
     if !lineage.is_empty() {
-        let _ = write!(body, "<p class=\"meta-line\">{}</p>\n", lineage.join(" · "));
+        let _ = writeln!(body, "<p class=\"meta-line\">{}</p>", lineage.join(" · "));
     }
     if let Some(doc) = &class.doc {
         body.push_str(&doc_html(doc));
     }
     for ext in &class.extensions {
-        let _ = write!(
+        let _ = writeln!(
             body,
             "<div class=\"method\"><span class=\"meta-line\">extended at {}</span>\
-             <div class=\"body\">{}</div></div>\n",
+             <div class=\"body\">{}</div></div>",
             source_html(&ext.source),
             doc_html(&ext.doc)
         );
@@ -1296,7 +1291,7 @@ fn render_class(class: &ClassDoc, model: &DocModel) -> String {
         if list.is_empty() {
             continue;
         }
-        let _ = write!(body, "<h2>{title}</h2>\n");
+        let _ = writeln!(body, "<h2>{title}</h2>");
         for m in list {
             let sigs: Vec<String> = m.signatures.iter().map(|s| esc(s)).collect();
             let _ = write!(

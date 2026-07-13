@@ -124,20 +124,20 @@ fn argv_of(v: Value, who: &str) -> Result<(OsString, Vec<OsString>), QuoinError>
              alone — there is no shell, so nothing splits)"
         ),
     };
-    if let Value::Object(o) = v {
-        if let ObjectPayload::String(s) = &o.borrow().payload {
-            return Ok((OsString::from(&**s), Vec::new()));
-        }
+    if let Value::Object(o) = v
+        && let ObjectPayload::String(s) = &o.borrow().payload
+    {
+        return Ok((OsString::from(&**s), Vec::new()));
     }
     let strings = v
         .with_native_state::<crate::runtime::list::NativeListState, _, _>(|l| {
             l.get_vec()
                 .iter()
                 .map(|e| {
-                    if let Value::Object(o) = e {
-                        if let ObjectPayload::String(s) = &o.borrow().payload {
-                            return Some(OsString::from(&**s));
-                        }
+                    if let Value::Object(o) = e
+                        && let ObjectPayload::String(s) = &o.borrow().payload
+                    {
+                        return Some(OsString::from(&**s));
                     }
                     None
                 })
@@ -187,10 +187,10 @@ fn env_of(v: Value, who: &str) -> Result<Option<Vec<(OsString, OsString)>>, Quoi
 }
 
 fn string_of(v: Value) -> Option<String> {
-    if let Value::Object(o) = v {
-        if let ObjectPayload::String(s) = &o.borrow().payload {
-            return Some(s.to_string());
-        }
+    if let Value::Object(o) = v
+        && let ObjectPayload::String(s) = &o.borrow().payload
+    {
+        return Some(s.to_string());
     }
     None
 }

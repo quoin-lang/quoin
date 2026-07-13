@@ -69,17 +69,17 @@ impl NamespacedName {
     }
 
     pub fn parse(s: &str) -> Self {
-        if s.starts_with('[') {
-            if let Some(close_idx) = s.find(']') {
-                let ns_part = &s[1..close_idx];
-                let name = s[close_idx + 1..].to_string();
-                let path = if ns_part == "/" || ns_part.is_empty() {
-                    Vec::new()
-                } else {
-                    ns_part.split('/').map(|x| x.to_string()).collect()
-                };
-                return Self { path, name };
-            }
+        if s.starts_with('[')
+            && let Some(close_idx) = s.find(']')
+        {
+            let ns_part = &s[1..close_idx];
+            let name = s[close_idx + 1..].to_string();
+            let path = if ns_part == "/" || ns_part.is_empty() {
+                Vec::new()
+            } else {
+                ns_part.split('/').map(|x| x.to_string()).collect()
+            };
+            return Self { path, name };
         }
         Self {
             path: Vec::new(),
@@ -1298,22 +1298,6 @@ impl NativeClass for NativeClassBuilder {
         self.new_policy
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_opaque_state_debug() {
-        struct Dummy;
-        let state = OpaqueState(Dummy);
-        let debug_str = format!("{:?}", state);
-        assert_eq!(
-            debug_str,
-            "OpaqueState<quoin::value::tests::test_opaque_state_debug::Dummy>"
-        );
-    }
-}
 /// The VM's slot stack (docs/internal/WINDOW_ARENA_ARCH.md §2.2): a Vec with a
 /// `#[repr(C)]` HEAD at a stable address — compiled code reads `(ptr, len)`
 /// through the head (passed via the raw ABI beside fuel/depth/epoch) and
@@ -1442,5 +1426,21 @@ unsafe impl<'gc> gc_arena::Collect<'gc> for SlotStack<'gc> {
     const NEEDS_TRACE: bool = true;
     fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
         self.vec.trace(cc);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_opaque_state_debug() {
+        struct Dummy;
+        let state = OpaqueState(Dummy);
+        let debug_str = format!("{:?}", state);
+        assert_eq!(
+            debug_str,
+            "OpaqueState<quoin::value::tests::test_opaque_state_debug::Dummy>"
+        );
     }
 }

@@ -76,7 +76,7 @@ impl LineOffsetTable {
 }
 
 thread_local! {
-    static LINE_OFFSET_TABLE: RefCell<Option<LineOffsetTable>> = RefCell::new(None);
+    static LINE_OFFSET_TABLE: RefCell<Option<LineOffsetTable>> = const { RefCell::new(None) };
 }
 
 pub fn parse_quoin_string(code: &str) -> Node {
@@ -779,7 +779,7 @@ fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
         Rule::symbol_expr => {
             let raw_symbol = inner.as_str();
             let symbol_val = raw_symbol
-                .trim_start_matches(&['#', '\''])
+                .trim_start_matches(['#', '\''])
                 .trim_end_matches('\'')
                 .to_string();
             Node {
@@ -856,7 +856,7 @@ fn parse_block(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
             let sym = pairs.next().unwrap();
             let raw_symbol = sym.as_str();
             let symbol_val = raw_symbol
-                .trim_start_matches(&['#', '\''])
+                .trim_start_matches(['#', '\''])
                 .trim_end_matches('\'')
                 .to_string();
             let symbol_node = SymbolNode { value: symbol_val };
@@ -925,6 +925,7 @@ fn parse_block(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
     }
 }
 
+#[allow(clippy::type_complexity)] // returns (args, param syms, return-type node) tuple
 fn parse_block_decls(
     pair: Pair<Rule>,
     filename: &str,

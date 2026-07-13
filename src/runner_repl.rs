@@ -649,12 +649,12 @@ pub(crate) fn run_repl_piped(arena: &mut ReplArena) -> Option<i32> {
         if buffer.is_empty() && line.trim().is_empty() {
             continue;
         }
-        if buffer.is_empty() {
-            if let Some(action) = handle_repl_command(arena, &line) {
-                match action {
-                    ReplAction::Quit => break,
-                    ReplAction::Continue => continue,
-                }
+        if buffer.is_empty()
+            && let Some(action) = handle_repl_command(arena, &line)
+        {
+            match action {
+                ReplAction::Quit => break,
+                ReplAction::Continue => continue,
             }
         }
         buffer.push_str(&line);

@@ -114,11 +114,12 @@ pub fn complete_input(line: &str, pos: usize, index: &CompletionIndex) -> (usize
     // Namespaced-name position: the fragment sits right after a closed `[ns]` (`[IO]Fi`).
     // Complete the fully-qualified name, replacing from the `[`. (`[` is namespace-only in the
     // grammar, so a `]` here always closes one.)
-    if fstart > 0 && bytes[fstart - 1] == b']' {
-        if let Some(open) = bytes[..fstart - 1].iter().rposition(|&c| c == b'[') {
-            let prefix = &line[open..pos];
-            return (open, filter_prefix(&index.namespaced, prefix));
-        }
+    if fstart > 0
+        && bytes[fstart - 1] == b']'
+        && let Some(open) = bytes[..fstart - 1].iter().rposition(|&c| c == b'[')
+    {
+        let prefix = &line[open..pos];
+        return (open, filter_prefix(&index.namespaced, prefix));
     }
 
     // Method-send position: the fragment is directly preceded by a single `.` (a `..` is a
