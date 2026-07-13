@@ -1,0 +1,127 @@
+name: Release
+
+# Builds the `qn` binary for each supported target, smoke-tests it OUTSIDE the source
+# tree (the only place `QUOIN_STDLIB` is unset, so the embedded stdlib is what runs), and
+# publishes a draft GitHub Release with the tarballs, checksums, and the CHANGELOG notes.
+#
+# Triggers:
+#   - push of a `v*` tag  -> full build + publish (draft release).
+#   - workflow_dispatch   -> build + smoke-test only; the publish job is skipped, so the
+#                            whole pipeline can be exercised before cutting a real tag.
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native builds only -- no cross-compilation. Apple Silicon and an old-enough
+          # glibc (ubuntu-22.04) for a broadly-usable Linux binary.
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build only the `qn` binary -- the workspace also defines an `ext_echo` test-fixture
+      # bin we do not ship.
+      - name: Build
+        run: cargo build --release --bin qn
+
+      # Run the built binary from a scratch dir with no repo checkout in scope. `.cargo/
+      # config.toml` sets QUOIN_STDLIB only for `cargo` invocations, so a bare binary here
+      # exercises the stdlib embedded by build.rs -- exactly what a user runs.
+      - name: Smoke-test outside the source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$PWD/target/release/qn"
+          cd "$(mktemp -d)"
+          "$bin" --version
+          out="$("$bin" -e '(#(1 2 3).collect: {|n| n * n}).s.print')"
+          echo "stdlib smoke output: $out"
+          case "$out" in
+            *9*) : ;;                                  # prelude List#collect: + String ran
+            *) echo "unexpected smoke output: $out" >&2; exit 1 ;;
+          esac
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          # On workflow_dispatch there is no tag; label the artifact "dev" so packaging
+          # still succeeds for a dry run.
+          case "$GITHUB_REF" in refs/tags/*) ref="$GITHUB_REF_NAME" ;; *) ref="dev" ;; esac
+          stage="qn-${ref}-${{ matrix.target }}"
+          mkdir "$stage"
+          cp target/release/qn LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
+          echo "Packaged ${stage}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: qn-*.tar.gz
+          if-no-files-found: error
+
+  # Publish only for a real tag push. A workflow_dispatch run stops after `build`.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS
+
+      # Extract the notes for this version's heading from the CHANGELOG. Falls back to
+      # GitHub's auto-generated notes if the section is missing or empty.
+      - name: Release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md | sed '/^<!--/d' > notes.md
+          # Strip leading blank lines.
+          sed -i '/./,$!d' notes.md
+          if [ -s notes.md ]; then
+            echo "NOTES_ARG=--notes-file notes.md" >> "$GITHUB_ENV"
+          else
+            echo "No [$version] section in CHANGELOG; using generated notes." >&2
+            echo "NOTES_ARG=--generate-notes" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # $NOTES_ARG is intentionally unquoted: it word-splits into either
+          # `--notes-file notes.md` or `--generate-notes`.
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz dist/SHA256SUMS \
+            --title "$GITHUB_REF_NAME" \
+            --draft \
+            $NOTES_ARG
