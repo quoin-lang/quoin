@@ -146,29 +146,36 @@ predated strict `var`/`let`.
 ## Docs publishing — generate everything as HTML, publish to the website
 
 Decided 2026-07-10: the release ships browsable docs on the project website
-(the `quoin-lang` org), not just in-repo markdown. Deferred alongside the CI
-workflows (needs the org + hosting), but the shape is recorded now so the
-Tier 2 work builds toward it:
+(the `quoin-lang` org), not just in-repo markdown. **Shipped and verified live
+2026-07-12** — the docs are hosted at quoinlang.dev; the checks below confirm
+the state on `release/v0.1-final`:
 
-- [ ] **One generated site from two sources.** *(Half done, 2026-07-12: `qn doc --md
-  docs/language --out site/book` renders the book to HTML with real Quoin highlighting —
-  quoin/norun fences through the shared highlighter, tables, rule-box blockquotes, `.md`
-  links rewritten, README→index. Remaining: assemble book + `--stdlib` reference under one
-  root and cross-link via `--stdlib-path`.)* The API reference is already
-  HTML (`qn doc`); the language book (`docs/language/*.md`) needs a
-  markdown→HTML render. Reuse the doc generator's page chrome and the shared
-  code stylesheet (`highlighter::code_stylesheet`) so book pages and reference
-  pages read as one site — fenced `quoin` blocks in the book render through
-  `highlight_to_html` exactly like reference examples.
-- [ ] **Publish pipeline**: a workflow that runs `qn doc --out site/reference
-  --json`, renders the book into `site/`, and deploys (GitHub Pages or the
-  org's host — decide at org move). The `--json` model also uploads, as the
-  machine-readable contract.
-- [ ] **Cross-linking between book and reference** — deferred with the hosting
-  decision (2026-07-10): until URLs exist, the book references classes by
-  name and points readers at `qn doc`; once the site exists, linkify.
-- [ ] Doc-example checking (`qn doc --check`, Tier 2) runs in the publish
-  pipeline too: nothing ships with a broken example.
+- [x] **One generated site from two sources** — hosted at quoinlang.dev via the site
+  repo (`quoin-lang/site`, `~/code/quoin-site`): `tools/gen_docs.sh` runs `qn doc --md
+  docs/language --out public/book` (the book, real Quoin highlighting — quoin/norun fences
+  through the shared highlighter, tables, rule-box blockquotes, `.md` links rewritten,
+  README→index) and `qn doc --stdlib --out public/reference` (the API reference). Book and
+  reference share the doc generator's page chrome and code stylesheet, so they read as one
+  site. Verified 2026-07-12: a fresh build is byte-identical to the live `/book/` (11 pages)
+  and `/reference/` (140 pages) — the site is current, incl. the full #90–100 stdlib.
+- [x] **Publish pipeline** — `gen_docs.sh [vm-checkout]` regenerates both trees; a push to
+  the site repo's `main` **auto-deploys** (Cloudflare Workers Builds). Manual, not a CI
+  job; a CI-triggered regen-on-VM-release is a post-v0.1 nicety. Doc-example checking
+  (`qn doc --check`) runs in the VM's own CI (`rust.yml`), so nothing ships with a broken
+  example.
+- [x] **Source links resolve** — the reference's `<source>.qn` links use
+  `CARGO_PKG_REPOSITORY` = `github.com/quoin-lang/quoin`; before the org move they 404'd
+  (repo not yet public there), now they 200. Verified 2026-07-12 (HEAD on a live link).
+- [ ] **Book → reference cross-linking — DEFERRED post-v0.1.** The original plan said
+  "cross-link via `--stdlib-path`", but that is **wrong for the book**: `--stdlib-path`
+  linkifies *type annotations* in the reference/project-doc path (`type_link` in
+  runner_doc.rs), NOT markdown prose — `qn doc --md … --stdlib-path …` was verified to emit
+  **zero** reference links. The reference IS internally cross-linked (List→Iterate/Object).
+  Wiring the book would be a bounded new `md_html` feature: linkify inline-**code spans**
+  that exactly match a known stdlib class (e.g. `` `List` `` → `../reference/List.html`),
+  code-spans ONLY to avoid false positives on common words (Set, Log, Match, Span, Term).
+  Decision 2026-07-12: defer — the book names classes and points at `qn doc`/the reference,
+  which is acceptable for v0.1.
 
 ## Tier 4 — packaging, CI, docs triage
 
