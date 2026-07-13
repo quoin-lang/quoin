@@ -85,7 +85,7 @@ nil.class == Nil        "* -> true
 | Set     | `#<1 2 3>`                      |
 | Range   | `1..5` (end-exclusive)          |
 | Regex   | `#/^[A-Z]+$/`                   |
-| Block   | `{ 3 * 4 }` or `{ |a b| a > b }`|
+| Block   | `{ 3 * 4 }` or `{ \|a b\| a > b }`|
 
 ### Everything is a message send
 
