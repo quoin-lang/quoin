@@ -6,9 +6,7 @@ All notable changes to Quoin are recorded here. The format follows
 Quoin is pre-1.0. Minor versions may make breaking language changes; each one is called out
 under **Changed**, with the migration.
 
-## [0.1.0] — unreleased
-
-<!-- Date this heading when the release is tagged. -->
+## [0.1.0] — 2026-07-12
 
 The first release of Quoin: a small, dynamically-typed, object-oriented language in the
 Smalltalk tradition — everything is an object, everything happens by sending messages, and
