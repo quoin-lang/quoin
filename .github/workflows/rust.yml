@@ -67,6 +67,30 @@ jobs:
     - name: Run clippy
       run: cargo clippy $WORKSPACE --all-targets -- -D warnings
 
+  # The browser-playground build: the VM library and the quoin-wasm bindings must
+  # keep compiling (and stay clippy-clean) for wasm32-unknown-unknown, and the
+  # cdylib must keep linking (the stack-size link-arg in .cargo/config.toml only
+  # exercises at link time, which `check`/`clippy` skip). Runtime behavior is
+  # covered natively by direct_runner_tests.rs; the Node smoke test
+  # (scripts/wasm_smoke.mjs) stays a local pre-deploy step.
+  wasm:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
+    - name: Install clippy and the wasm target
+      run: |
+        rustup component add clippy
+        rustup target add wasm32-unknown-unknown
+    - name: Clippy the library for wasm32
+      run: cargo clippy --lib -p quoin --target wasm32-unknown-unknown -- -D warnings
+    - name: Clippy quoin-wasm for wasm32
+      run: cargo clippy -p quoin-wasm --target wasm32-unknown-unknown -- -D warnings
+    - name: Link the cdylib
+      run: cargo build -p quoin-wasm --target wasm32-unknown-unknown
+
   # Dylint lints: both yield-safety lints are deny-level -- a violation fails
   # this job; an audited #[allow] at the site is the escape hatch. The lint
   # libraries pin their own nightly via rust-toolchain files, which rustup
