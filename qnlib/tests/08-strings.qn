@@ -1,9 +1,15 @@
 "* Interpolation fixtures: a `%'…'` literal lowers to a `+` chain at compile
-"* time, so `%{…}` sees the enclosing scope — locals AND instance variables
-"* (the runtime reflective path, kept for computed strings, sees locals only).
+"* time, so `%{…}` sees the enclosing scope — locals AND instance variables.
+"* The runtime reflective path (kept for computed strings) sees the same
+"* scope dynamically: caller locals plus the caller's `self`.
 InterpNamed <- { |@name|
     init: -> { |name| @name = name }
     greet -> { %'Hello, %{@name}!' }
+    tag -> { 'T' }
+    dynGreet -> {
+        var t = 'Hello, %{@name} (%{.tag}, %{self.class.name})!';
+        %t
+    }
 }
 
 InterpCustomS <- {
@@ -71,10 +77,14 @@ InterpCustomS <- {
     .test:
     dynamicInterpolation -> {
         "* Sending `%` to a COMPUTED string takes the runtime reflective
-        "* path: `%{…}` re-parses at call time against the caller's locals.
+        "* path: `%{…}` re-parses at call time in the caller's scope.
         var x = 6;
         var t = 'x is %{x}';
         .is:{ %t } equalTo:'x is 6';
+        "* The caller's `self` is visible too — `@ivars`, dot-sends, `self`
+        "* (the sub-unit compiles like `eval:self:`, no `self = nil` default).
+        .is:{ (InterpNamed.new:{ var name = 'Ada' }).dynGreet }
+            equalTo:'Hello, Ada (T, InterpNamed)!';
         "* A malformed fragment there is a catchable ParseError (a malformed
         "* `%'…'` literal is a compile error instead).
         var bad = 'oops %{)}';

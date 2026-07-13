@@ -217,7 +217,8 @@ This document outlines the language features, compiler updates, and VM modificat
     these methods), a malformed fragment is now a compile error, and the slot-plan-B blocker
     (§9 "local-variable slots") is cleared — no implicit local capture remains in literal
     interpolation. Sending `%` to a *computed* string keeps the runtime reflective path
-    (locals only, catchable ParseError); both share the `quoin-syntax` `interp` splitter.
+    (catchable ParseError; sees the caller's `self`/`@ivars` too since the `define_self:
+    false` fix); both share the `quoin-syntax` `interp` splitter.
 - [x] Make sure case statements are tested and working.
 - [x] Make the `^>` yield operator usable in expression position.
   - Moved `yield_return` from `stmt` to `primary` in the pest grammar; it now works anywhere an expression does (e.g. `a = ^> v`), with greedy operand precedence matching `Fiber.yield:` (parenthesize to scope). ANTLR grammar (legacy/unused path) left as-is.

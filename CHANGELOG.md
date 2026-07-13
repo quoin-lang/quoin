@@ -16,7 +16,14 @@ under **Changed**, with the migration.
   containing interpolation literals are also no longer excluded from ahead-of-time
   compilation. Migration: a malformed `%{…}` in a literal is now a compile-time parse error
   instead of a runtime-catchable `ParseError`; sending `%` to a *computed* string keeps the
-  old reflective behavior (caller locals only, catchable `ParseError`).
+  reflective runtime path and its catchable `ParseError`.
+
+### Fixed
+
+- The reflective path (`%` sent to a computed string) now sees the caller's `self` too:
+  `%{@ivar}`, `%{self}`, and `%{.send}` resolve against the calling method's receiver
+  instead of silently reading nil — the interpolated unit compiles like `eval:self:`,
+  without the top-level `self = nil` default that shadowed the caller's binding.
 
 ## [0.1.0] — 2026-07-12
 

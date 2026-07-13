@@ -376,8 +376,12 @@ pub fn build_string_class() -> NativeClassBuilder {
                         compiler.set_seen_types(vm.options.seen_types.clone());
                         compiler.set_class_table(vm.options.class_table.clone());
                         crate::class_table::populate_from_vm(vm, &vm.options.class_table);
+                        // `define_self: false`, exactly like `eval:self:`: the
+                        // default top-level `self = nil` would shadow the
+                        // caller's `self` in the env chain, silently rendering
+                        // `%{@ivar}` / `%{self}` / `%{.send}` as nil.
                         let compiled = compiler
-                            .compile_program(program_node)
+                            .compile_program_with(program_node, false)
                             .map_err(|e| QuoinError::Other(e.to_string()))?;
                         vm.report_type_warnings(compiler.diagnostics());
 
@@ -407,12 +411,11 @@ pub fn build_string_class() -> NativeClassBuilder {
         })
         .doc(
             "Interpolation: evaluate each `%{...}` in the receiver as a Quoin expression \
-             and splice in the result's `.s` rendering. A `%'…'` literal is lowered to \
-             string concatenation at compile time, so its expressions see everything in \
-             scope (locals and `@ivars`) and a malformed one is a compile error. Sending \
-             `%` to a computed string evaluates its `%{...}` reflectively in the caller's \
-             scope instead — locals only, no `@ivars` — and a malformed expression raises \
-             a catchable ParseError.\n\n\
+             in the surrounding scope — locals, `self`, and `@ivars` — and splice in the \
+             result's `.s` rendering. A `%'…'` literal is lowered to string concatenation \
+             at compile time, so a malformed expression there is a compile error; sending \
+             `%` to a computed string evaluates its `%{...}` reflectively at call time \
+             instead, and a malformed expression raises a catchable ParseError.\n\n\
              ```\n\
              %'x = %{1 + 2}'     \"* -> x = 3\n\
              ```",
