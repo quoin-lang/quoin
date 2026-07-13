@@ -1069,7 +1069,12 @@ impl<'gc> VmState<'gc> {
         parent: Option<(TaskId, usize)>,
         handle: Option<Value<'gc>>,
     ) -> Task<'gc> {
+        #[cfg(not(target_arch = "wasm32"))]
         let coro = Fiber::new(|yielder, ctx| crate::fiber::run_vm_loop(yielder, ctx));
+        // wasm32: tasks can still be *built* (`Task.spawn:` and friends), but there is
+        // no driver to run them — the coroutine slot is an inert husk. See `src/fiber.rs`.
+        #[cfg(target_arch = "wasm32")]
+        let coro = Fiber::new_inert();
         Task {
             coro: gc!(mc, coro),
             root_yielder: None,

@@ -206,6 +206,8 @@ pub fn build_runtime_class() -> NativeClassBuilder {
 }
 
 /// Build a runnable top-level `Block` from a freshly compiled `StaticBlock`.
+// wasm32: dead only until the wasm driver (which builds the main block itself) lands.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn build_block<'gc>(
     mc: &Mutation<'gc>,
     static_block: &StaticBlock,

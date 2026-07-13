@@ -14,6 +14,9 @@
 //! yielder. No `'gc` value is held across a suspend inside these helpers
 //! except via GC-visible homes (`vm.stack`, `active_native_args`).
 
+// Everything here serves the Cranelift translator, which is compiled out on wasm32;
+// the items themselves are target-clean, so allow rather than gate each one.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 use std::ffi::c_void;
 
 use gc_arena::Mutation;

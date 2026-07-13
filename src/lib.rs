@@ -1,13 +1,20 @@
 #![allow(unknown_lints)]
 
+// Modules gated `not(target_arch = "wasm32")` are the OS-bound surface a browser build
+// can't carry: the coroutine runner/driver + REPL/DAP front-ends (corosensei, rustyline)
+// and the worker subprocess machinery. `codegen` compiles on wasm minus its Cranelift
+// translator (see codegen/mod.rs), and `io_backend` gates its smol-backed half inside
+// the module. Everything else compiles for wasm as-is.
 pub mod ansi_colorizer;
 pub mod class_table;
 pub mod codegen;
 pub mod compiler;
 pub mod compute;
 pub mod coverage;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod dap;
 pub mod debug;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod debug_cli;
 pub mod devirt_ops;
 pub mod dispatch;
@@ -24,7 +31,10 @@ pub mod io_codecs;
 pub mod md_html;
 pub mod packages;
 pub mod parser;
+pub mod registry;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod repl_complete;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
 pub mod runtime;
 pub mod stdlib;

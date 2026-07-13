@@ -1,5 +1,8 @@
 use crate::error::QuoinError;
-use crate::fiber::{Fiber, run_vm_loop};
+use crate::fiber::Fiber;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fiber::run_vm_loop;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::gc;
 use crate::value::{AnyCollect, NativeCall, NativeClassBuilder, Value};
 use crate::vm::{AotTaskState, Frame};
@@ -257,11 +260,23 @@ pub fn build_fiber_class() -> NativeClassBuilder {
                     });
                 }
             }
-            let coro = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
-            let coro_gc = gc!(mc, coro);
-            let state = NativeFiberState::new(coro_gc, block_val);
-            let class = vm.get_builtin_class("Fiber");
-            Ok(vm.new_native_state(mc, class, state))
+            // No stack switching on wasm32: a guest fiber could be built (as a husk)
+            // but never resumed, so refuse up front with a catchable error instead.
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = (vm, mc);
+                Err(QuoinError::Other(
+                    "Fiber is not supported on this platform".to_string(),
+                ))
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let coro = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
+                let coro_gc = gc!(mc, coro);
+                let state = NativeFiberState::new(coro_gc, block_val);
+                let class = vm.get_builtin_class("Fiber");
+                Ok(vm.new_native_state(mc, class, state))
+            }
         })
         .doc(
             "A fresh, unstarted fiber wrapping the zero-parameter block (status 'created'). \

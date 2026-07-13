@@ -20,7 +20,30 @@
 
 mod helpers;
 pub mod spec;
+#[cfg(not(target_arch = "wasm32"))]
 mod translate;
+
+/// wasm32: no executable memory, no JIT — translation refuses everything by compiling
+/// nothing. Everything else in this module (candidate collection, the registry, spec
+/// state, stats) is plain data and compiles unchanged; the registry just stays empty,
+/// so dispatch never mints an `AotCall` and the interpreter (the authoritative
+/// fallback, same as `QN_AOT=0`) runs everything.
+#[cfg(target_arch = "wasm32")]
+mod translate {
+    use super::{AotCandidate, AotEntry, AotParam, AotRet, Refusal};
+    use std::collections::HashMap;
+
+    #[allow(clippy::type_complexity)]
+    pub(super) fn compile_all(
+        _cands: &[AotCandidate],
+        _siblings: &HashMap<(u32, String), (Vec<AotParam>, AotRet, u32)>,
+    ) -> (
+        Vec<(u32, AotEntry, Vec<(usize, u32)>)>,
+        Vec<(String, Refusal)>,
+    ) {
+        (Vec::new(), Vec::new())
+    }
+}
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -333,6 +356,7 @@ pub fn stage_baked(tid: u32, sites: FxHashMap<usize, BakedW0>) {
     baked_staging().lock().unwrap().insert(tid, sites);
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // native-only caller is compiled out
 pub(super) fn take_baked_for(tid: u32) -> FxHashMap<usize, BakedW0> {
     baked_staging()
         .lock()
@@ -1508,6 +1532,7 @@ pub fn invoke_block<'gc>(
 /// resume segment; the `'gc` erasure matches the `VMContext`/`Scheduler.yielder`
 /// precedent (no `'gc` value is created or held here — `CooperativeYield` carries
 /// none).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // native-only caller is compiled out
 unsafe extern "C" fn aot_checkpoint(vm: *mut c_void, fuel: *mut i64) -> u8 {
     let vm = unsafe { &mut *(vm as *mut VmState<'_>) };
     if vm.sched.cancel_current {

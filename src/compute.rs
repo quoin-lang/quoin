@@ -182,8 +182,10 @@ pub async fn offload(job: ComputeJob) -> Result<ComputeOut, String> {
     SUBMITTED.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = async_channel::bounded::<Result<ComputeOut, String>>(1);
     let job: Job = Box::new(move || {
-        // The receiver may be gone (cancelled await) — deliver-and-ignore.
-        let _ = tx.send_blocking(job.run());
+        // The receiver may be gone (cancelled await) — deliver-and-ignore. `try_send`
+        // rather than `send_blocking` (which async-channel compiles out on wasm): the
+        // lane is a fresh bounded(1), so the one slot is guaranteed free.
+        let _ = tx.try_send(job.run());
     });
     pool()
         .tx

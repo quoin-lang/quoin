@@ -464,7 +464,7 @@ pub struct Io {
     /// The reactor + the `StreamId -> fd` registry. Held here so it **persists across separate driver
     /// runs** — most importantly the REPL, where a long-lived resource opened on one line (an
     /// extension socket, a file, a TCP/TLS connection) must survive into the next.
-    pub backend: crate::io_backend::SmolBackend,
+    pub backend: crate::io_backend::DefaultBackend,
     /// fds whose QN `TcpSocket` handle has been closed or collected, awaiting a synchronous
     /// `IoBackend::close` by the driver. A non-GC queue (the handle's `Drop` can only push a plain
     /// `StreamId`); a shared `Rc` clone lives in each socket handle. See `docs/internal/ASYNC_ARCH.md`.
@@ -834,7 +834,7 @@ impl<'gc> VmState<'gc> {
             unit_path: None,
             worker_registry: Vec::new(),
             io: Io {
-                backend: crate::io_backend::SmolBackend::new(),
+                backend: crate::io_backend::DefaultBackend::new(),
                 socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 ext_handle_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 child_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -3510,6 +3510,7 @@ impl<'gc> VmState<'gc> {
     /// ip)` cell — both tiers warm one cache, the B3a outcall lesson applied
     /// to fields. Missing/undeclared/non-object reads are nil, exactly as
     /// interpreted.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // called from AOT-compiled code
     pub(crate) fn field_load_cached(
         &mut self,
         mc: &Mutation<'gc>,
@@ -4071,6 +4072,7 @@ impl<'gc> VmState<'gc> {
     }
 
     /// Drain the retranslation queue (driver-boundary caller).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // AOT-driver-only (native)
     pub(crate) fn take_retranslations(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.aot_retranslate_queue)
     }
@@ -4083,6 +4085,7 @@ impl<'gc> VmState<'gc> {
     /// this replaces stranded every prior batch's edges and re-warmed the
     /// world per batch — measured btrees +3.2%/richards +3.7%). Runs at the
     /// driver boundary; O(total cached slots), rare.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // AOT-driver-only (native)
     pub(crate) fn invalidate_caches_for_template(&mut self, mc: &Mutation<'gc>, tid: u32) {
         for cell in &mut self.aot_sites {
             if cell.entry.is_some_and(|e| e.template_id == tid) {
@@ -4109,6 +4112,7 @@ impl<'gc> VmState<'gc> {
     /// D3b: capture baked W0 facts for a caller's retained sites — warm,
     /// current-epoch, monomorphic cells whose entry meets the W0 tier
     /// criteria. Runs in the driver's drain (the translator has no VM).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // AOT-driver-only (native)
     pub(crate) fn bake_w0_sites(
         &self,
         sites: &rustc_hash::FxHashMap<usize, u32>,
@@ -5133,6 +5137,8 @@ impl<'gc> VmState<'gc> {
     /// `step_internal` do per instruction, so the result feeds `run_vm_loop` directly. Returns
     /// `Running` once the budget is spent (i.e. "yield now"). The held `Rc` keeps the bytecode
     /// alive across frame changes and GC, exactly as the per-step clone did.
+    // wasm32: dead only until the wasm driver (which steps this directly) lands.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn run_dispatch(
         &mut self,
         mc: &Mutation<'gc>,
