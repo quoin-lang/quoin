@@ -232,6 +232,101 @@ pub struct VmRunnerOptions {
     /// `qn doc --stdlib-path PREFIX` (hidden): link prefix (relative path or URL) for
     /// stdlib types in project docs.
     pub doc_stdlib_path: Option<String>,
+    /// `qn check --json` (hidden): emit diagnostics as a JSON array on stdout instead
+    /// of rendered text — the machine contract the language server consumes.
+    pub check_json: bool,
+}
+
+/// One `qn check --json` diagnostic — the machine-readable form of a checker warning,
+/// compile error, or parse error. `line` is 1-based and `column` 0-based (the
+/// `SourceInfo` convention, which is also the LSP's); `start`/`end` are byte offsets
+/// into `file`, the authoritative span. Location fields are absent when a diagnostic
+/// has no attributable site.
+#[derive(serde::Serialize)]
+struct CheckDiag {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    /// `"error"` (parse / compile) or `"warning"` (checker diagnostics).
+    severity: &'static str,
+    /// The `WARNING_KINDS` slug, or `"parse-error"` / `"compile-error"`.
+    kind: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end: Option<usize>,
+    /// Why-chain notes (provenance), each at its own span.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<CheckNote>,
+}
+
+#[derive(serde::Serialize)]
+struct CheckNote {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end: Option<usize>,
+}
+
+impl CheckDiag {
+    fn new(
+        severity: &'static str,
+        kind: &str,
+        message: String,
+        span: Option<&quoin_syntax::SourceInfo>,
+    ) -> Self {
+        let mut d = CheckDiag {
+            file: None,
+            severity,
+            kind: kind.to_string(),
+            message,
+            line: None,
+            column: None,
+            start: None,
+            end: None,
+            notes: Vec::new(),
+        };
+        if let Some(s) = span {
+            d.file = Some(s.filename.clone());
+            d.line = Some(s.line);
+            d.column = Some(s.column);
+            d.start = Some(s.start);
+            d.end = Some(s.end);
+        }
+        d
+    }
+
+    fn from_warning(w: &crate::compiler::Diagnostic) -> Self {
+        let mut d = Self::new("warning", w.kind, w.message.clone(), w.span.as_ref());
+        d.notes = w
+            .notes
+            .iter()
+            .map(|n| CheckNote {
+                message: n.message.clone(),
+                file: n.span.as_ref().map(|s| s.filename.clone()),
+                line: n.span.as_ref().map(|s| s.line),
+                column: n.span.as_ref().map(|s| s.column),
+                start: n.span.as_ref().map(|s| s.start),
+                end: n.span.as_ref().map(|s| s.end),
+            })
+            .collect();
+        d
+    }
+
+    fn from_compile_error(e: &crate::compiler::CompileError) -> Self {
+        Self::new("error", "compile-error", e.message.clone(), e.span.as_ref())
+    }
 }
 
 /// Recursively collect `.qn` files under `dir`, in sorted order, skipping `target`/`.git`.
@@ -383,6 +478,9 @@ enum Cmd {
     Check {
         #[arg(value_name = "PATH", required = true)]
         paths: Vec<String>,
+        /// Emit diagnostics as JSON on stdout (the language server's contract).
+        #[arg(long, hide = true)]
+        json: bool,
     },
     /// Generate the project's API reference (HTML, and JSON with --json)
     Doc {
@@ -638,6 +736,7 @@ impl VmRunnerOptions {
         let mut doc_stdlib = false;
         let mut doc_stdlib_path = None;
         let mut highlight_html = false;
+        let mut check_json = false;
         let mut target_path = None;
         let mut vm_args = Vec::new();
         let mut coverage = None;
@@ -649,8 +748,9 @@ impl VmRunnerOptions {
                 VmRunnerMode::Test
             }
             Some(Cmd::Repl) => VmRunnerMode::Repl,
-            Some(Cmd::Check { paths }) => {
+            Some(Cmd::Check { paths, json }) => {
                 vm_args = paths;
+                check_json = json;
                 VmRunnerMode::Check
             }
             Some(Cmd::Doc {
@@ -790,6 +890,7 @@ impl VmRunnerOptions {
             doc_stdlib,
             doc_stdlib_path,
             highlight_html,
+            check_json,
         }
     }
 }
@@ -1042,6 +1143,11 @@ impl VmRunner {
 
         // Parse each file WITHOUT panicking: a read or syntax error is reported and that file is
         // skipped, so one bad file (common when checking a whole tree) doesn't abort the rest.
+        // Under `--json`, parse errors and checker diagnostics collect into one array on
+        // stdout (read errors stay on stderr — operational, not diagnostics); the exit-code
+        // contract is unchanged.
+        let json = self.options.check_json;
+        let mut sink: Vec<CheckDiag> = Vec::new();
         let mut had_error = false;
         let mut asts = Vec::new();
         for f in &files {
@@ -1058,13 +1164,37 @@ impl VmRunner {
             match try_parse_quoin_string_named(source, &name) {
                 Ok(node) => asts.push(node),
                 Err(e) => {
-                    eprintln!("{name}: parse error: {e}");
+                    if json {
+                        sink.push(CheckDiag {
+                            file: Some(name.clone()),
+                            severity: "error",
+                            kind: "parse-error".to_string(),
+                            message: e.message.clone(),
+                            line: Some(e.line),
+                            column: Some(e.column),
+                            start: Some(e.start),
+                            end: Some(e.end),
+                            notes: Vec::new(),
+                        });
+                    } else {
+                        eprintln!("{name}: parse error: {e}");
+                    }
                     had_error = true;
                 }
             }
         }
 
-        let had_diagnostics = self.compile_and_check_asts(prelude_asts(), asts.into_iter());
+        let had_diagnostics = self.compile_and_check_asts(
+            prelude_asts(),
+            asts.into_iter(),
+            if json { Some(&mut sink) } else { None },
+        );
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&sink).expect("check diagnostics serialize")
+            );
+        }
         if had_error || had_diagnostics {
             exit(1);
         }
@@ -1584,6 +1714,7 @@ impl VmRunner {
         &self,
         prelude: impl Iterator<Item = Node>,
         targets: impl Iterator<Item = Node>,
+        mut sink: Option<&mut Vec<CheckDiag>>,
     ) -> bool {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
@@ -1637,13 +1768,23 @@ impl VmRunner {
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
                 match compiler.compile_program(program_node) {
                     Ok(_) => {
-                        let had = !compiler.diagnostics().is_empty();
-                        vm.report_type_warnings(compiler.diagnostics());
+                        let diags = compiler.diagnostics();
+                        let had = !diags.is_empty();
+                        // `--json` collects diagnostics as data; text mode renders them.
+                        if let Some(sink) = sink.as_deref_mut() {
+                            sink.extend(diags.iter().map(CheckDiag::from_warning));
+                        } else {
+                            vm.report_type_warnings(diags);
+                        }
                         compile_unit_aot(vm, &mut compiler);
                         had
                     }
                     Err(e) => {
-                        vm.report_compile_error(&e);
+                        if let Some(sink) = sink.as_deref_mut() {
+                            sink.push(CheckDiag::from_compile_error(&e));
+                        } else {
+                            vm.report_compile_error(&e);
+                        }
                         true
                     }
                 }
