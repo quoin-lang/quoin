@@ -186,8 +186,13 @@ pub fn code_stylesheet() -> String {
         ));
         // Dark scheme: the terminal palette verbatim, rotation entries included.
         for (i, entry) in palette.iter().enumerate() {
-            let (hex, _) = split_entry(entry);
-            let color = if hex == "#ffffff" {
+            let (hex, entry_modifier) = split_entry(entry);
+            let color = if entry_modifier == Some("lw") {
+                // `lw` renders as terminal faint (SGR 2), which CSS can't express —
+                // bake the dim into the hex instead, exactly like the vim syntax
+                // does (2/3 per channel: `#b9bdba` → `#7b7e7c`, editors/vim/README.md).
+                dim_hex(hex)
+            } else if hex == "#ffffff" {
                 "inherit".to_string()
             } else {
                 hex.to_string()
@@ -207,6 +212,24 @@ pub fn code_stylesheet() -> String {
         }
     }
     css
+}
+
+/// Scale a `#rrggbb` color to 2/3 brightness per channel — the CSS stand-in for the
+/// terminal's faint attribute (matches the constant the vim syntax bakes in).
+fn dim_hex(hex: &str) -> String {
+    let Some(rgb) = hex
+        .strip_prefix('#')
+        .and_then(|h| u32::from_str_radix(h, 16).ok())
+    else {
+        return hex.to_string();
+    };
+    let scale = |c: u32| c * 2 / 3;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        scale((rgb >> 16) & 0xff),
+        scale((rgb >> 8) & 0xff),
+        scale(rgb & 0xff)
+    )
 }
 
 fn html_escape(text: &str) -> String {
@@ -513,5 +536,21 @@ mod tests {
     fn format_ansi_emits_escape_codes() {
         let ansi = highlight_to_ansi("123;");
         assert!(ansi.contains('\x1b'), "expected ANSI codes in {ansi:?}");
+    }
+
+    /// The comment palette entry is `lw` (terminal faint); the stylesheet must bake
+    /// the dim into the dark-scheme hex — pinned to the value the vim syntax uses
+    /// (`#b9bdba` at 2/3 = `#7b7e7c`, editors/vim/README.md), not emit it verbatim.
+    #[test]
+    fn stylesheet_bakes_faint_into_the_dark_comment_color() {
+        let css = code_stylesheet();
+        assert!(
+            css.contains("{ .qn-comment { color: #7b7e7c; } }"),
+            "dark qn-comment rule missing or undimmed in:\n{css}"
+        );
+        assert!(
+            !css.contains("#b9bdba"),
+            "verbatim faint hex leaked:\n{css}"
+        );
     }
 }
