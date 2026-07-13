@@ -33,6 +33,17 @@ node scripts/wasm_smoke.mjs            # end-to-end bundle behavior
 node scripts/wasm_examples_check.mjs   # every example on the page still runs
 ```
 
+## Highlighting
+
+The editor is a transparent-text `<textarea>` over a `<pre>` underlay rendered by
+the VM's own resilient highlighter (`quoin_syntax::highlight`, exported from
+`quoin-wasm` as `highlight()`), so token colors can never drift from `qn
+highlight` or the generated docs — the stylesheet itself comes from the wasm
+bundle (`highlight_stylesheet()`, injected at boot; light scheme by default, the
+terminal palette under `prefers-color-scheme: dark`). Highlighting and Format run
+on a second wasm instance on the main thread, so both stay live while a program
+runs in the worker and survive Stop.
+
 ## How Stop works
 
 The VM runs in a Web Worker (`worker.js`); the page never blocks. Stop is

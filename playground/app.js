@@ -1,9 +1,15 @@
 // Playground page logic: owns the editor, the output pane, and the worker lifecycle.
 // The VM runs in worker.js; Stop (and a pre-run safety cap) is worker.terminate().
+// A SECOND wasm instance lives on this (main) thread purely for highlighting and
+// Format: both stay responsive while a program runs, and survive Stop's terminate().
+// Highlighting is the VM's own resilient highlighter (predictively completes
+// incomplete input), so the editor's grammar can never drift from the language's.
+import initMain, { fmt, highlight, highlight_stylesheet } from "./pkg/quoin_wasm.js";
 import { examples } from "./examples.js";
 
 const $ = (id) => document.getElementById(id);
 const editor = $("editor");
+const hl = $("highlight");
 const output = $("output");
 const result = $("result");
 const status = $("status");
@@ -14,6 +20,25 @@ const examplesSel = $("examples");
 
 let worker = null;
 let running = false;
+let hlReady = false;
+let hlQueued = false;
+
+function syncScroll() {
+  hl.scrollTop = editor.scrollTop;
+  hl.scrollLeft = editor.scrollLeft;
+}
+
+function refreshHighlight() {
+  if (!hlReady || hlQueued) return;
+  hlQueued = true;
+  requestAnimationFrame(() => {
+    hlQueued = false;
+    // The trailing nbsp keeps a final empty line in the underlay the same height
+    // as the textarea's, so vertical scroll extents match.
+    hl.innerHTML = highlight(editor.value) + "&nbsp;";
+    syncScroll();
+  });
+}
 
 function setStatus(text) {
   status.textContent = text;
@@ -42,7 +67,7 @@ function setRunning(next) {
   running = next;
   runBtn.disabled = next || worker === null;
   stopBtn.disabled = !next;
-  formatBtn.disabled = next || worker === null;
+  formatBtn.disabled = next || !hlReady;
 }
 
 function bootWorker() {
@@ -61,13 +86,6 @@ function bootWorker() {
       else if (o.exitCode !== 0) setResult("ok", `exited with status ${o.exitCode}`);
       else setResult("ok", "");
       setRunning(false);
-    } else if (msg.type === "fmt") {
-      if (msg.result.ok !== undefined) {
-        editor.value = msg.result.ok;
-        setResult("ok", "");
-      } else {
-        setResult("error", msg.result.error);
-      }
     }
   };
   worker.onerror = (e) => {
@@ -99,9 +117,19 @@ function stop() {
 runBtn.addEventListener("click", run);
 stopBtn.addEventListener("click", stop);
 formatBtn.addEventListener("click", () => {
-  if (worker !== null && !running) worker.postMessage({ type: "fmt", source: editor.value });
+  if (!hlReady || running) return;
+  const r = JSON.parse(fmt(editor.value));
+  if (r.ok !== undefined) {
+    editor.value = r.ok;
+    setResult("ok", "");
+    refreshHighlight();
+  } else {
+    setResult("error", r.error);
+  }
 });
 
+editor.addEventListener("input", refreshHighlight);
+editor.addEventListener("scroll", syncScroll);
 editor.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
     e.preventDefault();
@@ -111,6 +139,7 @@ editor.addEventListener("keydown", (e) => {
     const { selectionStart: s, selectionEnd: t, value } = editor;
     editor.value = value.slice(0, s) + "    " + value.slice(t);
     editor.selectionStart = editor.selectionEnd = s + 4;
+    refreshHighlight(); // programmatic value changes fire no input event
   }
 });
 
@@ -124,7 +153,21 @@ examplesSel.addEventListener("change", () => {
   editor.value = examples[examplesSel.value];
   output.textContent = "";
   setResult("ok", "");
+  refreshHighlight();
 });
 
 editor.value = examples[Object.keys(examples)[0]];
 bootWorker();
+
+// Boot the main-thread VM for highlighting + Format. Until it's ready the textarea
+// keeps its own (uncolored) text — hl-on flips it transparent over the underlay.
+(async () => {
+  await initMain();
+  const style = document.createElement("style");
+  style.textContent = highlight_stylesheet();
+  document.head.appendChild(style);
+  hlReady = true;
+  editor.classList.add("hl-on");
+  if (!running) formatBtn.disabled = false;
+  refreshHighlight();
+})();

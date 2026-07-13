@@ -16,6 +16,21 @@
     --ok: #98c379;
     font-size: 15px;
   }
+  /* The token stylesheet the VM generates (injected by app.js) is light-scheme by
+     default and switches to the terminal palette under prefers-color-scheme: dark,
+     so the page chrome follows the same media query. */
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f5f2;
+      --panel: #fffdf9;
+      --panel-edge: #ddd8ce;
+      --text: #2c2c2c;
+      --dim: #77716a;
+      --accent: #a97917;
+      --err: #b3261e;
+      --ok: #1f7a5c;
+    }
+  }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
@@ -85,28 +100,51 @@
     color: var(--dim);
     border-bottom: 1px solid var(--panel-edge);
   }
+  /* One code-font rule for every code surface, matching the font stack the injected
+     token stylesheet declares — the editor textarea and its highlight underlay MUST
+     resolve to identical metrics or the caret drifts off the glyphs. */
+  #editor, #highlight, #output, #result {
+    font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-feature-settings: "ss05";
+    font-size: 0.92rem;
+    line-height: 1.45;
+  }
+
+  /* The editor is a transparent-text textarea over a highlighted <pre> underlay
+     (same box, same metrics); app.js keeps content and scroll in sync. Text stays
+     visible (hl-on absent) until the main-thread VM is ready to highlight. */
+  .editor-wrap { position: relative; flex: 1; min-height: 0; }
+  #editor, #highlight {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 0.75rem;
+    white-space: pre;
+    tab-size: 4;
+    overflow: auto;
+  }
+  #highlight {
+    overflow: hidden;
+    pointer-events: none;
+  }
   #editor {
-    flex: 1;
+    width: 100%;
+    height: 100%;
     resize: none;
     border: 0;
     outline: none;
     background: transparent;
     color: var(--text);
-    padding: 0.75rem;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 0.92rem;
-    line-height: 1.45;
-    white-space: pre;
-    tab-size: 4;
+    caret-color: var(--text);
   }
+  #editor.hl-on { color: transparent; }
+  #editor::selection { background: rgba(140, 150, 170, 0.35); }
+
   #output {
     flex: 1;
     margin: 0;
     padding: 0.75rem;
     overflow: auto;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 0.92rem;
-    line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -115,8 +153,6 @@
   #result {
     border-top: 1px solid var(--panel-edge);
     padding: 0.45rem 0.75rem;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 0.9rem;
     color: var(--ok);
     min-height: 2.1em;
   }
@@ -148,7 +184,10 @@
 <main>
   <div class="pane">
     <div class="label">program.qn</div>
-    <textarea id="editor" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    <div class="editor-wrap">
+      <pre id="highlight" aria-hidden="true"></pre>
+      <textarea id="editor" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    </div>
   </div>
   <div class="pane">
     <div class="label">output</div>

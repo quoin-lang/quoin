@@ -69,6 +69,26 @@ pub fn fmt(source: &str) -> String {
     }
 }
 
+/// Highlight `source` as an HTML fragment of `<span class="qn-…">` runs (text
+/// escaped, nothing ever dropped — unspanned stretches pass through escaped).
+/// Resilient: incomplete input is predictively completed and uncompletable input
+/// comes back escaped-but-unstyled, so this is safe to call on every keystroke.
+/// Style the classes with [`highlight_stylesheet`].
+#[wasm_bindgen]
+pub fn highlight(source: &str) -> String {
+    let spans = quoin::highlighter::highlight_resilient(source);
+    quoin::highlighter::format_html(source, spans)
+}
+
+/// The `qn-*` token stylesheet, generated from the same palette table the terminal
+/// and the generated docs use (light scheme by default, the terminal palette under
+/// `prefers-color-scheme: dark`) — the playground's colors can't drift from `qn
+/// highlight`'s.
+#[wasm_bindgen]
+pub fn highlight_stylesheet() -> String {
+    quoin::highlighter::code_stylesheet()
+}
+
 /// The VM version baked into this bundle (the workspace version).
 #[wasm_bindgen]
 pub fn version() -> String {

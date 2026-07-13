@@ -4,7 +4,13 @@
 // this drives the real wasm binary: embedded stdlib boot, JS entropy, JS clock,
 // output capture, and the JSON outcome shape.
 import { readFileSync } from "node:fs";
-import init, { run, fmt, version } from "../playground/pkg/quoin_wasm.js";
+import init, {
+  run,
+  fmt,
+  highlight,
+  highlight_stylesheet,
+  version,
+} from "../playground/pkg/quoin_wasm.js";
 
 const wasmBytes = readFileSync(
   new URL("../playground/pkg/quoin_wasm_bg.wasm", import.meta.url),
@@ -86,6 +92,18 @@ function runQ(source, maxBatches) {
 {
   const formatted = JSON.parse(fmt("1+2"));
   check("fmt works", typeof formatted.ok === "string", JSON.stringify(formatted));
+}
+
+// The highlighter: grammar-true spans, escaped text, resilient on incomplete input.
+{
+  const html = highlight("'hi'.print \"* note");
+  check("highlight emits token spans", html.includes("qn-string") && html.includes("qn-comment"), html);
+  const partial = highlight("Foo <- { bar -> { 1 +");
+  check("highlight survives incomplete input", typeof partial === "string" && partial.length > 0, partial);
+  const escaped = highlight("'<script>'");
+  check("highlight escapes markup", !escaped.includes("<script>"), escaped);
+  const css = highlight_stylesheet();
+  check("stylesheet covers the classes", css.includes(".qn-string") && css.includes("prefers-color-scheme: dark"), css.slice(0, 120));
 }
 
 console.log(`quoin-wasm ${version()}: ${failures === 0 ? "all checks passed" : `${failures} FAILED`}`);
