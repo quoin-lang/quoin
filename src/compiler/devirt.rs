@@ -170,10 +170,12 @@ impl Compiler {
     /// qualifies unconditionally. Declaration-carrying blocks go through
     /// `spliceable_arm` (v2 alpha-renaming) instead.
     fn inlinable_block(node: &Node) -> Option<&BlockNode> {
-        if let NodeValue::Block(b) = &node.value {
-            if b.arguments.is_empty() && b.decls.is_empty() && !Self::block_declares_local(b) {
-                return Some(b);
-            }
+        if let NodeValue::Block(b) = &node.value
+            && b.arguments.is_empty()
+            && b.decls.is_empty()
+            && !Self::block_declares_local(b)
+        {
+            return Some(b);
         }
         None
     }
@@ -324,7 +326,7 @@ impl Compiler {
             NodeValue::Identifier(id) => {
                 id.identifier_type != IdentifierType::Instance
                     && id.namespace.is_none()
-                    && names.iter().any(|n| *n == id.name)
+                    && names.contains(&id.name)
             }
             NodeValue::Block(b) => Self::block_mentions_any(b, names),
             NodeValue::MethodCall(mc) => {

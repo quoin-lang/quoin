@@ -332,22 +332,21 @@ impl<'gc> VmState<'gc> {
         selector: Symbol,
         args: &[Value<'gc>],
     ) -> Result<Option<Callable<'gc>>, QuoinError> {
-        if selector.as_str() == "meta" {
-            if let Value::Class(c) = receiver {
-                return Ok(Some(Callable::Meta(c)));
-            }
+        if selector.as_str() == "meta"
+            && let Value::Class(c) = receiver
+        {
+            return Ok(Some(Callable::Meta(c)));
         }
-        if let Value::Class(c) = receiver {
-            if self
+        if let Value::Class(c) = receiver
+            && self
                 .lookup_method_in_class_hierarchy(mc, c, receiver, selector, true, args)?
                 .is_none()
-            {
-                if selector.as_str() == "new:" {
-                    return Ok(Some(Callable::New(c)));
-                }
-                if selector.as_str() == "new" {
-                    return Ok(Some(Callable::NewNoBlock(c)));
-                }
+        {
+            if selector.as_str() == "new:" {
+                return Ok(Some(Callable::New(c)));
+            }
+            if selector.as_str() == "new" {
+                return Ok(Some(Callable::NewNoBlock(c)));
             }
         }
         let method_val = match receiver {
@@ -527,10 +526,10 @@ impl<'gc> VmState<'gc> {
     ) -> Result<Option<Value<'gc>>, QuoinError> {
         // Fast path: a memoized, guard-free resolution skips the whole walk + scoring.
         let key = self.method_cache_key(class_ref, selector, class_side, args);
-        if let Some(k) = key {
-            if let Some(cached) = self.dispatch_cache.entries.get(&k) {
-                return Ok(*cached);
-            }
+        if let Some(k) = key
+            && let Some(cached) = self.dispatch_cache.entries.get(&k)
+        {
+            return Ok(*cached);
         }
 
         // Miss: walk, tracking whether any guarded candidate was examined. Save and
@@ -553,16 +552,17 @@ impl<'gc> VmState<'gc> {
 
         // Cache only a successful, guard-free resolution (errors and guarded
         // dispatches stay uncached — the latter can depend on argument values).
-        if !uncacheable {
-            if let (Some(k), Ok(resolved)) = (key, &result) {
-                self.dispatch_cache.entries.insert(k, *resolved);
-            }
+        if !uncacheable && let (Some(k), Ok(resolved)) = (key, &result) {
+            self.dispatch_cache.entries.insert(k, *resolved);
         }
         result
     }
 
     // `receiver` is the subject of the send (the value `self` resolves to inside a
     // guard block); it's threaded down to `match_score`/`execute_validation_block`.
+    // Recursive hierarchy walk threads the full dispatch context down the parent
+    // chain; bundling into a struct would just move the same fields around.
+    #[allow(clippy::too_many_arguments)]
     fn lookup_method_in_class_hierarchy_rec(
         &mut self,
         mc: &Mutation<'gc>,
@@ -684,12 +684,12 @@ impl<'gc> VmState<'gc> {
                 return Ok(Some(method));
             }
         }
-        if let Some(p) = parent {
-            if let Some(method) = self.lookup_method_in_class_hierarchy_rec(
+        if let Some(p) = parent
+            && let Some(method) = self.lookup_method_in_class_hierarchy_rec(
                 mc, p, receiver, selector, class_side, args, visited,
-            )? {
-                return Ok(Some(method));
-            }
+            )?
+        {
+            return Ok(Some(method));
         }
         Ok(None)
     }

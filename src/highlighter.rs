@@ -22,7 +22,7 @@ fn color_for(htype: HighlightType, counter: usize) -> &'static str {
 pub fn format_ansi(source: &str, mut spans: Vec<HighlightSpan>) -> String {
     // Order by (start, end); drop later spans that share a range with an
     // earlier one (spans covering an equal range are treated as duplicates).
-    spans.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
+    spans.sort_by_key(|a| (a.start, a.end));
     spans.dedup_by(|a, b| a.start == b.start && a.end == b.end);
 
     // Emit SGR directly from the palette specs — no markup round-trip, so the
@@ -219,7 +219,7 @@ fn html_escape(text: &str) -> String {
 /// emitted escaped and unclassed, so nothing is ever dropped; a span overlapping the cursor
 /// (defensive — the walker emits disjoint spans) is skipped rather than duplicating text.
 pub fn format_html(source: &str, mut spans: Vec<HighlightSpan>) -> String {
-    spans.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
+    spans.sort_by_key(|a| (a.start, a.end));
     spans.dedup_by(|a, b| a.start == b.start && a.end == b.end);
 
     let mut out = String::new();

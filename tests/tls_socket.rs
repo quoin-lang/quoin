@@ -61,11 +61,9 @@ fn tls_socket_echo_and_concurrency() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
-        for conn in listener.incoming() {
-            if let Ok(sock) = conn {
-                let config = config.clone();
-                thread::spawn(move || echo(config, sock));
-            }
+        for sock in listener.incoming().flatten() {
+            let config = config.clone();
+            thread::spawn(move || echo(config, sock));
         }
     });
 

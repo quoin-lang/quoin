@@ -36,10 +36,8 @@ fn string_stream_lines_and_incremental_decode() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
-        for conn in listener.incoming() {
-            if let Ok(sock) = conn {
-                thread::spawn(move || serve(sock));
-            }
+        for sock in listener.incoming().flatten() {
+            thread::spawn(move || serve(sock));
         }
     });
 
@@ -128,10 +126,8 @@ fn string_stream_emoji_and_rtl() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
-        for conn in listener.incoming() {
-            if let Ok(sock) = conn {
-                thread::spawn(move || serve_unicode(sock));
-            }
+        for sock in listener.incoming().flatten() {
+            thread::spawn(move || serve_unicode(sock));
         }
     });
 

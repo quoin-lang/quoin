@@ -111,6 +111,7 @@ fn from_message<'gc>(
 }
 
 /// Wrap freshly spawned lanes in a Worker-class handle instance.
+#[allow(clippy::too_many_arguments)] // handle-wrapping helper threads the worker/channel context
 fn wrap_handle<'gc>(
     vm: &mut crate::vm::VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,

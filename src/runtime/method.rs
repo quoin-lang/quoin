@@ -88,7 +88,9 @@ impl NativeMethodState {
     /// The owning `Extension` instance for an extension-backed method, or `None` otherwise.
     pub fn ext_dispatch<'gc>(&self) -> Option<Value<'gc>> {
         match &self.body {
-            MethodBody::ExtDispatch { ext } => Some(unsafe { transmute(*ext) }),
+            MethodBody::ExtDispatch { ext } => {
+                Some(unsafe { transmute::<Value<'static>, Value<'gc>>(*ext) })
+            }
             _ => None,
         }
     }
@@ -96,7 +98,9 @@ impl NativeMethodState {
     /// The wrapped user `Block` value, or `None` for a native or extension-backed method body.
     pub fn get_block<'gc>(&self) -> Option<Value<'gc>> {
         match &self.body {
-            MethodBody::UserBlock(block) => Some(unsafe { transmute(*block) }),
+            MethodBody::UserBlock(block) => {
+                Some(unsafe { transmute::<Value<'static>, Value<'gc>>(*block) })
+            }
             MethodBody::Native { .. } | MethodBody::ExtDispatch { .. } => None,
         }
     }

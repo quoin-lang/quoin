@@ -967,6 +967,10 @@ impl Drop for SeekableLease {
 }
 
 impl IoBackend for SmolBackend {
+    // The `ProcWait` arm deliberately holds the child's sole RefCell borrow across the
+    // `.await` (see the ChildSlot note at that borrow); no other arm holds one across an
+    // await, so allow the lint for the whole dispatch fn rather than fight the borrow.
+    #[allow(clippy::await_holding_refcell_ref)]
     fn perform(&self, req: IoRequest) -> IoFuture {
         let inner = self.inner.clone();
         match req {
@@ -1429,6 +1433,10 @@ impl IoBackend for SmolBackend {
                 // everything concurrent (kill, running?, reap) goes through the pid
                 // or the cells, never this RefCell (see ChildSlot).
                 let status = {
+                    // Intentional: this is the child's only borrow and is held across the
+                    // await on purpose (see the ChildSlot note above) — everything
+                    // concurrent goes through the pid or the cells, never this RefCell.
+                    // (Lint allowed on `perform` — statement scope doesn't suppress it.)
                     let mut child = slot.child.borrow_mut();
                     child.status().await
                 };
@@ -1569,12 +1577,13 @@ impl IoBackend for SmolBackend {
         // itself drops when the last Rc goes, and async-process's global reaper
         // collects the zombie.
         let slot = self.inner.children.borrow_mut().remove(&id);
-        if let Some(slot) = slot {
-            if slot.exited.get().is_none() && !slot.detached.get() {
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(slot.pid as libc::pid_t, libc::SIGKILL);
-                }
+        if let Some(slot) = slot
+            && slot.exited.get().is_none()
+            && !slot.detached.get()
+        {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(slot.pid as libc::pid_t, libc::SIGKILL);
             }
         }
     }

@@ -165,18 +165,18 @@ impl<'a> HighlightParser<'a> {
             spans.extend(self.highlight_statement(stmt, 0));
         }
 
-        if let Some(first) = spans.first() {
-            if first.start > 0 {
-                let before = text_span(self.source, 0, first.start.saturating_sub(1), 0);
-                spans.splice(0..0, before);
-            }
+        if let Some(first) = spans.first()
+            && first.start > 0
+        {
+            let before = text_span(self.source, 0, first.start.saturating_sub(1), 0);
+            spans.splice(0..0, before);
         }
 
-        if let Some(last) = spans.last() {
-            if last.end < self.source.len() {
-                let after = text_span(self.source, last.end, self.source.len(), 0);
-                spans.extend(after);
-            }
+        if let Some(last) = spans.last()
+            && last.end < self.source.len()
+        {
+            let after = text_span(self.source, last.end, self.source.len(), 0);
+            spans.extend(after);
         }
 
         let (ps, pe) = si_range(&prog.source_info).unwrap_or((0, self.source.len()));
@@ -696,16 +696,16 @@ impl<'a> HighlightParser<'a> {
     ) -> Vec<HighlightSpan> {
         let mut spans = Vec::new();
         let mut name_start = start;
-        if let Some(ns) = &ident.namespace {
-            if let Some((ns_start, ns_end)) = si_range(&ns.source_info) {
-                spans.push(HighlightSpan::new(
-                    ns_start,
-                    ns_end,
-                    HighlightType::Namespace,
-                    ident_depth,
-                ));
-                name_start = ns_end;
-            }
+        if let Some(ns) = &ident.namespace
+            && let Some((ns_start, ns_end)) = si_range(&ns.source_info)
+        {
+            spans.push(HighlightSpan::new(
+                ns_start,
+                ns_end,
+                HighlightType::Namespace,
+                ident_depth,
+            ));
+            name_start = ns_end;
         }
         spans.push(HighlightSpan::new(name_start, end, name_type, ident_depth));
         spans

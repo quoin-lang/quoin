@@ -710,6 +710,7 @@ fn classify_arg<'gc>(
 /// handle for a host `block` the extension may invoke, send the `Call`, then service the
 /// re-entrant host-op conversation until the terminal `CallReturn`. The epoch is closed out
 /// unconditionally so the call's transient handles (including the block) never leak.
+#[allow(clippy::too_many_arguments)] // extension call boundary: forwards the full dispatch context to the host
 fn extension_call<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,

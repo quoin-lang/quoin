@@ -164,7 +164,7 @@ pub fn run_vm_loop<'gc>(
 
 thread_local! {
     /// (full batches, sum wall-ns, sum GC bytes allocated) for the `QN_BATCH_STATS` harness.
-    static BATCH_ACC: std::cell::Cell<(u64, u128, u128)> = std::cell::Cell::new((0, 0, 0));
+    static BATCH_ACC: std::cell::Cell<(u64, u128, u128)> = const { std::cell::Cell::new((0, 0, 0)) };
 }
 
 /// Emit the accumulated per-batch stats to stderr (the `QN_BATCH_STATS` harness). One
@@ -197,6 +197,10 @@ impl<'gc> VMContext<'gc> {
     /// # Safety
     /// The caller must ensure that the pointers are valid and that no other
     /// borrows of the VM state or mutation context exist during the call.
+    // Returning `&mut` from `&self` is the deliberate purpose of this raw-pointer
+    // wrapper: it hands the VM state across the coroutine boundary without a
+    // lifetime tying it to the wrapper. Safety is the caller's contract above.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn get(&self) -> (&mut VmState<'gc>, &Mutation<'gc>) {
         unsafe { (&mut *self.vm, &*self.mc) }
     }
@@ -238,15 +242,15 @@ impl<'gc> Drop for Fiber<'gc> {
         if !self.ran_compiled.get() {
             return; // pre-existing behavior: corosensei's forced unwind
         }
-        if let Ok(mut slot) = self.coroutine.try_borrow_mut() {
-            if let Some(coro) = slot.as_mut() {
-                if coro.started() && !coro.done() {
-                    // SAFETY: leaks the suspended stack instead of unwinding
-                    // it; the invariants above guarantee nothing on it
-                    // requires Drop for soundness.
-                    unsafe { coro.force_reset() };
-                }
-            }
+        if let Ok(mut slot) = self.coroutine.try_borrow_mut()
+            && let Some(coro) = slot.as_mut()
+            && coro.started()
+            && !coro.done()
+        {
+            // SAFETY: leaks the suspended stack instead of unwinding
+            // it; the invariants above guarantee nothing on it
+            // requires Drop for soundness.
+            unsafe { coro.force_reset() };
         }
     }
 }

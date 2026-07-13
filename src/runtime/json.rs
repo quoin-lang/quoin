@@ -174,16 +174,16 @@ fn number_to_value<'gc>(raw: &str, host: &dyn Host<'gc>) -> Result<Value<'gc>, Q
     let f = raw
         .parse::<f64>()
         .map_err(|_| QuoinError::ParseError(format!("JSON: malformed number '{raw}'")))?;
-    if f.is_finite() {
-        if let Ok(raw_dec) = raw.parse::<Decimal>() {
-            // Double only when f64's shortest round-trip equals the literal's exact decimal value.
-            let f_is_exact = format!("{f}")
-                .parse::<Decimal>()
-                .map(|fd| fd == raw_dec)
-                .unwrap_or(false);
-            if !f_is_exact {
-                return Ok(make_decimal(host, raw_dec));
-            }
+    if f.is_finite()
+        && let Ok(raw_dec) = raw.parse::<Decimal>()
+    {
+        // Double only when f64's shortest round-trip equals the literal's exact decimal value.
+        let f_is_exact = format!("{f}")
+            .parse::<Decimal>()
+            .map(|fd| fd == raw_dec)
+            .unwrap_or(false);
+        if !f_is_exact {
+            return Ok(make_decimal(host, raw_dec));
         }
     }
     Ok(host.new_double(f))

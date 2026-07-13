@@ -114,9 +114,9 @@ fn render_lines(lines: &[&str], ctx: &Ctx) -> String {
             flush_items(&mut out, &mut items, ctx);
             let level = 1 + rest.chars().take_while(|&c| c == '#').count().min(4);
             let text = rest.trim_start_matches('#').trim();
-            let _ = write!(
+            let _ = writeln!(
                 out,
-                "<h{level} id=\"{}\">{}</h{level}>\n",
+                "<h{level} id=\"{}\">{}</h{level}>",
                 slug(text),
                 inline(text, ctx)
             );
@@ -150,7 +150,7 @@ fn render_lines(lines: &[&str], ctx: &Ctx) -> String {
 
 fn flush_para(out: &mut String, para: &mut Vec<&str>, ctx: &Ctx) {
     if !para.is_empty() {
-        let _ = write!(out, "<p>{}</p>\n", inline(&para.join(" "), ctx));
+        let _ = writeln!(out, "<p>{}</p>", inline(&para.join(" "), ctx));
         para.clear();
     }
 }
@@ -161,11 +161,11 @@ fn flush_items(out: &mut String, items: &mut Vec<(bool, String)>, ctx: &Ctx) {
     }
     // One list per run; its kind is the first item's (the corpus never mixes).
     let tag = if items[0].0 { "ol" } else { "ul" };
-    let _ = write!(out, "<{tag}>\n");
+    let _ = writeln!(out, "<{tag}>");
     for (_, item) in items.iter() {
-        let _ = write!(out, "<li>{}</li>\n", inline(item, ctx));
+        let _ = writeln!(out, "<li>{}</li>", inline(item, ctx));
     }
-    let _ = write!(out, "</{tag}>\n");
+    let _ = writeln!(out, "</{tag}>");
     items.clear();
 }
 
@@ -183,9 +183,9 @@ fn push_fence(out: &mut String, info: &str, body: &str) {
     // `quoin` AND `quoin norun` highlight — norun means don't EXECUTE (that's
     // --check's business), not don't highlight.
     if info == "quoin" || info.starts_with("quoin ") {
-        let _ = write!(out, "{}\n", crate::highlighter::highlight_to_html(body));
+        let _ = writeln!(out, "{}", crate::highlighter::highlight_to_html(body));
     } else {
-        let _ = write!(out, "<pre>{}</pre>\n", esc(body));
+        let _ = writeln!(out, "<pre>{}</pre>", esc(body));
     }
 }
 
@@ -265,7 +265,7 @@ fn inline(text: &str, ctx: &Ctx) -> String {
     let escaped = esc(text);
     let parts: Vec<&str> = escaped.split('`').collect();
     // An even part count means an odd number of backticks: the tail one is literal.
-    let unpaired_tail = parts.len() % 2 == 0;
+    let unpaired_tail = parts.len().is_multiple_of(2);
     // Swap code spans for control-char placeholders before the prose layer, so a
     // [label](url) whose label is (or contains) a code span still parses as one
     // link; markdown source can't contain the \u{1} delimiter.
@@ -362,10 +362,7 @@ fn rewrite_href(href: &str, rewrite: bool) -> String {
 fn pairs(text: &str, marker: &str, tag: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
-    loop {
-        let Some(a) = rest.find(marker) else {
-            break;
-        };
+    while let Some(a) = rest.find(marker) {
         let after = &rest[a + marker.len()..];
         let Some(b) = after.find(marker) else {
             break;

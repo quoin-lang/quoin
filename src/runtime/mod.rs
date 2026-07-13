@@ -39,6 +39,7 @@ pub mod pretty;
 pub mod process;
 pub mod random_access;
 pub mod regex;
+#[allow(clippy::module_inception)] // `runtime::runtime` holds the built-in class registrations
 pub mod runtime;
 pub mod set;
 pub mod sockets;

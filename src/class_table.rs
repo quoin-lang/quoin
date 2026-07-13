@@ -393,19 +393,18 @@ impl ClassTable {
                 return Some(found);
             }
         }
-        if let Some(parent) = &sig.parent {
-            if let Some(found) = self.declared_return_rec(parent, selector, &mut visited) {
-                return Some(found);
-            }
+        if let Some(parent) = &sig.parent
+            && let Some(found) = self.declared_return_rec(parent, selector, &mut visited)
+        {
+            return Some(found);
         }
         // Implicit universal root: every class IS-A Object, so its contract always applies.
-        if class != "Object" {
-            if let Some(t) = self
+        if class != "Object"
+            && let Some(t) = self
                 .get("Object")
                 .and_then(|s| s.method_returns.get(selector).cloned())
-            {
-                return Some((t, Arc::from("Object")));
-            }
+        {
+            return Some((t, Arc::from("Object")));
         }
         None
     }

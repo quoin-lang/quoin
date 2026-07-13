@@ -471,9 +471,7 @@ impl Compiler {
             match &lval.value {
                 NodeValue::IdentLValue(ident_lval) => {
                     let name = &ident_lval.identifier.name;
-                    bytecode.push(Instruction::LoadLocal(Symbol::intern(
-                        &(temp_var.to_string()),
-                    )));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(temp_var)));
                     push_index(i, bytecode);
                     bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
 
@@ -487,9 +485,7 @@ impl Compiler {
                 }
                 NodeValue::SplatLValue(splat_lval) => {
                     let name = &splat_lval.identifier.name;
-                    bytecode.push(Instruction::LoadLocal(Symbol::intern(
-                        &(temp_var.to_string()),
-                    )));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(temp_var)));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     if let Some(lt) = &len_temp {
                         // The bounded middle: `sliceFrom:i to:(count - tail)`.
@@ -519,9 +515,7 @@ impl Compiler {
                         .locals
                         .insert(nested_temp.clone());
 
-                    bytecode.push(Instruction::LoadLocal(Symbol::intern(
-                        &(temp_var.to_string()),
-                    )));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(temp_var)));
                     push_index(i, bytecode);
                     bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
                     bytecode.push(Instruction::DefineLocal(Symbol::intern(

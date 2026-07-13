@@ -104,7 +104,9 @@ impl NativeSetState {
     /// Append a NEW element (caller has established absence).
     pub fn append(&mut self, hash: u64, value: Value<'_>) {
         let i = self.entries.len() as u32;
-        self.entries.push((hash, unsafe { transmute(value) }));
+        self.entries.push((hash, unsafe {
+            transmute::<Value<'_>, Value<'static>>(value)
+        }));
         if self.indexed() {
             if self.index.is_empty() {
                 self.build_index(); // this push crossed the tier boundary
@@ -127,10 +129,12 @@ impl NativeSetState {
 
     /// Copy contents (entries + index, cached hashes and all) — `ensure:`
     /// rebuilds a set from an existing one without re-hashing.
+    #[allow(clippy::type_complexity)] // (hashed entries, hash->indices) snapshot
     pub fn clone_contents(&self) -> (Vec<(u64, Value<'static>)>, FxHashMap<u64, Vec<u32>>) {
         (self.entries.clone(), self.index.clone())
     }
 
+    #[allow(clippy::type_complexity)] // mirror of clone_contents' (entries, index) snapshot
     pub fn adopt_contents(
         &mut self,
         contents: (Vec<(u64, Value<'static>)>, FxHashMap<u64, Vec<u32>>),
@@ -217,7 +221,7 @@ pub fn build_set_class() -> NativeClassBuilder {
         .sdk_instance_method("count", |host, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.len())
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
             Ok(host.new_int(len as i64))
         })
         .returns("Integer")
@@ -404,11 +408,11 @@ pub fn build_set_class() -> NativeClassBuilder {
         .sdk_instance_method("each:", |host, receiver, args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.len())
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
             for i in 0..len {
                 let elem = receiver
                     .with_native_state::<NativeSetState, _, _>(|s| s.values().get(i).copied())
-                    .map_err(|e| QuoinError::Other(e))?;
+                    .map_err(QuoinError::Other)?;
                 if let Some(elem) = elem {
                     host.call_method(args[0], "valueWithSelfOrArg:", vec![elem])?;
                 }
@@ -423,13 +427,13 @@ pub fn build_set_class() -> NativeClassBuilder {
         .sdk_instance_method("s", |host, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.len())
-                .map_err(|e| QuoinError::Other(e))?;
+                .map_err(QuoinError::Other)?;
 
             let mut parts = Vec::new();
             for i in 0..len {
                 let val = receiver
                     .with_native_state::<NativeSetState, _, _>(|s| s.values().get(i).copied())
-                    .map_err(|e| QuoinError::Other(e))?
+                    .map_err(QuoinError::Other)?
                     .ok_or_else(|| QuoinError::Other("Index out of bounds".to_string()))?;
 
                 let result = host.call_method(val, "s", vec![])?;

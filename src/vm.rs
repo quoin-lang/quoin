@@ -327,6 +327,12 @@ pub struct BuiltinCache<'gc> {
     pub false_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
 }
 
+impl<'gc> Default for BuiltinCache<'gc> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'gc> BuiltinCache<'gc> {
     pub fn new() -> Self {
         Self {
@@ -640,6 +646,7 @@ pub struct VmState<'gc> {
     /// warm across re-materialization. Rooted here for the VM's lifetime and ids are
     /// never reused, so `(template_id, ip)` is a stable call-site identity (no ABA);
     /// stale entries self-evict via `dispatch_epoch`.
+    #[allow(clippy::type_complexity)] // per-site GC-managed inline-cache slot arrays
     pub ic_registry: FxHashMap<u32, Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>>,
     /// D2 site-cache cells, indexed by translation-minted outcall-site id.
     pub aot_sites: Vec<AotSiteCell<'gc>>,
@@ -699,6 +706,11 @@ pub enum VmStatus<'gc> {
 }
 
 impl<'gc> VmState<'gc> {
+    /// # Safety
+    /// The stored yielder pointer must still be valid: only call while the
+    /// coroutine that registered it (via `register_yielder`) is live on the
+    /// current stack. The driver restores this slot before every resume, so
+    /// it never points at a freed or different coroutine.
     pub unsafe fn get_yielder(&self) -> Option<&VMYielder<'gc>> {
         self.sched
             .yielder
@@ -1820,11 +1832,9 @@ impl<'gc> VmState<'gc> {
                 .or_default()
                 .doc = Some(doc.to_string());
         }
-        let parent_class = if let Some(parent_name) = native_class.parent_name() {
-            Some(self.get_or_create_builtin_class(mc, parent_name))
-        } else {
-            None
-        };
+        let parent_class = native_class
+            .parent_name()
+            .map(|parent_name| self.get_or_create_builtin_class(mc, parent_name));
 
         // Several defs may share a selector (typed multimethod variants); chain
         // them in declaration order so the scorer routes by argument type and ties
@@ -2483,8 +2493,9 @@ impl<'gc> VmState<'gc> {
                             if let Some(ms) =
                                 state_ref.as_any_mut().downcast_mut::<NativeMethodState>()
                             {
-                                ms.body =
-                                    MethodBody::UserBlock(unsafe { transmute(new_block_val) });
+                                ms.body = MethodBody::UserBlock(unsafe {
+                                    transmute::<Value<'gc>, Value<'static>>(new_block_val)
+                                });
                             }
                         }
                     }
@@ -2536,12 +2547,11 @@ impl<'gc> VmState<'gc> {
                 return Some(method);
             }
         }
-        if let Some(parent) = class_borrow.parent {
-            if let Some(method) =
+        if let Some(parent) = class_borrow.parent
+            && let Some(method) =
                 self.lookup_in_class_hierarchy_rec(parent, selector, class_side, visited)
-            {
-                return Some(method);
-            }
+        {
+            return Some(method);
         }
         None
     }
@@ -3155,27 +3165,26 @@ impl<'gc> VmState<'gc> {
                         prefix_colored
                     };
 
-                    if let Some(si) = si_opt {
-                        if show_snippet {
-                            if let Some(snippet) = self.get_highlighted_snippet(
-                                &si.filename,
-                                si.line.saturating_sub(1),
-                                si.column,
-                                si.start,
-                                si.end,
-                                si.source_text.as_ref(),
-                                w,
-                            ) {
-                                let padding_len = target_alignment.saturating_sub(plain_len);
-                                let padding: String = " ".repeat(padding_len);
-                                let separator = if supports_color {
-                                    ansi_colorizer::colorize("[#808080]<[/]")
-                                } else {
-                                    "<".to_string()
-                                };
-                                line = format!("{}{}{} {}", line, padding, separator, snippet);
-                            }
-                        }
+                    if let Some(si) = si_opt
+                        && show_snippet
+                        && let Some(snippet) = self.get_highlighted_snippet(
+                            &si.filename,
+                            si.line.saturating_sub(1),
+                            si.column,
+                            si.start,
+                            si.end,
+                            si.source_text.as_ref(),
+                            w,
+                        )
+                    {
+                        let padding_len = target_alignment.saturating_sub(plain_len);
+                        let padding: String = " ".repeat(padding_len);
+                        let separator = if supports_color {
+                            ansi_colorizer::colorize("[#808080]<[/]")
+                        } else {
+                            "<".to_string()
+                        };
+                        line = format!("{}{}{} {}", line, padding, separator, snippet);
                     }
                     trace.push(line);
                 }
@@ -3310,6 +3319,7 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // snippet renderer takes the full source-location context
     fn get_highlighted_snippet(
         &self,
         filename: &str,
@@ -3537,6 +3547,7 @@ impl<'gc> VmState<'gc> {
 
     /// `store_field_value` for compiled frames (S3) — same shared-cell cache,
     /// same declared-field errors as interpreted.
+    #[allow(clippy::too_many_arguments)] // cached field-store fast path threads receiver/value/cache state
     pub(crate) fn field_store_cached(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3804,6 +3815,10 @@ impl<'gc> VmState<'gc> {
         let mut cand = pending.cand;
         cand.block.spec_state.set(spec::RESOLVED);
         let mut preconds = vec![None; cand.params.len()];
+        // `i` indexes four parallel arrays (spec_params, params, param_kinds,
+        // preconds) and mutates `cand.params[i]` through `cand`, so an iterator
+        // over one of them would borrow-conflict with the writes.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..cand.params.len() {
             if cand.spec_params[i]
                 && let Some(kind) = spec::scalar_kind(*pending.param_kinds.get(i).unwrap_or(&0))
@@ -4190,6 +4205,7 @@ impl<'gc> VmState<'gc> {
     /// compiled-code outcall path (B3a): without it every compiled operator send
     /// paid an uncached `lookup_method` while the interpreted body it replaced
     /// had warm ICs, which measurably REGRESSED arithmetic-heavy blocks.
+    #[allow(clippy::too_many_arguments)] // inline-cache dispatch fast path; every param is on the hot call boundary
     pub fn call_method_cached(
         &mut self,
         mc: &Mutation<'gc>,
@@ -4218,6 +4234,7 @@ impl<'gc> VmState<'gc> {
     // for the VM's whole life — safe across `lookup_method`'s guard-predicate
     // yields by that rooting, which the span heuristic can't see.
     #[allow(no_gc_across_yield)]
+    #[allow(clippy::too_many_arguments)] // inner half of the IC dispatch fast path
     fn call_method_cached_inner(
         &mut self,
         mc: &Mutation<'gc>,
@@ -4252,7 +4269,7 @@ impl<'gc> VmState<'gc> {
             None => {
                 let m = self.lookup_method(mc, receiver, selector, &args)?;
                 if let Some(c) = &m {
-                    self.ic_fill_cell(mc, ic, bc_len, ip, receiver, selector, &args, c.clone());
+                    self.ic_fill_cell(mc, ic, bc_len, ip, receiver, selector, &args, *c);
                     // D2: mirror the resolution into the site cell — but only
                     // when the IC actually filled (probe-after-fill), so the
                     // site cache inherits ic_fill_cell's cacheability rules;
@@ -4653,6 +4670,7 @@ impl<'gc> VmState<'gc> {
     /// argument *values*, not just types, so it must never be inline-cached). The global-cache
     /// lookup here is cold: it runs only on an IC miss, which for a monomorphic site happens
     /// once. The block's per-`ip` array is allocated lazily (sized to its bytecode) on first fill.
+    #[allow(clippy::too_many_arguments)] // inline-cache fill threads the resolved site + dispatch context
     fn ic_fill(
         &mut self,
         mc: &Mutation<'gc>,
@@ -4810,13 +4828,12 @@ impl<'gc> VmState<'gc> {
 
         if let Value::Object(obj) = receiver
             && let ObjectPayload::Block(block) = &obj.borrow().payload
+            && (selector.as_str() == "value" || selector.as_str() == "value:")
         {
-            if selector.as_str() == "value" || selector.as_str() == "value:" {
-                let block = *block;
-                self.stack.truncate(recv_start);
-                self.start_block(mc, block, args, Some(receiver), Some(selector));
-                return Ok(VmStatus::Running);
-            }
+            let block = *block;
+            self.stack.truncate(recv_start);
+            self.start_block(mc, block, args, Some(receiver), Some(selector));
+            return Ok(VmStatus::Running);
         }
 
         // Inline-cache fast path: a hit skips `lookup_method`'s key-build + hash + hashmap.
@@ -4994,6 +5011,10 @@ impl<'gc> VmState<'gc> {
         // user-defined `new:` running the block as a plain closure
         // (previously that chain-walked the write: caller-dependent
         // semantics nothing could reason about, the AOT gates included).
+        // Bodies are identical on purpose: the `else if` condition itself does the
+        // work (`EnvFrame::set` attempts the assignment and reports whether the
+        // binding existed), so the branches can't be merged.
+        #[allow(clippy::if_same_then_else)]
         if frame.instantiating_obj.is_some() || frame.block.template.is_init_literal {
             frame.env.borrow_mut(mc).bind(name, val);
         } else if !EnvFrame::set(frame.env, mc, name, val) {
@@ -6160,7 +6181,7 @@ impl<'gc> VmState<'gc> {
                 if let Value::Object(obj) = pattern_val
                     && let ObjectPayload::String(s) = &obj.borrow().payload
                 {
-                    let re = Regex::new(&**s).map_err(|e| format!("Invalid regex: {}", e))?;
+                    let re = Regex::new(s).map_err(|e| format!("Invalid regex: {}", e))?;
                     let regex_val = self.new_regex(mc, re);
                     self.push(regex_val);
                 } else {
@@ -6227,14 +6248,14 @@ impl<'gc> VmState<'gc> {
                     }
                 };
 
-                if let Some(existing_val) = self.globals.borrow().get(name).copied() {
-                    if let Value::Class(_) = existing_val {
-                        return Err(format!(
-                            "Cannot redefine class {} because it already exists",
-                            name.to_explicit_string()
-                        )
-                        .into());
-                    }
+                if let Some(existing_val) = self.globals.borrow().get(name).copied()
+                    && let Value::Class(_) = existing_val
+                {
+                    return Err(format!(
+                        "Cannot redefine class {} because it already exists",
+                        name.to_explicit_string()
+                    )
+                    .into());
                 }
 
                 let class_obj = gcl!(
@@ -6302,7 +6323,7 @@ impl<'gc> VmState<'gc> {
                         .unwrap_or_else(|| self.new_nil(mc));
                     let target_class = self
                         .get_target_class_for_def(mc, self_val)
-                        .map_err(|e| QuoinError::Other(e))?;
+                        .map_err(QuoinError::Other)?;
                     self.ensure_not_sealed(target_class)?;
 
                     let method_obj = self.new_method(mc, selector.clone(), block_val, false);
@@ -6357,7 +6378,7 @@ impl<'gc> VmState<'gc> {
                         .unwrap_or_else(|| self.new_nil(mc));
                     let target_class = self
                         .get_target_class_for_def(mc, self_val)
-                        .map_err(|e| QuoinError::Other(e))?;
+                        .map_err(QuoinError::Other)?;
                     self.ensure_not_sealed(target_class)?;
 
                     let method_obj = self.new_method(mc, selector.clone(), block_val, true);

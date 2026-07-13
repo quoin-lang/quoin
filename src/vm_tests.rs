@@ -138,7 +138,8 @@ where
         vm.register_native_class(mc, build_regex_class());
         vm.register_native_class(mc, build_match_class());
 
-        for t in ["Method"] {
+        {
+            let t = "Method";
             vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
         }
 
@@ -609,7 +610,7 @@ fn test_constants() {
         vec![
             Instruction::Push(Constant::Nil),
             Instruction::Push(Constant::Bool(true)),
-            Instruction::Push(Constant::Double(3.14)),
+            Instruction::Push(Constant::Double(3.25)),
             Instruction::Push(Constant::String("hello".to_string())),
         ],
         |vm, mc| {
@@ -628,7 +629,7 @@ fn test_constants() {
                 vec![
                     ValueSpec::Nil,
                     ValueSpec::Bool(true),
-                    ValueSpec::Double(3.14)
+                    ValueSpec::Double(3.25)
                 ]
             );
 
@@ -774,7 +775,7 @@ fn test_block_execution_and_returns() {
         name: Some("test_block".to_string()),
         is_nested_block: false,
         is_init_literal: false,
-        param_syms: crate::value::intern_param_syms(&vec!["x".to_string()]),
+        param_syms: crate::value::intern_param_syms(&["x".to_string()]),
         param_types: vec!["Object".to_string()],
         param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
@@ -955,7 +956,7 @@ fn test_non_local_return_callback() {
         name: Some("bar".to_string()),
         is_nested_block: false,
         is_init_literal: false,
-        param_syms: crate::value::intern_param_syms(&vec!["blk".to_string()]),
+        param_syms: crate::value::intern_param_syms(&["blk".to_string()]),
         param_types: vec!["Object".to_string()],
         param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
@@ -1462,10 +1463,8 @@ fn test_native_state_holding_rust_state() {
 
 #[test]
 fn test_mixin_method_lookup_and_instance_vars() {
-    let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-        let vm = VmState::new(mc, VmOptions::default());
-        vm
-    });
+    let mut arena =
+        Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, VmOptions::default()));
 
     arena.mutate_root(|mc, vm| {
         // Define mixin class Point
@@ -1547,10 +1546,8 @@ fn test_mixin_method_lookup_and_instance_vars() {
 
 #[test]
 fn test_execute_block_helper() {
-    let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-        let vm = VmState::new(mc, VmOptions::default());
-        vm
-    });
+    let mut arena =
+        Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, VmOptions::default()));
 
     arena.mutate_root(|mc, vm| {
         // Build a block that adds two arguments (a, b) and returns self + a + b
@@ -1565,7 +1562,7 @@ fn test_execute_block_helper() {
                     name: Some("test_block".to_string()),
                     is_nested_block: false,
                     is_init_literal: false,
-                    param_syms: crate::value::intern_param_syms(&vec![
+                    param_syms: crate::value::intern_param_syms(&[
                         "a".to_string(),
                         "b".to_string()
                     ]),
@@ -1626,7 +1623,7 @@ fn test_execute_block_helper() {
                     name: Some("test_block_no_self".to_string()),
                     is_nested_block: false,
                     is_init_literal: false,
-                    param_syms: crate::value::intern_param_syms(&vec![
+                    param_syms: crate::value::intern_param_syms(&[
                         "a".to_string(),
                         "b".to_string()
                     ]),
@@ -1877,8 +1874,10 @@ fn test_error_annotation_with_color() {
         })
         .unwrap();
 
-    let mut options = VmOptions::default();
-    options.supports_color = true;
+    let options = VmOptions {
+        supports_color: true,
+        ..VmOptions::default()
+    };
 
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, options));
 
@@ -1947,8 +1946,10 @@ fn test_error_annotation_with_console_width() {
         })
         .unwrap();
 
-    let mut options = VmOptions::default();
-    options.console_width = Some(120);
+    let options = VmOptions {
+        console_width: Some(120),
+        ..VmOptions::default()
+    };
 
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, options));
 
@@ -1992,8 +1993,10 @@ fn highlighted_snippet_does_not_panic_on_truncated_source() {
     // panicking `parse_quoin_string` — crashing the REPL the moment a long line errored
     // (e.g. `([HTTP]Client.get:'https://…').pp.print;` cut to `([HTTP]Client`). The fix
     // routes through the resilient highlighter, which never panics.
-    let mut options = VmOptions::default();
-    options.supports_color = true;
+    let options = VmOptions {
+        supports_color: true,
+        ..VmOptions::default()
+    };
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, options));
 
     arena.mutate_root(|_mc, vm| {
@@ -2024,7 +2027,8 @@ fn test_vm_to_s() {
         vm.register_native_class(mc, build_map_class());
         vm.register_native_class(mc, build_key_value_pair_class());
         vm.register_native_class(mc, build_regex_class());
-        for t in ["Method"] {
+        {
+            let t = "Method";
             vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
         }
         vm
@@ -2158,7 +2162,8 @@ fn test_vm_options_at_runtime() {
         vm.register_native_class(mc, build_key_value_pair_class());
         vm.register_native_class(mc, build_regex_class());
         vm.register_native_class(mc, crate::runtime::runtime::build_runtime_class());
-        for t in ["Method"] {
+        {
+            let t = "Method";
             vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
         }
         vm

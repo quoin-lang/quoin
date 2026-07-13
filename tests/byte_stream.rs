@@ -34,10 +34,8 @@ fn byte_stream_buffered_reads() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
-        for conn in listener.incoming() {
-            if let Ok(sock) = conn {
-                thread::spawn(move || serve(sock));
-            }
+        for sock in listener.incoming().flatten() {
+            thread::spawn(move || serve(sock));
         }
     });
 

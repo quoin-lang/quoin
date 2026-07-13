@@ -332,12 +332,7 @@ impl<'gc> VmState<'gc> {
         if self.sched.current_fiber == Some(fiber_val) {
             return Err(self.raise_fiber_error(mc, "a Fiber cannot resume itself"));
         }
-        if self
-            .sched
-            .resume_stack
-            .iter()
-            .any(|f| *f == Some(fiber_val))
-        {
+        if self.sched.resume_stack.contains(&Some(fiber_val)) {
             return Err(self.raise_fiber_error(
                 mc,
                 "cannot resume a Fiber that is currently resuming this one (would deadlock)",
@@ -353,13 +348,11 @@ impl<'gc> VmState<'gc> {
         if let Some(owner) = fiber_val
             .with_native_state::<NativeFiberState, _, _>(|s| s.owner)
             .map_err(QuoinError::Other)?
+            && owner != self.sched.current_task
         {
-            if owner != self.sched.current_task {
-                return Err(self.raise_fiber_error(
-                    mc,
-                    "cannot resume a Fiber that is running in another task",
-                ));
-            }
+            return Err(
+                self.raise_fiber_error(mc, "cannot resume a Fiber that is running in another task")
+            );
         }
 
         if let Some(yielder) = unsafe { self.get_yielder() } {

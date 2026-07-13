@@ -95,13 +95,13 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
                     .map(|r| r.map_err(fs_err))
             })?;
 
-            return Ok(if let Some(entry) = r {
+            Ok(if let Some(entry) = r {
                 let ent = entry?;
                 let os_string = ent.path().into_os_string();
                 new_native_io_file(vm, mc, os_string, ent.metadata().map_err(fs_err)?)
             } else {
                 vm.new_nil(mc)
-            });
+            })
         })
         .doc(
             "The next directory entry as an `[IO]File` (its full path plus metadata), or nil \
@@ -329,9 +329,7 @@ pub fn build_io_file_class() -> NativeClassBuilder {
             Ok(vm.new_string(
                 mc,
                 receiver
-                    .with_native_state(|io: &NativeIoFile| {
-                        io.path.to_string_lossy().to_owned().to_string()
-                    })
+                    .with_native_state(|io: &NativeIoFile| io.path.to_string_lossy().into_owned())
                     .map_err(|e| QuoinError::Other(e.to_string()))?,
             ))
         })
@@ -499,10 +497,10 @@ pub(crate) fn get_io_string<'gc>(
         let is_ansi = obj.borrow().class.borrow().name.name == "ANSI";
         if is_ansi {
             let string_val = vm.call_method(mc, val, "string", vec![])?;
-            if let Value::Object(o) = string_val {
-                if let ObjectPayload::String(st) = &o.borrow().payload {
-                    return Ok(ansi_colorizer::colorize(st));
-                }
+            if let Value::Object(o) = string_val
+                && let ObjectPayload::String(st) = &o.borrow().payload
+            {
+                return Ok(ansi_colorizer::colorize(st));
             }
             return Err(QuoinError::TypeError {
                 expected: "String".to_string(),
