@@ -30,7 +30,7 @@ use super::*;
 use crate::docs;
 use crate::introspect::{self, ClassInfo, GlobalKind, MethodInfo};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 /// The serialized doc model. `version` bumps on breaking shape changes.
@@ -216,12 +216,28 @@ impl VmRunner {
             eprintln!("qn doc: cannot create {}: {e}", out_dir.display());
             exit(1);
         }
+        // With `--stdlib-path`, inline code spans naming stdlib classes link into the
+        // co-hosted reference (`List` → PREFIX/List.html, `List#at:put:` → its method
+        // anchor). The stdlib session boots once, and only when asked — without the
+        // flag the render is byte-identical to before.
+        let world = self.options.doc_stdlib_path.as_ref().map(|prefix| {
+            let known: HashSet<String> = self.stdlib_class_names().into_iter().collect();
+            (prefix.trim_end_matches('/').to_string(), known)
+        });
+        let linker: Option<Box<crate::md_html::CodeLinker<'_>>> =
+            world.as_ref().map(|(prefix, known)| {
+                Box::new(move |span: &str| {
+                    code_span_link(span, &|c| known.contains(c), &|c| {
+                        format!("{prefix}/{}", page_name(c))
+                    })
+                }) as Box<crate::md_html::CodeLinker<'_>>
+            });
         for (rel, src) in &pages {
             let Ok(text) = std::fs::read_to_string(src) else {
                 eprintln!("qn doc --md: cannot read {}", src.display());
                 exit(1);
             };
-            let html = crate::md_html::render(&text, true);
+            let html = crate::md_html::render_linked(&text, true, linker.as_deref());
             let title = crate::md_html::title_of(&text).unwrap_or_else(|| {
                 rel.file_stem()
                     .map(|s| s.to_string_lossy().to_string())
@@ -241,6 +257,27 @@ impl VmRunner {
             out_dir.display()
         ));
         Ok(())
+    }
+
+    /// Boot the stdlib session and harvest its class names — the world the `--md`
+    /// span linker may target, and exactly what a `--stdlib` reference run documents.
+    fn stdlib_class_names(&self) -> Vec<String> {
+        let Some(mut arena) = self.build_repl_arena() else {
+            exit(1);
+        };
+        for unit in STDLIB_USES {
+            if let Err(e) = runner_repl::eval_once(&mut arena, unit) {
+                eprintln!("qn doc: loading the stdlib: {e}");
+                exit(1);
+            }
+        }
+        arena.mutate_root(|_mc, vm| {
+            introspect::globals(vm)
+                .into_iter()
+                .filter(|g| g.kind == GlobalKind::Class && !is_internal(&g.name))
+                .map(|g| g.name)
+                .collect()
+        })
     }
 
     /// Boot a VM, load the subject (the project tree by default; the shipping stdlib under
@@ -268,12 +305,7 @@ impl VmRunner {
             units
         } else {
             // The prelude loads `core/*` only; the rest of the shipping stdlib is use-loaded.
-            for unit in [
-                "use std:net/*",
-                "use std:web/*",
-                "use std:lang/*",
-                "use test",
-            ] {
+            for unit in STDLIB_USES {
                 if let Err(e) = runner_repl::eval_once(&mut arena, unit) {
                     eprintln!("qn doc: loading the stdlib: {e}");
                     exit(1);
@@ -781,6 +813,66 @@ fn report_coverage(model: &DocModel) {
 
 // ---- HTML rendering -------------------------------------------------------------------
 
+/// The shipping stdlib beyond the prelude's `core/*` — what `--stdlib` documents,
+/// and the classes the `--md` span linker knows.
+const STDLIB_USES: [&str; 4] = [
+    "use std:net/*",
+    "use std:web/*",
+    "use std:lang/*",
+    "use test",
+];
+
+/// Resolve an inline code span to a reference href — the book→reference links.
+/// A bare class name (`List`, `[IO]File`, nullable `Integer?`) links to its page;
+/// `Class#sel:` / `Class.sel:` deep-link the instance/class-side method anchors
+/// (`#i-…` / `#c-…`) every reference page carries — a selector the page doesn't
+/// document degrades to the page top, never a broken link. `to_href` maps a class
+/// name to its page URL (local page or `--stdlib-path` prefix — the caller's
+/// policy); `knows` must accept exactly the names `to_href` can serve.
+fn code_span_link(
+    span: &str,
+    knows: &dyn Fn(&str) -> bool,
+    to_href: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    if knows(span) {
+        return Some(to_href(span));
+    }
+    if let Some(base) = span.strip_suffix('?')
+        && knows(base)
+    {
+        return Some(to_href(base));
+    }
+    // Split at the FIRST separator: `#` cites an instance method, `.` a class-side
+    // one. A namespaced class (`[IO]File#open:`) contains neither, so the class
+    // part stays whole; non-citations (`x.md`, `3.14`) fail the `knows` gate.
+    let (idx, side) = match (span.find('#'), span.find('.')) {
+        (Some(h), Some(d)) if h < d => (h, 'i'),
+        (Some(h), None) => (h, 'i'),
+        (Some(_) | None, Some(d)) => (d, 'c'),
+        (None, None) => return None,
+    };
+    let (class, sel) = (&span[..idx], &span[idx + 1..]);
+    if !knows(class) || !is_selector(sel) {
+        return None;
+    }
+    // The book glues an argument name onto some citations (`Async.sleep:ms`); the
+    // anchor is the selector alone, which ends at the last colon.
+    let sel = match sel.rfind(':') {
+        Some(i) => &sel[..=i],
+        None => sel,
+    };
+    Some(format!("{}#{side}-{sel}", to_href(class)))
+}
+
+/// A citable selector: a letter, then letters/digits/colons (`at:put:`) with the
+/// `?`/`!` spellings (`exists?:`, `flush!`). Operator selectors aren't citable —
+/// their characters are HTML-escaped by the time the linker sees the span.
+fn is_selector(s: &str) -> bool {
+    s.starts_with(|c: char| c.is_ascii_alphabetic())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '?' | '!'))
+}
+
 /// `[IO]File` -> `IO.File.html`; `Point` -> `Point.html`.
 fn page_name(class: &str) -> String {
     let ns = NamespacedName::parse(class);
@@ -1003,7 +1095,38 @@ fn render_index(model: &DocModel) -> String {
         format!("<h1>{}</h1>\n", esc(&model.title))
     };
     if let Some(readme) = &model.readme {
-        body.push_str(&crate::md_html::render(readme, false));
+        // README code spans link the way type annotations do (`type_link`): a class
+        // this model documents links to its local page; a stdlib class links through
+        // `--stdlib-path` when one names a published reference.
+        let local = |c: &str| model.classes.iter().any(|k| k.name == c);
+        let link = |span: &str| {
+            code_span_link(
+                span,
+                &|c| {
+                    local(c) || (model.stdlib_path.is_some() && model.known.iter().any(|k| k == c))
+                },
+                &|c| {
+                    if local(c) {
+                        page_name(c)
+                    } else {
+                        format!(
+                            "{}/{}",
+                            model
+                                .stdlib_path
+                                .as_deref()
+                                .unwrap_or_default()
+                                .trim_end_matches('/'),
+                            page_name(c)
+                        )
+                    }
+                },
+            )
+        };
+        body.push_str(&crate::md_html::render_linked(
+            readme,
+            false,
+            Some(&link as &crate::md_html::CodeLinker<'_>),
+        ));
         body.push_str("<hr>\n");
     }
     if !model.commands.is_empty() {
@@ -1547,3 +1670,7 @@ fn fenced_blocks(doc: &str) -> Vec<String> {
     }
     blocks
 }
+
+#[cfg(test)]
+#[path = "runner_doc_tests.rs"]
+mod runner_doc_tests;

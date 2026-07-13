@@ -12,12 +12,35 @@
 
 use std::fmt::Write as _;
 
-/// Render a whole markdown document to body HTML. `rewrite_md_links` maps relative
-/// `*.md` hrefs to their rendered names (`x.md` → `x.html`, `README.md` →
-/// `index.html`) — on for a rendered SET (`--md`), off for a lone README preamble
-/// whose links point at repository files.
+/// A code-span resolver: the span's text (HTML-escaped, exactly as it will render)
+/// → an href, or `None` to leave the span unlinked. The caller owns the policy —
+/// which names are classes, where their pages live (`qn doc`'s book→reference links).
+pub type CodeLinker<'a> = dyn Fn(&str) -> Option<String> + 'a;
+
+/// What the block passes thread through to the inline layer.
+struct Ctx<'a> {
+    /// Map relative `*.md` hrefs to their rendered names (`x.md` → `x.html`,
+    /// `README.md` → `index.html`) — on for a rendered SET (`--md`), off for a lone
+    /// README preamble whose links point at repository files.
+    rewrite: bool,
+    /// Linkify inline code spans that resolve; `None` renders exactly as before.
+    link: Option<&'a CodeLinker<'a>>,
+}
+
+/// Render a whole markdown document to body HTML.
 pub fn render(md: &str, rewrite_md_links: bool) -> String {
-    render_lines(&md.lines().collect::<Vec<_>>(), rewrite_md_links)
+    render_linked(md, rewrite_md_links, None)
+}
+
+/// `render`, with inline code spans offered to `link` — a resolved span renders as
+/// `<a href="…"><code>…</code></a>`. Fenced code is never offered (it's a program
+/// listing, not a citation).
+pub fn render_linked(md: &str, rewrite_md_links: bool, link: Option<&CodeLinker>) -> String {
+    let ctx = Ctx {
+        rewrite: rewrite_md_links,
+        link,
+    };
+    render_lines(&md.lines().collect::<Vec<_>>(), &ctx)
 }
 
 /// The first `# heading`'s text, for the page `<title>`.
@@ -27,7 +50,7 @@ pub fn title_of(md: &str) -> Option<String> {
         .map(|l| l[2..].trim().to_string())
 }
 
-fn render_lines(lines: &[&str], rewrite: bool) -> String {
+fn render_lines(lines: &[&str], ctx: &Ctx) -> String {
     let mut out = String::new();
     let mut para: Vec<&str> = Vec::new();
     let mut items: Vec<(bool, String)> = Vec::new(); // (ordered, text)
@@ -38,8 +61,8 @@ fn render_lines(lines: &[&str], rewrite: bool) -> String {
 
         // Fenced code: swallow to the closing fence.
         if let Some(info) = trimmed.strip_prefix("```") {
-            flush_para(&mut out, &mut para, rewrite);
-            flush_items(&mut out, &mut items, rewrite);
+            flush_para(&mut out, &mut para, ctx);
+            flush_items(&mut out, &mut items, ctx);
             let info = info.trim().to_string();
             let mut body: Vec<&str> = Vec::new();
             i += 1;
@@ -54,8 +77,8 @@ fn render_lines(lines: &[&str], rewrite: bool) -> String {
 
         // Blockquote: strip the markers and render the inside recursively.
         if trimmed.starts_with('>') {
-            flush_para(&mut out, &mut para, rewrite);
-            flush_items(&mut out, &mut items, rewrite);
+            flush_para(&mut out, &mut para, ctx);
+            flush_items(&mut out, &mut items, ctx);
             let mut inner: Vec<&str> = Vec::new();
             while i < lines.len() {
                 let t = lines[i].trim_start();
@@ -68,48 +91,48 @@ fn render_lines(lines: &[&str], rewrite: bool) -> String {
             let _ = write!(
                 out,
                 "<blockquote>\n{}</blockquote>\n",
-                render_lines(&inner, rewrite)
+                render_lines(&inner, ctx)
             );
             continue;
         }
 
         // Table: consecutive `|` lines; the second is the header separator.
         if trimmed.starts_with('|') {
-            flush_para(&mut out, &mut para, rewrite);
-            flush_items(&mut out, &mut items, rewrite);
+            flush_para(&mut out, &mut para, ctx);
+            flush_items(&mut out, &mut items, ctx);
             let mut rows: Vec<&str> = Vec::new();
             while i < lines.len() && lines[i].trim_start().starts_with('|') {
                 rows.push(lines[i].trim());
                 i += 1;
             }
-            push_table(&mut out, &rows, rewrite);
+            push_table(&mut out, &rows, ctx);
             continue;
         }
 
         if let Some(rest) = line.strip_prefix('#') {
-            flush_para(&mut out, &mut para, rewrite);
-            flush_items(&mut out, &mut items, rewrite);
+            flush_para(&mut out, &mut para, ctx);
+            flush_items(&mut out, &mut items, ctx);
             let level = 1 + rest.chars().take_while(|&c| c == '#').count().min(4);
             let text = rest.trim_start_matches('#').trim();
             let _ = write!(
                 out,
                 "<h{level} id=\"{}\">{}</h{level}>\n",
                 slug(text),
-                inline(text, rewrite)
+                inline(text, ctx)
             );
         } else if trimmed.chars().all(|c| c == '-') && trimmed.len() >= 3 {
-            flush_para(&mut out, &mut para, rewrite);
-            flush_items(&mut out, &mut items, rewrite);
+            flush_para(&mut out, &mut para, ctx);
+            flush_items(&mut out, &mut items, ctx);
             out.push_str("<hr>\n");
         } else if let Some(item) = trimmed.strip_prefix("- ") {
-            flush_para(&mut out, &mut para, rewrite);
+            flush_para(&mut out, &mut para, ctx);
             items.push((false, item.to_string()));
         } else if let Some(item) = ordered_item(trimmed) {
-            flush_para(&mut out, &mut para, rewrite);
+            flush_para(&mut out, &mut para, ctx);
             items.push((true, item.to_string()));
         } else if line.trim().is_empty() {
-            flush_para(&mut out, &mut para, rewrite);
-            flush_items(&mut out, &mut items, rewrite);
+            flush_para(&mut out, &mut para, ctx);
+            flush_items(&mut out, &mut items, ctx);
         } else if !items.is_empty() {
             // A wrapped continuation of the previous list item.
             let last = items.len() - 1;
@@ -120,19 +143,19 @@ fn render_lines(lines: &[&str], rewrite: bool) -> String {
         }
         i += 1;
     }
-    flush_para(&mut out, &mut para, rewrite);
-    flush_items(&mut out, &mut items, rewrite);
+    flush_para(&mut out, &mut para, ctx);
+    flush_items(&mut out, &mut items, ctx);
     out
 }
 
-fn flush_para(out: &mut String, para: &mut Vec<&str>, rewrite: bool) {
+fn flush_para(out: &mut String, para: &mut Vec<&str>, ctx: &Ctx) {
     if !para.is_empty() {
-        let _ = write!(out, "<p>{}</p>\n", inline(&para.join(" "), rewrite));
+        let _ = write!(out, "<p>{}</p>\n", inline(&para.join(" "), ctx));
         para.clear();
     }
 }
 
-fn flush_items(out: &mut String, items: &mut Vec<(bool, String)>, rewrite: bool) {
+fn flush_items(out: &mut String, items: &mut Vec<(bool, String)>, ctx: &Ctx) {
     if items.is_empty() {
         return;
     }
@@ -140,7 +163,7 @@ fn flush_items(out: &mut String, items: &mut Vec<(bool, String)>, rewrite: bool)
     let tag = if items[0].0 { "ol" } else { "ul" };
     let _ = write!(out, "<{tag}>\n");
     for (_, item) in items.iter() {
-        let _ = write!(out, "<li>{}</li>\n", inline(item, rewrite));
+        let _ = write!(out, "<li>{}</li>\n", inline(item, ctx));
     }
     let _ = write!(out, "</{tag}>\n");
     items.clear();
@@ -166,7 +189,7 @@ fn push_fence(out: &mut String, info: &str, body: &str) {
     }
 }
 
-fn push_table(out: &mut String, rows: &[&str], rewrite: bool) {
+fn push_table(out: &mut String, rows: &[&str], ctx: &Ctx) {
     // A `|` inside a backtick code span (block params: `{ |n| … }`) or escaped
     // as `\|` is content, not a cell separator — matching GitHub, which also
     // unescapes `\|`.
@@ -203,7 +226,7 @@ fn push_table(out: &mut String, rows: &[&str], rewrite: bool) {
         };
         out.push_str("<tr>");
         for cell in cells(row) {
-            let _ = write!(out, "<{tag}>{}</{tag}>", inline(&cell, rewrite));
+            let _ = write!(out, "<{tag}>{}</{tag}>", inline(&cell, ctx));
         }
         out.push_str("</tr>\n");
     }
@@ -238,7 +261,7 @@ fn esc(s: &str) -> String {
 /// The inline layer. Backtick spans are carved out FIRST and protected — the
 /// emphasis and link passes only see the prose between them (a `*` inside
 /// `` `lib/*.qn` `` is code, not emphasis).
-fn inline(text: &str, rewrite: bool) -> String {
+fn inline(text: &str, ctx: &Ctx) -> String {
     let escaped = esc(text);
     let parts: Vec<&str> = escaped.split('`').collect();
     // An even part count means an odd number of backticks: the tail one is literal.
@@ -247,11 +270,17 @@ fn inline(text: &str, rewrite: bool) -> String {
     // [label](url) whose label is (or contains) a code span still parses as one
     // link; markdown source can't contain the \u{1} delimiter.
     let mut protected = String::new();
-    let mut spans: Vec<String> = Vec::new();
+    // (plain <code>, linked form) — which one lands is decided at substitution.
+    let mut spans: Vec<(String, String)> = Vec::new();
     for (i, part) in parts.iter().enumerate() {
         if i % 2 == 1 && !(unpaired_tail && i == parts.len() - 1) {
             let _ = write!(protected, "\u{1}{}\u{1}", spans.len());
-            spans.push(format!("<code>{part}</code>"));
+            let code = format!("<code>{part}</code>");
+            let linked = match ctx.link.and_then(|f| f(part)) {
+                Some(href) => format!(r#"<a href="{href}">{code}</a>"#),
+                None => code.clone(),
+            };
+            spans.push((code, linked));
         } else {
             if i % 2 == 1 {
                 protected.push('`');
@@ -259,9 +288,18 @@ fn inline(text: &str, rewrite: bool) -> String {
             protected.push_str(part);
         }
     }
-    let mut out = prose(&protected, rewrite);
-    for (n, span) in spans.iter().enumerate() {
-        out = out.replace(&format!("\u{1}{n}\u{1}"), span);
+    let mut out = prose(&protected, ctx.rewrite);
+    for (n, (code, linked)) in spans.iter().enumerate() {
+        let key = format!("\u{1}{n}\u{1}");
+        // A span that landed inside a [label](url) anchor stays plain code —
+        // nesting the resolver's <a> inside the label's would be invalid HTML.
+        let inside_a = out.find(&key).is_some_and(|pos| {
+            match (out[..pos].rfind("<a "), out[..pos].rfind("</a>")) {
+                (Some(open), close) => close.is_none_or(|c| c < open),
+                (None, _) => false,
+            }
+        });
+        out = out.replace(&key, if inside_a { code } else { linked });
     }
     out
 }

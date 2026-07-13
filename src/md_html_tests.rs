@@ -131,6 +131,58 @@ fn md_links_rewrite_only_when_asked() {
 }
 
 #[test]
+fn code_spans_link_through_the_resolver() {
+    let link = |s: &str| (s == "List").then(|| "../reference/List.html".to_string());
+    let html = render_linked("send `List` a `collect:`\n", false, Some(&link));
+    assert!(
+        html.contains(r#"<a href="../reference/List.html"><code>List</code></a>"#),
+        "a resolved span links: {html}"
+    );
+    assert!(
+        html.contains("<code>collect:</code>") && !html.contains("collect:</code></a>"),
+        "an unresolved span stays plain: {html}"
+    );
+    // The resolver reaches spans in headings, list items, tables, and quote boxes.
+    let md = "## The `List` class\n\n- use `List`\n\n| a |\n|---|\n| `List` |\n\n> `List`\n";
+    let html = render_linked(md, false, Some(&link));
+    assert_eq!(
+        html.matches("List.html").count(),
+        4,
+        "all four positions linkify: {html}"
+    );
+}
+
+#[test]
+fn fenced_code_is_never_offered_to_the_resolver() {
+    let link = |_: &str| Some("WRONG.html".to_string());
+    let html = render_linked(
+        "```quoin\nList\n```\n\n```\nList\n```\n",
+        false,
+        Some(&link),
+    );
+    assert!(
+        !html.contains("WRONG.html"),
+        "fences are listings, not citations: {html}"
+    );
+}
+
+#[test]
+fn a_span_inside_a_link_label_stays_plain() {
+    let link = |s: &str| (s == "List").then(|| "List.html".to_string());
+    let html = render_linked("see [the `List` docs](09-library.md)\n", true, Some(&link));
+    assert!(
+        html.contains(r#"<a href="09-library.html">the <code>List</code> docs</a>"#),
+        "no nested anchors: {html}"
+    );
+    // ...while the same span outside a label still links.
+    let html = render_linked("see [docs](09-library.md) for `List`\n", true, Some(&link));
+    assert!(
+        html.contains(r#"<a href="List.html"><code>List</code></a>"#),
+        "{html}"
+    );
+}
+
+#[test]
 fn title_comes_from_the_first_h1() {
     assert_eq!(
         title_of("intro\n\n# The Book\n").as_deref(),
