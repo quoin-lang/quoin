@@ -6,6 +6,7 @@ pub mod block;
 pub mod boolean;
 pub mod bytes;
 pub mod channel;
+pub mod channel_relay;
 pub mod civil;
 pub mod claims;
 pub mod class;

@@ -202,6 +202,10 @@ pub enum IoRequest {
     /// reply terminal on the proxy side. `None` means the lane closed (the
     /// serving side is gone).
     FrameRecv(async_channel::Receiver<quoin_ext_proto::Msg>),
+    /// Park until a channel-relay frame arrives on this link's inbound lane —
+    /// the relay agent's wait (`Channel.relayAgent:`, ACTOR_OBJECTS.md §6).
+    /// `None` means the link closed (the counterpart isolate is gone).
+    ChanRecv(async_channel::Receiver<crate::worker::ChanFrame>),
     /// Close and deregister the stream.
     Close { id: StreamId },
     /// Upgrade the stream at `id` to TLS *in place*: take it out of the registry, run
@@ -347,6 +351,8 @@ pub enum IoResult {
     DispatchMsg(Option<Box<crate::worker::DispatchReq>>),
     /// The next peer-protocol frame on a reply lane (`None` = lane closed).
     FrameMsg(Option<Box<quoin_ext_proto::Msg>>),
+    /// The next channel-relay frame on a link (`None` = link closed).
+    ChanFrame(Option<Box<crate::worker::ChanFrame>>),
     Wrote(usize),
     Closed,
     /// A `RunProcess` finished: exit code (`None` when signal-terminated — then
@@ -398,6 +404,7 @@ impl IoRequest {
             IoRequest::WorkerRecv(_) => "worker receive".to_string(),
             IoRequest::DispatchRecv(_) => "hosted serve".to_string(),
             IoRequest::FrameRecv(_) => "hosted call".to_string(),
+            IoRequest::ChanRecv(_) => "channel relay".to_string(),
             IoRequest::WorkerRecvTimed { ms, .. } => {
                 format!("worker receive (timeout {ms}ms)")
             }
@@ -542,6 +549,7 @@ impl IoBackend for MockBackend {
             IoRequest::WorkerRecvTimed { rx, .. } => IoResult::WorkerMsg(rx.try_recv().ok()),
             IoRequest::DispatchRecv(rx) => IoResult::DispatchMsg(rx.try_recv().ok().map(Box::new)),
             IoRequest::FrameRecv(rx) => IoResult::FrameMsg(rx.try_recv().ok().map(Box::new)),
+            IoRequest::ChanRecv(rx) => IoResult::ChanFrame(rx.try_recv().ok().map(Box::new)),
             IoRequest::WorkerJoin(rx) => {
                 IoResult::WorkerDone(rx.try_recv().unwrap_or_else(|_| {
                     Err("worker vanished without reporting a result".to_string())

@@ -497,6 +497,11 @@ pub struct Io {
     /// deadlock walk. Entries outlive their peer — counters are the
     /// post-mortem.
     pub claim_peers: crate::runtime::claims::ClaimRegistry,
+    /// Channel-relay state, one entry per worker link that this VM talks to
+    /// (`ACTOR_OBJECTS.md` §6): the relay lanes, pending ops, and reap. A
+    /// worker VM's entry 0 is its parent link; a parent VM gains one entry
+    /// per spawned worker (registered when the handle/proxy is minted).
+    pub chan_links: Vec<crate::worker::ChanLink>,
 }
 
 /// Per-instruction instrumentation hooks, grouped out of `VmState`. Both `None` on a normal run, so
@@ -704,6 +709,11 @@ pub struct VmState<'gc> {
     /// works unchanged; entries live only for the span of a dispatch.
     #[collect(require_static)]
     pub worker_convs: std::collections::HashMap<usize, crate::worker::ConvHandles>,
+    /// WORKER-side: this VM's `chan_links` index for its PARENT link — where
+    /// channels crossing plain lanes or dispatches relay (§6). `None` on the
+    /// main VM and before boot registration.
+    #[collect(require_static)]
+    pub parent_chan_link: Option<usize>,
     /// The ENTRY unit this VM was booted to run (canonicalized), `None` for
     /// REPL/eval. "What program is this?" — `Worker.spawn:(VM.unit)` runs
     /// another copy of the current program (the same-unit provisioning
@@ -867,6 +877,7 @@ impl<'gc> VmState<'gc> {
             dispatch_epoch: 1,
             worker_link: None,
             worker_convs: std::collections::HashMap::new(),
+            parent_chan_link: None,
             unit_path: None,
             worker_registry: Vec::new(),
             io: Io {
@@ -876,6 +887,7 @@ impl<'gc> VmState<'gc> {
                 child_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 ext_stats: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 claim_peers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                chan_links: Vec::new(),
             },
             instrumentation: Instrumentation {
                 debug: None,

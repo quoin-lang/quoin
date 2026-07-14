@@ -41,6 +41,7 @@ const T_MAKE_VALUE: u64 = 17;
 const T_READ_HANDLE: u64 = 18;
 const T_READ_HANDLE_RETURN: u64 = 19;
 const T_HOST_OP_RETURN: u64 = 20;
+const T_CALL_RETURN_CHANNEL: u64 = 21;
 
 // ---------------------------------------------------------------------------------------------
 // Encode
@@ -63,7 +64,8 @@ pub fn encode_with_meta(msg: &Msg, meta: Option<&ReplyMeta>) -> Vec<u8> {
         | Msg::CallReturnResource { .. }
         | Msg::CallReturnArray { .. }
         | Msg::CallReturnData { .. }
-        | Msg::CallReturnHandle { .. } => usize::from(meta.is_some()),
+        | Msg::CallReturnHandle { .. }
+        | Msg::CallReturnChannel { .. } => usize::from(meta.is_some()),
         _ => 0,
     };
     let mut out = Vec::with_capacity(64);
@@ -126,6 +128,11 @@ pub fn encode_with_meta(msg: &Msg, meta: Option<&ReplyMeta>) -> Vec<u8> {
             write_uint(&mut out, T_CALL_RETURN_RESOURCE);
             write_uint(&mut out, *resource);
             write_str(&mut out, class_name);
+        }
+        Msg::CallReturnChannel { chan } => {
+            write_array_header(&mut out, 2 + meta_n);
+            write_uint(&mut out, T_CALL_RETURN_CHANNEL);
+            write_uint(&mut out, *chan);
         }
         Msg::CallReturnArray { array } => {
             write_array_header(&mut out, 2 + meta_n);
@@ -575,6 +582,15 @@ pub fn decode_frame_with_meta(bytes: &[u8]) -> Result<(Msg, ReplyMeta), String> 
             let msg = Msg::CallReturnResource {
                 resource: read_uint(rd)?,
                 class_name: read_str(rd)?,
+            };
+            meta.handler_micros = read_appended_u64(rd, &mut extra)?;
+            skip_extra(rd, extra)?;
+            msg
+        }
+        T_CALL_RETURN_CHANNEL => {
+            let mut extra = need(fields, 1, "CallReturnChannel")?;
+            let msg = Msg::CallReturnChannel {
+                chan: read_uint(rd)?,
             };
             meta.handler_micros = read_appended_u64(rd, &mut extra)?;
             skip_extra(rd, extra)?;

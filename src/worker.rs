@@ -89,6 +89,10 @@ pub struct DispatchReq {
     /// richer-than-wire-taxonomy allowance as `WorkerMsg::Block`; unportable
     /// blocks and process peers take the handle path instead.
     pub blocks: Vec<(usize, PortableBlock)>,
+    /// Shipped channel arguments (§6): `(argument position, owner-side channel
+    /// id)` pairs, Null placeholders in `method_args` — like `blocks`, an
+    /// out-of-band sidecar (the wire form is the process slice).
+    pub chans: Vec<(usize, u64)>,
     pub reply: async_channel::Sender<quoin_ext_proto::Msg>,
     /// Parent→worker frames for this conversation (host-op replies and
     /// nested calls). A closed lane means the caller abandoned the
@@ -113,6 +117,77 @@ pub struct ConvHandles {
     pub depth: u32,
 }
 
+/// One channel-relay event crossing a worker link (docs/internal/ACTOR_OBJECTS.md
+/// §6): the frames of a shipped channel's protocol. NOT conversational — wakes
+/// arrive in any order, so ops carry correlation ids (`corr`) instead of riding
+/// the LIFO conversation shape. `chan` is the id the OWNER side rooted the
+/// channel under in its `vm.hosted` table. Thread links carry these as owned
+/// values (the richer-than-wire allowance); the wire encoding is the process
+/// slice.
+#[derive(Clone, Debug)]
+pub enum ChanFrame {
+    /// endpoint → owner: send `value`; answered by `Ack` (accepted), or
+    /// `ClosedFor` (channel closed — the send raises).
+    Send {
+        chan: u64,
+        corr: u64,
+        value: WireData,
+    },
+    /// owner → endpoint: the send with this correlation was accepted.
+    Ack { corr: u64 },
+    /// endpoint → owner: receive a value; answered by `Value`, `ClosedFor`
+    /// (closed and drained — nil / end of `each:`), or `RecvError`.
+    Recv { chan: u64, corr: u64 },
+    /// owner → endpoint: the receive's value.
+    Value { corr: u64, value: WireData },
+    /// owner → endpoint: the pending op's channel is closed (a receiver
+    /// observes closed-and-drained; a sender raises).
+    ClosedFor { corr: u64 },
+    /// owner → endpoint: the receive failed (a buffered value that predates
+    /// shipping turned out not to be portable).
+    RecvError { corr: u64, message: String },
+    /// endpoint → owner: close the channel (propagates; idempotent).
+    Close { chan: u64 },
+    /// endpoint → owner: retract a pending op (its task was cancelled).
+    Cancel { chan: u64, corr: u64 },
+    /// endpoint → owner: a relay endpoint was dropped (refcounted release).
+    Release { chan: u64 },
+    /// endpoint → owner: a value delivered to a since-cancelled receiver,
+    /// going home for redelivery (the send already reported success — the
+    /// value must not vanish).
+    Return { chan: u64, value: WireData },
+}
+
+/// One worker link's channel-relay state, registered in `vm.io.chan_links`
+/// (each side of a link has one): the outbound lane, the inbound lane (drained
+/// by this side's relay-agent task), the pending ops this side has in flight,
+/// and the reap of dropped endpoints awaiting `Release`.
+#[derive(Debug)]
+pub struct ChanLink {
+    pub out: async_channel::Sender<ChanFrame>,
+    pub inbound: async_channel::Receiver<ChanFrame>,
+    /// True for a process-backed link: channel crossings refuse until the
+    /// wire encoding lands (§6's process slice).
+    pub process: bool,
+    /// The relay agent (`Channel.relayAgent:`) has been spawned for this link.
+    pub agent_running: bool,
+    /// Correlation-id source for this side's pending ops.
+    pub next_corr: u64,
+    /// corr → the parked task awaiting the op's answer (park-epoch identity,
+    /// the channel.rs ghost rule) and the channel it targets (for `Return`).
+    pub pending: std::collections::HashMap<u64, PendingChanOp>,
+    /// Dropped-endpoint channel ids awaiting a `Release` frame (a GC `Drop`
+    /// can't send one; flushed by the agent and by relay ops).
+    pub reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PendingChanOp {
+    pub task: usize,
+    pub epoch: u64,
+    pub chan: u64,
+}
+
 /// The worker link's reserved ops on the `Call` frame (`class_name` routes a
 /// hosted-object dispatch; these built-ins keep it empty).
 pub(crate) const OP_SEND: &str = "send";
@@ -130,6 +205,10 @@ pub struct WorkerLink {
     pub outbox_tx: async_channel::Sender<WorkerMsg>,
     pub control_rx: async_channel::Receiver<ControlReq>,
     pub dispatch_rx: async_channel::Receiver<DispatchReq>,
+    /// Channel-relay lane, worker side: frames to the parent / from the
+    /// parent (§6). Registered as a `ChanLink` when the worker boots.
+    pub chan_tx: async_channel::Sender<ChanFrame>,
+    pub chan_rx: async_channel::Receiver<ChanFrame>,
     /// True inside a PROCESS-backed worker: blocks refuse at the lane
     /// (templates are `Arc` references — meaningless across a process).
     pub process: bool,
@@ -163,6 +242,10 @@ pub struct WorkerChannels {
     /// Hosted-object dispatch (the service proxy's lane); unused by plain
     /// workers, whose serve loop never reads the other end.
     pub dispatch_tx: async_channel::Sender<DispatchReq>,
+    /// Channel-relay lane, parent side (§6): frames to the worker / from the
+    /// worker. Registered as a `ChanLink` when the handle/proxy is minted.
+    pub chan_tx: async_channel::Sender<ChanFrame>,
+    pub chan_rx: async_channel::Receiver<ChanFrame>,
 }
 
 // Counters for the `VM.stats` 'workers' section. Message counts are bumped
@@ -194,6 +277,9 @@ pub fn note_message() {
 pub enum WorkerMsg {
     Data(WireData),
     Block(PortableBlock),
+    /// A shipped channel endpoint (§6): the owner-side channel id; the
+    /// receiving side wraps it as a relay endpoint on its link.
+    Channel(u64),
 }
 
 /// A block shipped across a worker boundary (docs/internal/CONCURRENCY_ARCH.md §10):
@@ -520,6 +606,8 @@ fn stillborn_channels() -> WorkerChannels {
     let (done_tx, done_rx) = async_channel::bounded(1);
     let (control_tx, _control_rx) = async_channel::unbounded();
     let (dispatch_tx, _dispatch_rx) = async_channel::unbounded();
+    let (chan_tx, _chan_inert_rx) = async_channel::unbounded();
+    let (_chan_inert_tx, chan_rx) = async_channel::unbounded();
     // `try_send` (send_blocking is compiled out on wasm): the lane is a fresh
     // bounded(1), so the one slot is guaranteed free.
     let _ = done_tx.try_send(Err("workers are not supported on this platform".to_string()));
@@ -529,6 +617,8 @@ fn stillborn_channels() -> WorkerChannels {
         done_rx,
         control_tx,
         dispatch_tx,
+        chan_tx,
+        chan_rx,
     }
 }
 

@@ -121,6 +121,8 @@ pub struct NativeServiceState {
     /// Boundary-profiling rows (§7), registered in `vm.io.ext_stats` beside
     /// the extensions' — one diagnosis surface.
     boundary: Rc<RefCell<BoundaryStats>>,
+    /// This link's index in `vm.io.chan_links` (§6 channel relay).
+    chan_link: usize,
 }
 
 /// The channels of the conversation a task currently has open on a worker:
@@ -173,6 +175,7 @@ struct CallCtx {
     convs: Rc<RefCell<HashMap<usize, ActiveConv>>>,
     block_handles: Rc<RefCell<Vec<u64>>>,
     boundary: Rc<RefCell<BoundaryStats>>,
+    chan_link: usize,
 }
 
 fn snapshot(s: &NativeServiceState) -> CallCtx {
@@ -189,6 +192,7 @@ fn snapshot(s: &NativeServiceState) -> CallCtx {
         convs: s.convs.clone(),
         block_handles: s.block_handles.clone(),
         boundary: s.boundary.clone(),
+        chan_link: s.chan_link,
     }
 }
 
@@ -253,6 +257,7 @@ fn service_call<'gc>(
     // every block.
     let mut method_args = Vec::with_capacity(args.len());
     let mut blocks: Vec<(usize, PortableBlock)> = Vec::new();
+    let mut chans: Vec<(usize, u64)> = Vec::new();
     for (i, a) in args.iter().enumerate() {
         let same_worker_id = a
             .with_native_state::<NativeServiceState, _, _>(|s| {
@@ -262,6 +267,21 @@ fn service_call<'gc>(
             .flatten();
         if let Some(id) = same_worker_id {
             method_args.push(Arg::Resource(id));
+            continue;
+        }
+        // A CHANNEL argument ships as a live relay endpoint (§6) — its sends
+        // and receives in the worker relay back to this side.
+        if crate::runtime::channel_relay::is_channel_value(*a) {
+            let chan = crate::runtime::channel_relay::ship_for_crossing(vm, mc, *a, ctx.chan_link)
+                .map_err(|e| {
+                    QuoinError::Other(format!(
+                        "service call '{}': argument {}: {e}",
+                        selector.as_str(),
+                        i + 1
+                    ))
+                })?;
+            chans.push((i, chan));
+            method_args.push(Arg::Data(WireData::Null));
             continue;
         }
         if let Some((template, parent_env)) = block_parts(*a) {
@@ -306,6 +326,13 @@ fn service_call<'gc>(
     let frame = hosted_call(&ctx, selector.as_str().to_string(), method_args, releases);
 
     if nested {
+        if !chans.is_empty() {
+            return Err(QuoinError::Other(format!(
+                "service call '{}': channels cannot cross on a nested call yet — \
+                 pass them in a top-level call",
+                selector.as_str()
+            )));
+        }
         return nested_call(vm, mc, receiver, &ctx, selector, frame);
     }
 
@@ -322,6 +349,7 @@ fn service_call<'gc>(
         .try_send(DispatchReq {
             frame,
             blocks,
+            chans,
             reply: reply_tx,
             hostops: hostop_rx,
             handler_micros: handler.clone(),
@@ -347,7 +375,7 @@ fn service_call<'gc>(
             reply_rx: reply_rx.clone(),
         },
     );
-    let outcome = conversation(vm, mc, selector, &reply_rx, &hostop_tx);
+    let outcome = conversation(vm, mc, selector, ctx.chan_link, &reply_rx, &hostop_tx);
     ctx.convs.borrow_mut().remove(&me);
     end_call_and_wake(vm, &ctx, me);
     record_boundary_row(
@@ -516,7 +544,14 @@ fn nested_call<'gc>(
             selector.as_str()
         )))
     } else {
-        conversation(vm, mc, selector, &conv.reply_rx, &conv.hostop_tx)
+        conversation(
+            vm,
+            mc,
+            selector,
+            ctx.chan_link,
+            &conv.reply_rx,
+            &conv.hostop_tx,
+        )
     };
     if let Some(c) = ctx.convs.borrow_mut().get_mut(&me) {
         c.depth = c.depth.saturating_sub(1);
@@ -542,6 +577,7 @@ fn conversation<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     selector: Symbol,
+    chan_link: usize,
     reply_rx: &async_channel::Receiver<Msg>,
     hostop_tx: &async_channel::Sender<Msg>,
 ) -> Result<Msg, QuoinError> {
@@ -568,7 +604,7 @@ fn conversation<'gc>(
                 method_args,
                 ..
             } => {
-                let reply = service_parent_hostop(vm, mc, &op, recv, &method_args)?;
+                let reply = service_parent_hostop(vm, mc, chan_link, &op, recv, &method_args)?;
                 if hostop_tx.try_send(reply).is_err() {
                     return Err(QuoinError::Other(format!(
                         "service call '{}': the service exited mid-call",
@@ -591,6 +627,7 @@ fn conversation<'gc>(
 fn service_parent_hostop<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
+    chan_link: usize,
     op: &str,
     recv: u64,
     method_args: &[Arg],
@@ -620,9 +657,20 @@ fn service_parent_hostop<'gc>(
     match vm.call_method_mnu(mc, target, op, argv) {
         Ok(v) => match value_to_wire(v, None) {
             Ok(dv) => Ok(Msg::CallReturnData { value: dv }),
-            Err(e) => Ok(err(format!(
-                "host block '{op}': the block's result cannot cross to the worker: {e}"
-            ))),
+            Err(e) => {
+                // A block answering a CHANNEL ships it as a live endpoint (§6).
+                if crate::runtime::channel_relay::is_channel_value(v) {
+                    return match crate::runtime::channel_relay::ship_for_crossing(
+                        vm, mc, v, chan_link,
+                    ) {
+                        Ok(chan) => Ok(Msg::CallReturnChannel { chan }),
+                        Err(e) => Ok(err(format!("host block '{op}': {e}"))),
+                    };
+                }
+                Ok(err(format!(
+                    "host block '{op}': the block's result cannot cross to the worker: {e}"
+                )))
+            }
         },
         Err(QuoinError::Cancelled) => Err(QuoinError::Cancelled),
         Err(e) => Ok(crate::runtime::worker::error_terminal(vm, &e, "parent")),
@@ -642,6 +690,10 @@ fn interpret_terminal<'gc>(
 ) -> Result<Value<'gc>, QuoinError> {
     match msg {
         Msg::CallReturnData { value } => wire_to_value(vm, mc, &value, None),
+        // A WORKER-owned channel comes back as a live relay endpoint (§6).
+        Msg::CallReturnChannel { chan } => {
+            crate::runtime::channel_relay::relay_endpoint(vm, mc, ctx.chan_link, chan)
+        }
         Msg::CallReturnResource {
             resource,
             class_name,
@@ -669,6 +721,7 @@ fn interpret_terminal<'gc>(
                     convs: ctx.convs.clone(),
                     block_handles: ctx.block_handles.clone(),
                     boundary: ctx.boundary.clone(),
+                    chan_link: ctx.chan_link,
                 },
             ))
         }
@@ -768,6 +821,12 @@ fn host<'gc>(
         rows: HashMap::new(),
     }));
     vm.io.ext_stats.borrow_mut().push(boundary.clone());
+    let chan_link = crate::runtime::channel_relay::register_chan_link(
+        vm,
+        ch.chan_tx.clone(),
+        ch.chan_rx.clone(),
+        backing == "process",
+    );
     Ok(vm.new_native_state(
         mc,
         class,
@@ -784,6 +843,7 @@ fn host<'gc>(
             convs: Rc::new(RefCell::new(HashMap::new())),
             block_handles: Rc::new(RefCell::new(Vec::new())),
             boundary,
+            chan_link,
         },
     ))
 }
@@ -952,6 +1012,7 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
                     .try_send(DispatchReq {
                         frame,
                         blocks: Vec::new(),
+                        chans: Vec::new(),
                         reply: reply_tx,
                         hostops: hostop_rx,
                         handler_micros: StdArc::new(AtomicU64::new(0)),

@@ -408,6 +408,46 @@ A channel endpoint becomes portable to a Quoin peer. Design, per the seam analys
 - **Scope**: Quoin peers only. Foreign extensions keep request/response — a Rust/Python
   process cannot host Quoin channel semantics, and shouldn't pretend to.
 
+**AS BUILT (slice 7a, 2026-07-14): thread workers, the whole semantic surface.**
+The channel never moves: the creating isolate keeps the one true
+`NativeChannelState`, whose waiter queues now admit remote entries
+(`RecvWaiter::Local | Remote{link, corr}`, same FIFO, one fairness order) — a wake
+becomes a frame when the popped waiter is remote, and everything else (buffer,
+cap, close, redelivery) is the untouched local machinery. Every other isolate
+holds a relay endpoint: a `Channel`-classed native state (`channel_relay.rs`)
+whose `send:`/`receive`/`close`/`each:` emit correlation-id `ChanFrame`s over the
+link's dedicated relay lane and park with the ordinary channel park. NOT a
+violation of the no-multiplexing rule — that rule protects the conversation
+protocol's LIFO shape; channel wakes genuinely arrive in any order, and §6 said
+correlation ids from the start. Each side of a link runs one lazily-spawned
+relay-agent task (`Channel.relayAgent:`, booted through qnlib's
+`ChannelRelayBoot` — a task must run a Quoin block, so that is the block),
+visible in `VM.ps`. As designed: backpressure is a delayed `Ack` (a full buffer
+parks remote senders); a cap-0 rendezvous works at round-trip latency; close
+propagates both directions; a value committed to a since-cancelled receiver goes
+home in a `Return` frame for redelivery — and the cancel/answer race is settled
+by keeping the pending op registered until the owner's answer OR its cancel
+confirmation resolves it, so nothing is ever orphaned or double-delivered.
+Crossing surfaces: plain `Worker.send:`/`receive` both directions
+(`WorkerMsg::Channel`), hosted-method arguments (a `chans` sidecar beside the
+blocks sidecar), hosted-method returns and parent-block answers (the one new
+protocol frame, `Msg::CallReturnChannel` — version-gated, worker-only; its wire
+form is ready for 7b). Owner-side rooting reuses `vm.hosted` (third symmetric
+role), refcounted per endpoint with reap-flushed `Release`. A shipped channel
+checks value portability AT THE SENDER (immediate, catchable); pre-ship buffered
+residue that cannot cross fails only the remote op (`RecvError`) and stays
+locally receivable. v1 refusals, all with clear errors: re-shipping a relay
+endpoint (route through the owner), channels on process links (7b), channels on
+nested calls (no sidecar on the host-op lane), and `closed?`/`count`/`capacity`
+on endpoints (the state lives with the owner). Wake-log record/replay verified
+under relay traffic (agent parks are Io deliveries; relay wakes ride the Pick
+stream). HONEST LIMITATION, documented: a wait cycle THROUGH CHANNELS across
+isolates hangs undetected (each VM's driver sees a live relay future; channel
+waits are not claims) — park labels ("relay channel send/receive") make the
+shape visible in `VM.ps`; real cross-VM wait-graph stitching is arc-4 adjacency.
+Still open for 7b/7c: process links (`ChanFrame` wire encoding + relay socket),
+block-capture shipping (`PortableCapture::Channel`), a `VM.channels` live view.
+
 ## 7. Boundary profiling (diagnosing chattiness)
 
 *Added 2026-07-13 after review: the cost gradient (stance guarantee 5) is only usable
@@ -548,7 +588,9 @@ injection wrapper, which feeds recorded results instead of re-performing.
    worker-side rebuild. COMPLETED by slice 4.5 (same day): the handle fallback
    landed, so blocks never refuse — see §3a's as-built note for the full rule.
 7. **Cross-isolate channels** (thread peers first — pure lane relay; process peers via
-   the socket).
+   the socket). 7a DONE (2026-07-14): the whole semantic surface on thread links —
+   see §6's as-built note. 7b = process links (wire encoding for `ChanFrame`),
+   7c = block-capture shipping.
 8. `WorkerService` reimplemented as sugar over `Worker.host:` (or deprecated into it).
 
 Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, since

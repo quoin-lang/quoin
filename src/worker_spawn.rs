@@ -29,8 +29,11 @@ fn spawn_worker_with(
     let (done_tx, done_rx) = async_channel::bounded(1);
     let (control_tx, control_rx) = async_channel::unbounded();
     // Thread backing: the dispatch lane IS the transport — owned `Msg` values,
-    // no pump, no bytes (ACTOR_OBJECTS.md §1).
+    // no pump, no bytes (ACTOR_OBJECTS.md §1). The channel-relay lanes (§6)
+    // likewise carry owned frames.
     let (dispatch_tx, dispatch_rx) = async_channel::unbounded();
+    let (chan_to_worker_tx, chan_to_worker_rx) = async_channel::unbounded();
+    let (chan_to_parent_tx, chan_to_parent_rx) = async_channel::unbounded();
     let id = SPAWNED.fetch_add(1, Ordering::Relaxed);
     std::thread::Builder::new()
         .name(format!("qn-worker-{id}"))
@@ -45,6 +48,8 @@ fn spawn_worker_with(
                     outbox_tx,
                     control_rx,
                     dispatch_rx,
+                    chan_tx: chan_to_parent_tx,
+                    chan_rx: chan_to_worker_rx,
                     process: false,
                 })
             }))
@@ -66,6 +71,8 @@ fn spawn_worker_with(
         done_rx,
         control_tx,
         dispatch_tx,
+        chan_tx: chan_to_worker_tx,
+        chan_rx: chan_to_parent_rx,
     }
 }
 
@@ -175,6 +182,16 @@ fn boot_worker_arena(link: WorkerLink) -> Result<ReplArena, String> {
     let mut arena: ReplArena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc, VmOptions::default());
         register_builtins(mc, &mut vm);
+        // Register the parent link's channel-relay lanes (§6) before the link
+        // moves into place: channels crossing plain lanes or dispatches relay
+        // through this entry.
+        let idx = crate::runtime::channel_relay::register_chan_link(
+            &mut vm,
+            link.chan_tx.clone(),
+            link.chan_rx.clone(),
+            link.process,
+        );
+        vm.parent_chan_link = Some(idx);
         vm.worker_link = Some(link);
         vm
     });
@@ -586,6 +603,11 @@ pub fn spawn_worker_process(
     let (done_tx, done_rx) = async_channel::bounded::<Result<WireData, String>>(1);
     let (control_tx, control_rx) = async_channel::unbounded::<ControlReq>();
     let (dispatch_tx, dispatch_rx) = async_channel::unbounded::<DispatchReq>();
+    // Channel-relay lanes exist for shape uniformity but are INERT on process
+    // links until the relay frames gain a wire encoding (§6's process slice);
+    // channel crossings refuse on process links at the encode seams.
+    let (chan_to_worker_tx, _chan_to_worker_rx) = async_channel::unbounded::<ChanFrame>();
+    let (_chan_to_parent_tx, chan_to_parent_rx) = async_channel::unbounded::<ChanFrame>();
 
     // Conversation pumps: one per lane socket, all consuming the SHARED
     // control/dispatch queues (MPMC — whichever pump is free takes the next
@@ -612,6 +634,9 @@ pub fn spawn_worker_process(
                     // Refused at the send seams; unreachable in practice.
                     WorkerMsg::Block(_) => {
                         eprintln!("qn: dropped a block on a process-worker lane");
+                    }
+                    WorkerMsg::Channel(_) => {
+                        eprintln!("qn: dropped a channel on a process-worker lane");
                     }
                 }
             }
@@ -667,6 +692,8 @@ pub fn spawn_worker_process(
             done_rx,
             control_tx,
             dispatch_tx,
+            chan_tx: chan_to_worker_tx,
+            chan_rx: chan_to_parent_rx,
         },
         pid,
         grip,
@@ -719,6 +746,7 @@ fn child_conv_loop(
             .send_blocking(DispatchReq {
                 frame,
                 blocks: Vec::new(),
+                chans: Vec::new(),
                 reply: reply_tx,
                 hostops: hostop_rx,
                 handler_micros: handler.clone(),
@@ -915,11 +943,17 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
         });
     }
 
+    // Inert relay lanes (see the parent side): crossings refuse on process
+    // links, so nothing ever flows here until the wire slice.
+    let (chan_tx, _chan_inert_rx) = async_channel::unbounded::<ChanFrame>();
+    let (_chan_inert_tx, chan_rx) = async_channel::unbounded::<ChanFrame>();
     let link = WorkerLink {
         inbox_rx,
         outbox_tx,
         control_rx,
         dispatch_rx,
+        chan_tx,
+        chan_rx,
         process: true,
     };
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match service {

@@ -49,6 +49,7 @@ unsigned ints; `str`/`bin`/`bool`/arrays/maps are their native MessagePack forms
 | 18 | ReadHandle | ext → host | `handle:u64` |
 | 19 | ReadHandleReturn | host → ext | `value:Value, error:str|nil, remote_stack:str` |
 | 20 | HostOpReturn | host → ext | `handle:u64, str:str|nil, error:str|nil, remote_stack:str` |
+| 21 | CallReturnChannel | worker → host | `chan:u64, handler_micros:u64`† — Quoin worker peers only (a shipped channel endpoint, docs/internal/ACTOR_OBJECTS.md §6); extensions never produce or receive it |
 
 † `handler_micros` is an appended field (see Evolution) on every `CallReturn*`
 terminal: the wall time the peer spent servicing the call, in microseconds, from

@@ -152,6 +152,11 @@ pub enum Msg {
     /// (reaped on drop). `resource` is the extension-assigned id; `class_name` names the registered
     /// extension-backed class it's an instance of (Phase 3; empty = the opaque `ExtResource`).
     CallReturnResource { resource: u64, class_name: String },
+    /// worker -> host (Quoin peers only, docs/internal/ACTOR_OBJECTS.md §6): the call
+    /// returns a CHANNEL the answering isolate owns; `chan` is its id in that isolate's
+    /// hosted table. The receiver wraps it as a relay endpoint. Foreign extensions
+    /// never produce or receive this frame.
+    CallReturnChannel { chan: u64 },
     /// ext -> host: the call returns a bulk `Array` (the data plane).
     CallReturnArray { array: ArrowArray },
     /// ext -> host: the call returns a structured value (materialized as a nested Quoin Value).

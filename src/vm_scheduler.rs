@@ -199,6 +199,13 @@ pub enum Wake<'gc> {
     /// empty, closed channel (returns nil / ends `each:`); a sender raises "send on a
     /// closed channel".
     ChannelClosed,
+    /// A RELAY channel op failed on the owner side (a buffered value that predates
+    /// shipping turned out not to be portable) — the parked op raises catchably.
+    /// Never delivered to a local channel park.
+    ChannelErr {
+        #[collect(require_static)]
+        message: String,
+    },
     /// A task queued for an extension connection was HANDED the in-flight claim by the
     /// finishing call (`extension.rs` fair queuing): on resume it proceeds directly into
     /// its call — ownership already transferred, no re-race with running tasks.

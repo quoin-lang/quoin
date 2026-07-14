@@ -398,7 +398,7 @@ fn test_channel_buffered_values_survive_collection() {
         channel
             .with_native_state_mut::<NativeChannelState, _, _>(mc, |ch| {
                 ch.buffer_mut().push_back(buffered);
-                ch.send_waiters_mut().push_back((TaskId(7), 0, pending));
+                ch.push_send_waiter(TaskId(7), 0, pending);
             })
             .unwrap();
         vm.push(channel); // root the channel
@@ -432,7 +432,12 @@ fn test_channel_buffered_values_survive_collection() {
                     1,
                     "the parked-sender value must survive"
                 );
-                assert_str(&ch.send_waiters[0].2, "PARKED-SENDER-VALUE");
+                match &ch.send_waiters[0] {
+                    crate::runtime::channel::SendWaiter::Local { value, .. } => {
+                        assert_str(value, "PARKED-SENDER-VALUE")
+                    }
+                    other => panic!("unexpected waiter kind: {other:?}"),
+                }
             })
             .unwrap();
     });

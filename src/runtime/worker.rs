@@ -45,6 +45,8 @@ pub struct NativeWorkerHandle {
     inbox_tx: async_channel::Sender<WorkerMsg>,
     outbox_rx: async_channel::Receiver<WorkerMsg>,
     done_rx: async_channel::Receiver<Result<WireData, String>>,
+    /// This link's index in `vm.io.chan_links` (§6 channel relay).
+    chan_link: usize,
     /// `join` consumes the done lane (its channel holds exactly one value);
     /// a second join is a clear error rather than a confusing hang.
     joined: std::cell::Cell<bool>,
@@ -107,15 +109,20 @@ fn to_message<'gc>(v: Value<'gc>, allow_blocks: bool) -> Result<WorkerMsg, Quoin
 }
 
 /// Decode a received cross-worker message into a live value: data through
-/// the wire walkers, blocks rebuilt over their capture snapshots.
+/// the wire walkers, blocks rebuilt over their capture snapshots, shipped
+/// channels wrapped as relay endpoints on `link` (§6).
 fn from_message<'gc>(
     vm: &mut crate::vm::VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     msg: &WorkerMsg,
+    link: usize,
 ) -> Result<Value<'gc>, QuoinError> {
     match msg {
         WorkerMsg::Data(dv) => wire_to_value(vm, mc, dv, None),
         WorkerMsg::Block(pb) => rebuild_portable_value(vm, mc, pb).map_err(QuoinError::Other),
+        WorkerMsg::Channel(chan) => {
+            crate::runtime::channel_relay::relay_endpoint(vm, mc, link, *chan)
+        }
     }
 }
 
@@ -144,6 +151,12 @@ fn wrap_handle<'gc>(
         outbox_rx: ch.outbox_rx.clone(),
         control_tx: ch.control_tx.clone(),
     });
+    let chan_link = crate::runtime::channel_relay::register_chan_link(
+        vm,
+        ch.chan_tx.clone(),
+        ch.chan_rx.clone(),
+        backing == "process",
+    );
     Ok(vm.new_native_state(
         mc,
         class,
@@ -154,6 +167,7 @@ fn wrap_handle<'gc>(
             inbox_tx: ch.inbox_tx,
             outbox_rx: ch.outbox_rx,
             done_rx: ch.done_rx,
+            chan_link,
             joined: std::cell::Cell::new(false),
         },
     ))
@@ -177,6 +191,7 @@ fn dispatch_hosted<'gc>(
     recv: u64,
     method_args: &[quoin_ext_proto::Arg],
     blocks: &[(usize, PortableBlock)],
+    chans: &[(usize, u64)],
 ) -> quoin_ext_proto::Msg {
     use quoin_ext_proto::{Arg, Msg};
     let err = |message: String| Msg::CallReturnError {
@@ -190,6 +205,16 @@ fn dispatch_hosted<'gc>(
     for (i, a) in method_args.iter().enumerate() {
         if let Some((_, pb)) = blocks.iter().find(|(pos, _)| *pos == i) {
             match rebuild_portable_value(vm, mc, pb) {
+                Ok(v) => argv.push(v),
+                Err(e) => return err(format!("hosted call '{op}': argument {}: {e}", i + 1)),
+            }
+            continue;
+        }
+        // A shipped channel argument (§6): wrap the owner's id as a live
+        // relay endpoint on this worker's parent link.
+        if let Some((_, chan)) = chans.iter().find(|(pos, _)| *pos == i) {
+            let link = vm.parent_chan_link.unwrap_or(0);
+            match crate::runtime::channel_relay::relay_endpoint(vm, mc, link, *chan) {
                 Ok(v) => argv.push(v),
                 Err(e) => return err(format!("hosted call '{op}': argument {}: {e}", i + 1)),
             }
@@ -229,6 +254,16 @@ fn dispatch_hosted<'gc>(
         Ok(v) => match value_to_wire(v, None) {
             Ok(dv) => Msg::CallReturnData { value: dv },
             Err(wire_err) => {
+                // A CHANNEL return ships as a live endpoint (§6) — checked
+                // before the generic hosting path would wrap it as an inert
+                // sub-proxy.
+                if crate::runtime::channel_relay::is_channel_value(v) {
+                    let link = vm.parent_chan_link.unwrap_or(0);
+                    return match crate::runtime::channel_relay::ship_for_crossing(vm, mc, v, link) {
+                        Ok(chan) => Msg::CallReturnChannel { chan },
+                        Err(e) => err(format!("hosted call '{op}': {e}")),
+                    };
+                }
                 if let Value::Object(obj) = v {
                     let class_name = obj.borrow().class_name().to_string();
                     let id = vm.hosted_insert(v);
@@ -405,6 +440,11 @@ fn invoke_parent_block_inner<'gc>(
         };
         match msg {
             Msg::CallReturnData { value } => return wire_to_value(vm, mc, &value, None),
+            // A parent block answered with a PARENT-owned channel: wrap it.
+            Msg::CallReturnChannel { chan } => {
+                let link = vm.parent_chan_link.unwrap_or(0);
+                return crate::runtime::channel_relay::relay_endpoint(vm, mc, link, chan);
+            }
             Msg::CallReturnError {
                 message,
                 remote_stack,
@@ -426,7 +466,7 @@ fn invoke_parent_block_inner<'gc>(
                 for rid in &releases {
                     vm.hosted_release(*rid);
                 }
-                let reply = dispatch_hosted(vm, mc, &nested_op, recv, &method_args, &[]);
+                let reply = dispatch_hosted(vm, mc, &nested_op, recv, &method_args, &[], &[]);
                 if conv.reply_tx.try_send(reply).is_err() {
                     return Err(QuoinError::Other(format!(
                         "host block '{op}': the caller abandoned the conversation"
@@ -529,6 +569,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     }
                 };
                 let blocks = req.blocks;
+                let chans = req.chans;
                 let quoin_ext_proto::Msg::Call {
                     op,
                     recv,
@@ -569,7 +610,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     },
                 );
                 let started = std::time::Instant::now();
-                let reply = dispatch_hosted(vm, mc, &op, recv, &method_args, &blocks);
+                let reply = dispatch_hosted(vm, mc, &op, recv, &method_args, &blocks, &chans);
                 req.handler_micros.store(
                     started.elapsed().as_micros() as u64,
                     std::sync::atomic::Ordering::Relaxed,
@@ -740,25 +781,38 @@ pub fn build_worker_class() -> NativeClassBuilder {
              h.join    \"* -> 42\n\
              ```",
         )
-        .instance_method("send:", |vm, _mc, receiver, args| {
-            let (tx, backing) = receiver
-                .with_native_state::<NativeWorkerHandle, _, _>(|h| (h.inbox_tx.clone(), h.backing))
+        .instance_method("send:", |vm, mc, receiver, args| {
+            let (tx, backing, chan_link) = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| {
+                    (h.inbox_tx.clone(), h.backing, h.chan_link)
+                })
                 .map_err(QuoinError::Other)?;
-            let dv = to_message(args[0], backing == "thread")?;
+            let dv = if crate::runtime::channel_relay::is_channel_value(args[0]) {
+                let chan =
+                    crate::runtime::channel_relay::ship_for_crossing(vm, mc, args[0], chan_link)?;
+                note_message();
+                WorkerMsg::Channel(chan)
+            } else {
+                to_message(args[0], backing == "thread")?
+            };
             tx.try_send(dv)
                 .map_err(|_| QuoinError::Other("Worker.send: the worker has exited".into()))?;
-            Ok(vm.new_nil(_mc))
+            Ok(vm.new_nil(mc))
         })
         .doc(
             "Send a value into the worker's inbox (deep-copied; a thread-backed worker also \
-             accepts a portable block). Raises if the worker has exited. Answers nil.",
+             accepts a portable block, and a Channel crosses as a live endpoint -- the \
+             worker's sends and receives on it relay back to this side). Raises if the \
+             worker has exited. Answers nil.",
         )
         .instance_method("receive", |vm, mc, receiver, _args| {
-            let rx = receiver
-                .with_native_state::<NativeWorkerHandle, _, _>(|h| h.outbox_rx.clone())
+            let (rx, chan_link) = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| {
+                    (h.outbox_rx.clone(), h.chan_link)
+                })
                 .map_err(QuoinError::Other)?;
             match vm.await_io(IoRequest::WorkerRecv(rx))? {
-                IoResult::WorkerMsg(Some(msg)) => from_message(vm, mc, &msg),
+                IoResult::WorkerMsg(Some(msg)) => from_message(vm, mc, &msg, chan_link),
                 IoResult::WorkerMsg(None) => Ok(vm.new_nil(mc)),
                 other => Err(QuoinError::Other(format!(
                     "Worker.receive: unexpected result {other:?}"
@@ -846,8 +900,9 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 ));
             };
             let rx = link.inbox_rx.clone();
+            let chan_link = vm.parent_chan_link.unwrap_or(0);
             match vm.await_io(IoRequest::WorkerRecv(rx))? {
-                IoResult::WorkerMsg(Some(msg)) => from_message(vm, mc, &msg),
+                IoResult::WorkerMsg(Some(msg)) => from_message(vm, mc, &msg, chan_link),
                 IoResult::WorkerMsg(None) => Ok(vm.new_nil(mc)),
                 other => Err(QuoinError::Other(format!(
                     "Worker.receive: unexpected result {other:?}"
@@ -865,7 +920,17 @@ pub fn build_worker_class() -> NativeClassBuilder {
             };
             let tx = link.outbox_tx.clone();
             let allow_blocks = !link.process;
-            let dv = to_message(args[0], allow_blocks)?;
+            let dv = if crate::runtime::channel_relay::is_channel_value(args[0]) {
+                let chan_link = vm.parent_chan_link.ok_or_else(|| {
+                    QuoinError::Other("Worker.send: no relay link to the parent".into())
+                })?;
+                let chan =
+                    crate::runtime::channel_relay::ship_for_crossing(vm, mc, args[0], chan_link)?;
+                note_message();
+                WorkerMsg::Channel(chan)
+            } else {
+                to_message(args[0], allow_blocks)?
+            };
             tx.try_send(dv)
                 .map_err(|_| QuoinError::Other("Worker.send: the parent has gone away".into()))?;
             Ok(vm.new_nil(mc))

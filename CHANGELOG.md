@@ -56,6 +56,23 @@ under **Changed**, with the migration.
   **handle** the worker invokes back in the parent (one round trip per invocation,
   write-captures see live parent state; portable blocks freeze their captures at
   send time on either path, so the backing never changes meaning).
+- **Cross-isolate channels** (experimental, `docs/internal/ACTOR_OBJECTS.md` §6):
+  a `Channel` now crosses to a thread-backed worker as a **live endpoint** — pass
+  it through `Worker.send:`, as a hosted-service method argument, or get one back
+  as a method's return — and the far side's `send:` / `receive` / `close` /
+  `each:` relay to the owning isolate with channel semantics intact: values
+  serialize at the boundary, one FIFO fairness order for local and remote waiters
+  alike, **backpressure crosses** (a full buffer parks remote senders; a cap-0
+  rendezvous works at round-trip latency), `close` propagates both directions,
+  and a value committed to a receiver that got cancelled is redelivered, never
+  dropped. Several workers can hold endpoints on one channel — the worker-pool
+  pattern (fan a jobs channel out, fan results in) works directly. Sends of
+  non-portable values on a shipped channel raise immediately at the sender.
+  Not yet: process-backed links, re-shipping an endpoint onward, and
+  `closed?`/`count`/`capacity` on an endpoint (the state lives with the owner) —
+  each refuses with a clear error. Note the honest limitation: a wait cycle
+  through channels *across isolates* is not detected (unlike hosted-object call
+  cycles, which raise catchably) — `VM.ps` park labels show the shape.
 - `WorkerService` (experimental): **per-object mailboxes and lanes**
   (`docs/internal/ACTOR_OBJECTS.md` §5.1). `host:class:lanes:` gives a service N
   concurrent lanes: calls to *different* hosted objects overlap (worker-side, each
