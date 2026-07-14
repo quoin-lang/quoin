@@ -164,7 +164,7 @@ impl<'gc> VmState<'gc> {
     /// *some* channel, but after a cancel (or slot reuse — epochs are scheduler-global,
     /// so a recycled slot never repeats one) that can be a different channel than the
     /// one holding this entry, and delivering to it would misroute the value.
-    fn channel_waiter_live(&self, id: TaskId, epoch: u64) -> bool {
+    pub(crate) fn channel_waiter_live(&self, id: TaskId, epoch: u64) -> bool {
         self.sched
             .tasks
             .get(id.0)
@@ -176,7 +176,7 @@ impl<'gc> VmState<'gc> {
     /// The current task's park epoch, captured alongside its waiter-queue entry so a
     /// counterpart can later tell this park apart from any other (see
     /// `channel_waiter_live`).
-    fn current_park_epoch(&self) -> u64 {
+    pub(crate) fn current_park_epoch(&self) -> u64 {
         self.sched
             .tasks
             .get(self.sched.current_task.0)
@@ -186,7 +186,7 @@ impl<'gc> VmState<'gc> {
     }
 
     /// Deliver `wake` to a parked channel task: clear its park flag and enqueue it ready.
-    fn wake_channel_task(&mut self, id: TaskId, wake: Wake<'gc>) {
+    pub(crate) fn wake_channel_task(&mut self, id: TaskId, wake: Wake<'gc>) {
         if let Some(t) = self.sched.tasks.get_mut(id.0).and_then(|t| t.as_mut()) {
             t.parked_on_channel = false;
             t.wake = Some(wake);

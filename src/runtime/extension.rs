@@ -51,6 +51,7 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::rc::Rc;
@@ -65,6 +66,7 @@ use quoin_ext_proto::{
 
 use crate::arg;
 use crate::error::QuoinError;
+use crate::fiber::YieldReason;
 use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::array::{self, ArrayDType};
 use crate::runtime::big_decimal::NativeBigDecimal;
@@ -75,6 +77,7 @@ use crate::runtime::runtime::eval_string;
 use crate::symbol::Symbol;
 use crate::value::{AnyCollect, Class, NamespacedName, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
+use crate::vm_scheduler::{TaskId, Wake};
 
 /// Resolve a name in the host's global table to its `Value` (a class is a class-valued global).
 /// The name is parsed as a `NamespacedName`, so a namespaced class such as `[ADBC]Database` resolves
@@ -280,13 +283,25 @@ pub struct NativeExtension {
     handle_reap: Rc<RefCell<Vec<u64>>>,
     /// Set once the child has been observed exited, so further calls fail fast (crash isolation).
     dead: bool,
-    /// True while a top-level call is in flight on this connection (from the moment it opens
+    /// The task whose top-level call owns this connection (from the moment the call opens
     /// until its reply — including the whole re-entrant host-reach conversation, which parks
     /// on the socket). The transport is a single request/response stream with no request ids,
-    /// so a *second* top-level call started while one is live — another task under
-    /// `Async.gather:`, or the extension re-entering the same extension through a host block —
-    /// would interleave frames and desync the connection. Guarded in `ext_prelude`.
-    in_flight: bool,
+    /// so a second top-level call while one is live would interleave frames and desync the
+    /// connection. A DIFFERENT task's call parks in `call_waiters` and is handed the claim
+    /// FIFO by `ext_end_call`. The SAME task re-entering (calling this extension from inside
+    /// a block it is invoking) NESTS instead: the nested call's frames ride the same stream
+    /// strictly LIFO — the extension services the nested `Call` while awaiting its own
+    /// host-op reply — tracked by `depth`. Guarded in `ext_prelude`.
+    owner: Option<TaskId>,
+    /// How many conversations the owner task has open on this connection (1 = a plain
+    /// call; >1 = re-entrant nesting). The claim is handed on / released only when the
+    /// OUTERMOST call ends (`depth` back to 0). Capped so mutual host<->extension
+    /// recursion dies loudly instead of exhausting both processes.
+    depth: u32,
+    /// Tasks parked waiting for the connection claim, FIFO, each stamped with its
+    /// `park_epoch` so a cancelled waiter's ghost entry is skipped on pop — the exact
+    /// channel park model (`channel.rs`).
+    call_waiters: VecDeque<(TaskId, u64)>,
     /// Ext-side resource ids whose host `ExtResource` was dropped, awaiting flush to the
     /// extension as `Call.releases`. Cloned into each `ExtResource` this extension hands out so
     /// its `Drop` can enqueue here (a GC `Drop` can't send a frame; mirrors the fd-reap pattern).
@@ -517,6 +532,7 @@ fn service_host_op<'gc>(
                 handle,
                 str: None,
                 error: None,
+                remote_stack: String::new(),
             }
         }
         Msg::HandleToString { handle } => match vm.handle_table.get(handle) {
@@ -525,6 +541,7 @@ fn service_host_op<'gc>(
                     handle: 0,
                     str: Some(s),
                     error: None,
+                    remote_stack: String::new(),
                 },
                 None => host_op_error(format!("handle {handle} does not refer to a String")),
             },
@@ -553,9 +570,10 @@ fn service_host_op<'gc>(
                         handle,
                         str: None,
                         error: None,
+                        remote_stack: String::new(),
                     }
                 }
-                Err(e) => host_op_error(format!("call '{selector}' on handle: {e}")),
+                Err(e) => host_op_failure(&format!("call '{selector}' on handle: "), &e),
             },
             Err(e) => host_op_error(e),
         },
@@ -564,10 +582,12 @@ fn service_host_op<'gc>(
                 Ok(results) => Msg::InvokeBlockReturn {
                     results,
                     error: None,
+                    remote_stack: String::new(),
                 },
-                Err(e) => Msg::InvokeBlockReturn {
+                Err((message, segment)) => Msg::InvokeBlockReturn {
                     results: Vec::new(),
-                    error: Some(e),
+                    error: Some(message),
+                    remote_stack: segment,
                 },
             }
         }
@@ -579,6 +599,7 @@ fn service_host_op<'gc>(
                     handle,
                     str: None,
                     error: None,
+                    remote_stack: String::new(),
                 }
             }
             None => host_op_error(format!("get_global: no global named '{name}'")),
@@ -592,6 +613,7 @@ fn service_host_op<'gc>(
                     handle,
                     str: None,
                     error: None,
+                    remote_stack: String::new(),
                 }
             }
             Err(e) => host_op_error(format!("make_value: {e}")),
@@ -601,15 +623,18 @@ fn service_host_op<'gc>(
                 Ok(wire) => Msg::ReadHandleReturn {
                     value: wire,
                     error: None,
+                    remote_stack: String::new(),
                 },
                 Err(e) => Msg::ReadHandleReturn {
                     value: WireData::Null,
                     error: Some(format!("read_handle: {e}")),
+                    remote_stack: String::new(),
                 },
             },
             Err(e) => Msg::ReadHandleReturn {
                 value: WireData::Null,
                 error: Some(e),
+                remote_stack: String::new(),
             },
         },
         other => {
@@ -631,28 +656,91 @@ fn invoke_block_batches<'gc>(
     ext_id: u64,
     block_handle: u64,
     batches: &[Vec<u64>],
-) -> Result<Vec<u64>, String> {
+) -> Result<Vec<u64>, (String, String)> {
     // Resolve the handle to a block value (rooted in the handle table, so safe to hold).
-    let block = match vm.handle_table.get(block_handle)? {
+    let block = match vm
+        .handle_table
+        .get(block_handle)
+        .map_err(|e| (e, String::new()))?
+    {
         Value::Object(obj) => match &obj.borrow().payload {
             ObjectPayload::Block(b) => *b,
-            _ => return Err(format!("handle {block_handle} does not refer to a block")),
+            _ => {
+                return Err((
+                    format!("handle {block_handle} does not refer to a block"),
+                    String::new(),
+                ));
+            }
         },
-        _ => return Err(format!("handle {block_handle} does not refer to a block")),
+        _ => {
+            return Err((
+                format!("handle {block_handle} does not refer to a block"),
+                String::new(),
+            ));
+        }
     };
 
     let mut results = Vec::with_capacity(batches.len());
     for tuple in batches {
         let mut arg_vals = Vec::with_capacity(tuple.len());
         for &handle in tuple {
-            arg_vals.push(vm.handle_table.get(handle)?);
+            arg_vals.push(
+                vm.handle_table
+                    .get(handle)
+                    .map_err(|e| (e, String::new()))?,
+            );
         }
-        let result = vm
-            .execute_block(mc, block, arg_vals, None)
-            .map_err(|e| format!("block invocation: {e}"))?;
+        // A raise inside the block travels to the peer as (short message, this host's
+        // rendered stack segment) — the segment keeps the cross-process interleave.
+        let result = vm.execute_block(mc, block, arg_vals, None).map_err(|e| {
+            (
+                format!("block invocation: {}", e.innermost()),
+                quoin_stack_segment(&e),
+            )
+        })?;
         results.push(vm.handle_table.mint_local(result, epoch, ext_id));
     }
     Ok(results)
+}
+
+/// Cap an inbound cross-process stack blob: it is untrusted foreign text on an error
+/// path — plenty for any real traceback, boring for a hostile peer. Truncation is noted
+/// in-band so a clipped blob is never mistaken for a complete one.
+const MAX_REMOTE_STACK: usize = 64 * 1024;
+
+fn truncate_blob(mut blob: String) -> String {
+    if blob.len() > MAX_REMOTE_STACK {
+        let mut cut = MAX_REMOTE_STACK;
+        while !blob.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        blob.truncate(cut);
+        blob.push_str("\n[remote stack truncated]\n");
+    }
+    blob
+}
+
+/// Render a Quoin error as this host's segment of the cross-process stack blob: the
+/// message, the frame lines the error carried, and — when the failure was itself a deeper
+/// extension error — that error's own blob appended, preserving the interleave through
+/// arbitrarily deep host<->extension nesting. Opaque to the peer (PROTOCOL.md §Errors).
+fn quoin_stack_segment(e: &QuoinError) -> String {
+    let mut seg = format!("--- Quoin (host) ---\n{}\n", e.innermost());
+    if let QuoinError::WithSourceInfo { trace, .. } = e {
+        for frame in trace {
+            seg.push_str(frame);
+            seg.push('\n');
+        }
+    }
+    if let QuoinError::ExtensionError { remote_stack, .. } = e.innermost()
+        && !remote_stack.is_empty()
+    {
+        seg.push_str(remote_stack);
+        if !seg.ends_with('\n') {
+            seg.push('\n');
+        }
+    }
+    seg
 }
 
 fn ack() -> Msg {
@@ -660,6 +748,7 @@ fn ack() -> Msg {
         handle: 0,
         str: None,
         error: None,
+        remote_stack: String::new(),
     }
 }
 
@@ -668,6 +757,18 @@ fn host_op_error(message: String) -> Msg {
         handle: 0,
         str: None,
         error: Some(message),
+        remote_stack: String::new(),
+    }
+}
+
+/// A host-op that failed with a full Quoin error (a raise inside `call_method` or a block):
+/// the short message plus this host's stack segment for the peer's blob.
+fn host_op_failure(context: &str, e: &QuoinError) -> Msg {
+    Msg::HostOpReturn {
+        handle: 0,
+        str: None,
+        error: Some(format!("{context}{}", e.innermost())),
+        remote_stack: quoin_stack_segment(e),
     }
 }
 
@@ -808,9 +909,17 @@ fn extension_call<'gc>(
                 // ext -> host: the call failed recoverably. Raise a catchable Quoin error; the
                 // extension stays alive (a normal terminal frame, not a crash) — `finish_outcome`'s
                 // error path runs `note_if_exited`, which finds the child still running and so
-                // propagates the error without marking the extension dead.
-                Msg::CallReturnError { message } => {
-                    return Err(QuoinError::ExtensionError(message));
+                // propagates the error without marking the extension dead. The opaque stack blob
+                // rides along (capped — untrusted foreign text): the printer shows it fenced,
+                // Quoin code reads it as `ex.remoteStack`.
+                Msg::CallReturnError {
+                    message,
+                    remote_stack,
+                } => {
+                    return Err(QuoinError::ExtensionError {
+                        message,
+                        remote_stack: truncate_blob(remote_stack),
+                    });
                 }
                 host_op => service_host_op(vm, mc, id, epoch, ext_id, host_op)?,
             }
@@ -970,47 +1079,156 @@ struct ExtCall {
     releases: Vec<u64>,
 }
 
+/// One attempt to claim the connection for the current task.
+enum Claim {
+    /// Claimed — outermost or nested — with the `ExtCall` context, releases drained.
+    Granted(ExtCall),
+    /// The owner task tried to nest past [`MAX_CALL_DEPTH`].
+    TooDeep,
+    /// Another task's call is in flight; the current task was appended to `call_waiters`.
+    Queued,
+}
+
+/// Build the per-call context under an already-held claim (releases drained here, once).
+fn ext_call_ctx(e: &mut NativeExtension) -> ExtCall {
+    ExtCall {
+        id: e.id,
+        ext_id: e.ext_id,
+        dead: e.dead,
+        resource_reap: e.resource_reap.clone(),
+        releases: e.resource_reap.borrow_mut().drain(..).collect(),
+    }
+}
+
+/// The most deeply the owner task may nest conversations on one connection (a host block
+/// calling back into the extension that is invoking it, recursively). Both processes spend
+/// real stack per level; past this, mutual host<->extension recursion is a bug — die loudly
+/// and catchably rather than exhausting either side.
+const MAX_CALL_DEPTH: u32 = 16;
+
 /// Peek at the extension's native state and drain its pending dropped-resource releases (one peek
 /// per call), shared by the generic `call:with:` path and extension-backed-class dispatch. Also
-/// claims the connection for this top-level call (`in_flight`): a call attempted while one is
-/// already live returns a catchable "busy" error rather than interleaving frames on the shared
-/// socket. The caller must release the claim (`ext_end_call`) once the call completes.
+/// claims the connection for this top-level call: the transport is a single request/response
+/// stream, so one call runs at a time — a concurrent call from ANOTHER task parks FIFO and is
+/// handed the claim when the in-flight call finishes (`ext_end_call`), so `Async.gather:` over
+/// one connection just works. The OWNER task re-entering (from inside a block the extension is
+/// invoking) NESTS: its frames ride the same stream strictly LIFO, the extension servicing the
+/// nested call while awaiting its own host-op reply. The caller must release the claim
+/// (`ext_end_call`) once the call completes — nested or not.
 fn ext_prelude<'gc>(
+    vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
 ) -> Result<ExtCall, QuoinError> {
-    let call = receiver
-        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
-            if e.in_flight {
-                return None;
+    let me = vm.sched.current_task;
+    let epoch = vm.current_park_epoch();
+    let claim = receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| match e.owner {
+            Some(owner) if owner == me => {
+                if e.depth >= MAX_CALL_DEPTH {
+                    Claim::TooDeep
+                } else {
+                    e.depth += 1;
+                    Claim::Granted(ext_call_ctx(e))
+                }
             }
-            e.in_flight = true;
-            Some(ExtCall {
-                id: e.id,
-                ext_id: e.ext_id,
-                dead: e.dead,
-                resource_reap: e.resource_reap.clone(),
-                releases: e.resource_reap.borrow_mut().drain(..).collect(),
-            })
+            Some(_) => {
+                e.call_waiters.push_back((me, epoch));
+                Claim::Queued
+            }
+            None => {
+                e.owner = Some(me);
+                e.depth = 1;
+                Claim::Granted(ext_call_ctx(e))
+            }
         })
         .map_err(QuoinError::Other)?;
-    call.ok_or_else(|| {
-        QuoinError::Other(
-            "extension is busy with another call: an extension connection serves one call at a \
-             time (no concurrent calls from separate tasks, and no re-entering the same \
-             extension from within its own call)"
-                .to_string(),
-        )
-    })
+    match claim {
+        Claim::Granted(call) => Ok(call),
+        Claim::TooDeep => Err(QuoinError::Other(format!(
+            "extension call nested {MAX_CALL_DEPTH} levels deep on one connection — \
+             mutual host<->extension recursion? (each level is a live call frame in \
+             both processes)"
+        ))),
+        Claim::Queued => {
+            // Park until the in-flight call HANDS us the claim (fair FIFO, no re-race
+            // with running tasks) — the channel park model verbatim.
+            if let Some(t) = vm.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
+                t.parked_on_channel = true;
+            }
+            vm.set_park_info("extension call".to_string(), Some(receiver));
+            if let Some(yielder) = unsafe { vm.get_yielder() } {
+                yielder.suspend(YieldReason::ChannelPark);
+            } else {
+                return Err(QuoinError::Other(
+                    "extension call queued outside the VM scheduler".to_string(),
+                ));
+            }
+            // On resume: if the claim was already handed to us and a cancel raced in,
+            // pass it onward (mirrors channel_redeliver) — never strand the queue.
+            let handed = matches!(vm.sched.wake.take(), Some(Wake::ExtClaim));
+            if vm.sched.cancel_current {
+                if handed {
+                    ext_end_call(vm, mc, receiver);
+                }
+                return Err(vm.take_cancellation());
+            }
+            if !handed {
+                return Err(QuoinError::Other(
+                    "extension claim park resumed without the claim".to_string(),
+                ));
+            }
+            // Ownership was transferred by `ext_end_call`; build the context under it.
+            receiver
+                .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+                    debug_assert_eq!(e.owner, Some(me));
+                    ext_call_ctx(e)
+                })
+                .map_err(QuoinError::Other)
+        }
+    }
 }
 
-/// Release the `in_flight` claim taken by [`ext_prelude`] once a top-level call has finished
-/// (whether it succeeded, errored, or the extension died). Never clears when the extension is
-/// gone from the table (nothing to clear).
-fn ext_end_call<'gc>(mc: &gc_arena::Mutation<'gc>, receiver: Value<'gc>) {
-    let _ = receiver.with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
-        e.in_flight = false;
-    });
+/// Release the claim taken by [`ext_prelude`] once a call has finished (whether it succeeded,
+/// errored, or the extension died). A NESTED call's end only pops one depth level — the owner
+/// task still has the outer conversation open. The OUTERMOST end hands the claim to the front
+/// LIVE waiter — stale (cancelled) entries are skipped by park-epoch identity, exactly as in
+/// `channel.rs` — or clears it when no one waits. Never touches state when the extension is
+/// gone from the table.
+fn ext_end_call<'gc>(vm: &mut VmState<'gc>, mc: &gc_arena::Mutation<'gc>, receiver: Value<'gc>) {
+    let still_nested = receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+            e.depth = e.depth.saturating_sub(1);
+            e.depth > 0
+        })
+        .unwrap_or(false);
+    if still_nested {
+        return;
+    }
+    loop {
+        let next = receiver
+            .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+                match e.call_waiters.pop_front() {
+                    Some(waiter) => {
+                        // Tentatively assign; confirmed below iff the waiter is live.
+                        e.owner = Some(waiter.0);
+                        e.depth = 1;
+                        Some(waiter)
+                    }
+                    None => {
+                        e.owner = None;
+                        None
+                    }
+                }
+            })
+            .unwrap_or(None);
+        let Some((id, epoch)) = next else { return };
+        if vm.channel_waiter_live(id, epoch) {
+            vm.wake_channel_task(id, Wake::ExtClaim);
+            return;
+        }
+        // Ghost (cancelled while queued): skip it and try the next waiter.
+    }
 }
 
 /// The shared body of the `call:` selectors: fail fast if the extension is already known dead,
@@ -1026,9 +1244,9 @@ fn run_extension_method<'gc>(
     args: Vec<Value<'gc>>,
     data_arg: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
-    let ctx = ext_prelude(mc, receiver)?;
+    let ctx = ext_prelude(vm, mc, receiver)?;
     if ctx.dead {
-        ext_end_call(mc, receiver);
+        ext_end_call(vm, mc, receiver);
         return Err(extension_dead_error("already exited"));
     }
     // Serialize the optional structured-value payload before opening the call (this extension's
@@ -1038,7 +1256,7 @@ fn run_extension_method<'gc>(
         Some(value) => match value_to_wire(value, Some(&ctx.resource_reap)) {
             Ok(d) => Some(d),
             Err(e) => {
-                ext_end_call(mc, receiver);
+                ext_end_call(vm, mc, receiver);
                 return Err(e);
             }
         },
@@ -1058,7 +1276,7 @@ fn run_extension_method<'gc>(
         0,
         ctx.releases,
     );
-    ext_end_call(mc, receiver);
+    ext_end_call(vm, mc, receiver);
     finish_outcome(vm, mc, receiver, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
@@ -1103,9 +1321,9 @@ pub fn dispatch_ext_method<'gc>(
     // both `[Ns]Name` (loadPackage) and a verbatim bare name (spawn:).
     let class_name = class_obj.borrow().name.name.clone();
 
-    let ctx = ext_prelude(mc, ext)?;
+    let ctx = ext_prelude(vm, mc, ext)?;
     if ctx.dead {
-        ext_end_call(mc, ext);
+        ext_end_call(vm, mc, ext);
         return Err(extension_dead_error("already exited"));
     }
     // The method arguments are routed by `extension_call` (ext-class mode) into the ordered
@@ -1124,7 +1342,7 @@ pub fn dispatch_ext_method<'gc>(
         recv,
         ctx.releases,
     );
-    ext_end_call(mc, ext);
+    ext_end_call(vm, mc, ext);
     finish_outcome(vm, mc, ext, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
@@ -1307,7 +1525,9 @@ fn spawn_and_connect<'gc>(
             reap: vm.io.socket_reap.clone(),
             handle_reap: vm.io.ext_handle_reap.clone(),
             dead: false,
-            in_flight: false,
+            owner: None,
+            depth: 0,
+            call_waiters: VecDeque::new(),
             resource_reap: Rc::new(RefCell::new(Vec::new())),
             namespace,
         },

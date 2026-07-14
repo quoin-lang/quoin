@@ -6,6 +6,33 @@ All notable changes to Quoin are recorded here. The format follows
 Quoin is pre-1.0. Minor versions may make breaking language changes; each one is called out
 under **Changed**, with the migration.
 
+## [Unreleased]
+
+### Added
+
+- Extensions (experimental): **cross-process stack traces**. A failed extension call now
+  carries an opaque stack blob — a Python extension sends its real traceback, a Rust one
+  its error chain under a dispatch-frame line, and failures that cross the boundary
+  several times interleave each side's segment in unwind order. The default traceback
+  printer shows the blob fenced (`--- in extension ---`) at the failing call, and Quoin
+  code reads it as `ex.remoteStack` (nil on ordinary errors). Old SDKs interoperate
+  unchanged (message-only errors).
+
+### Changed
+
+- Extensions (experimental): concurrent calls to one extension connection now **queue
+  fairly** instead of raising a "busy" error — a waiting caller parks and is handed the
+  connection FIFO when the in-flight call finishes, so `Async.gather:` over one long-lived
+  connection (e.g. an `[ADBC]Connection`) just works. A cancelled waiter leaves the queue
+  cleanly, and callers queued behind a dying extension fail fast with the usual catchable
+  error.
+- Extensions (experimental): **re-entrant calls now work** — a Quoin block an extension
+  is invoking may call back into that same extension; the nested call's frames ride the
+  same connection strictly LIFO while the extension services them, bounded by a nesting
+  depth cap (a catchable error past 16 levels). In the Rust SDK a nested call to the
+  outer call's own receiver (or one of its instance arguments) reports "no live instance"
+  (they are taken out for the handler's `&mut`); Python has no such limit.
+
 ## [0.1.1] — 2026-07-13
 
 The package release: installing, using, and writing Quoin packages — extension processes,

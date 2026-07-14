@@ -125,8 +125,14 @@ pub enum Msg {
     /// ext -> host: the originating call is finished; `result` is the scalar return.
     CallReturn { result: String },
     /// ext -> host: the call failed with a recoverable error (`message`) — the host raises a
-    /// catchable Quoin error and the extension stays alive.
-    CallReturnError { message: String },
+    /// catchable Quoin error and the extension stays alive. `remote_stack` is the OPAQUE,
+    /// human-oriented stack blob (empty = none): the producer's conventional stack rendering,
+    /// with any nested segments appended in unwind order; consumers display it fenced and
+    /// never parse it (PROTOCOL.md §Errors).
+    CallReturnError {
+        message: String,
+        remote_stack: String,
+    },
     /// ext -> host: the call returns an ext-side resource the host will hold as an opaque token
     /// (reaped on drop). `resource` is the extension-assigned id; `class_name` names the registered
     /// extension-backed class it's an instance of (Phase 3; empty = the opaque `ExtResource`).
@@ -166,9 +172,12 @@ pub enum Msg {
     /// `batches`, in one round-trip. Each tuple is one invocation's argument handles.
     InvokeBlock { block: u64, batches: Vec<Vec<u64>> },
     /// host -> ext: the reply to `InvokeBlock` — one result handle per tuple, or `error`.
+    /// On error, `remote_stack` carries the HOST's rendered Quoin frames for the failed
+    /// block (opaque; the extension appends it into its own blob — PROTOCOL.md §Errors).
     InvokeBlockReturn {
         results: Vec<u64>,
         error: Option<String>,
+        remote_stack: String,
     },
     /// ext -> host (re-entrant): resolve a name in the host's globals (Phase 2 — host reach),
     /// returning a handle to its value (`HostOpReturn`).
@@ -177,10 +186,12 @@ pub enum Msg {
     MakeValue { value: DataValue },
     /// ext -> host (re-entrant): project the value behind `handle` to a `DataValue`.
     ReadHandle { handle: u64 },
-    /// host -> ext: the reply to `ReadHandle` — the projected value, or `error`.
+    /// host -> ext: the reply to `ReadHandle` — the projected value, or `error` (with the
+    /// host's opaque stack blob, as on `InvokeBlockReturn`).
     ReadHandleReturn {
         value: DataValue,
         error: Option<String>,
+        remote_stack: String,
     },
     /// host -> ext: the reply to any re-entrant host-op. `handle` is set for `MakeString`,
     /// `str` for `HandleToString`, neither for an ack; `error` is `Some` iff the op failed.
@@ -188,6 +199,8 @@ pub enum Msg {
         handle: u64,
         str: Option<String>,
         error: Option<String>,
+        /// The host's opaque stack blob on error (as on `InvokeBlockReturn`); empty = none.
+        remote_stack: String,
     },
 }
 

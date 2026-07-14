@@ -108,7 +108,7 @@ Mixin <- ActAsUserString <- { .sealed! }
 "* The root of every throwable error: a human-readable `message` plus an optional
 "* `payload`. Subclass it for your own error types (`Error <- MyError <- {}`) and
 "* catch by type with `block.catch:{ |e:MyError| ... }`.
-Error <- { |@message @payload|
+Error <- { |@message @payload @remoteStack|
     .meta <-- {
         "* Convenience constructor that builds an instance and immediately throws,
         "* e.g. `TypeError.throw:'expected an Integer'`. Inherited by subclasses.
@@ -126,6 +126,10 @@ Error <- { |@message @payload|
     message -> { @message }
     "* The value attached at the throw site (`throw:payload:`), or nil.
     payload -> { @payload }
+    "* For an error reported by an out-of-process extension: the opaque cross-process
+    "* stack blob (the remote side's own stack rendering, with any deeper host/extension
+    "* segments appended in unwind order — display it, never parse it). nil otherwise.
+    remoteStack -> { @remoteStack }
 
     "* Renders as class name and message.
     "*

@@ -393,22 +393,17 @@ Quoin over the current sockets/streams).
   Phase-3 residue — a fuller Arrow C Data Interface for columnar interchange — is tracked
   where its forcing function lives: `crates/adbc/DESIGN.md` §7 (the columnar `Table` value).
   Remaining refinements below.
-  - [ ] **Extension calls: fair queuing instead of a busy error.** *(audit follow-up, PR 48;
-    DUG 2026-07-07 — settled fix design: a waiter queue on `NativeExtension` mirroring the
-    channel park model exactly — `(TaskId, park_epoch)` FIFO with park-identity staleness
-    (all machinery exists and is battle-tested), same-task re-entry still errors (track the
-    owner task), extension death wakes all waiters with the error, and `ext_end_call` hands
-    the claim to the front waiter. ~half a session incl. concurrent/cancel/death stress
-    tests.)*
-    A connection serves one top-level call at a time (a single request/response socket, no
-    request ids); a second *concurrent* call now fails fast with a catchable "extension busy"
-    error (`in_flight` guard, `src/runtime/extension.rs`) instead of interleaving frames and
-    desyncing the socket. The nicer behavior is to **queue** a waiting caller — park it on the
-    connection, wake it when the in-flight call finishes — so `Async.gather:` over one
-    long-lived `[ADBC]Connection` just works. Needs a per-extension waiter queue + park/wake
-    (mirrors the channel park model in `src/runtime/channel.rs`). Same-task re-entry (the
-    extension re-entering itself through a host block) must still error — only cross-task
-    contention queues.
+  - [x] **Extension calls: fair queuing instead of a busy error.** *(audit follow-up, PR 48;
+    built 2026-07-13 to the DUG design.)* A concurrent caller now parks on the connection —
+    a `(TaskId, park_epoch)` FIFO on `NativeExtension`, the channel park model verbatim —
+    and `ext_end_call` HANDS the claim to the front live waiter (`Wake::ExtClaim`; ghost
+    entries from cancelled waiters are skipped by park-epoch identity), so `Async.gather:`
+    over one long-lived connection just works. Same-task re-entry (the extension re-entering
+    itself through a host block) still errors — it would wait on the call it is blocking.
+    Death needs no special path: each waiter is handed the claim in turn and fails fast on
+    the dead flag. Tests: queue/re-entry/cancel-while-queued/death-while-queued in
+    `tests/extension.rs`; the audit repro `qnlib/stress/audit/ext/concurrent.qn` now prints
+    CORRECT.
   - [x] **Extension socket files leak on abnormal *host* exit.** *(audit follow-up, PR 48.)*
     FIXED at f4f9c91 (RELEASE_PREP Tier 4, which supersedes this item): both SDKs unlink the
     socket path right after `accept`, so the established connection carries the session and no

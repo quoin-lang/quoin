@@ -108,8 +108,21 @@ Handlers return any `Into<Reply>`:
   class.
 
 Errors: every handler returns `HandlerResult<T>` — `Err` becomes a **catchable** Quoin
-error carrying your message, and the extension keeps serving. Reserve panics/exits for
-genuine bugs; the VM isolates those too, but the connection dies with the process.
+error carrying your message, and the extension keeps serving. The error also carries a
+**cross-process stack blob**: the SDK renders your error's `source()` chain under a
+dispatch-frame line (`in Vector#at: (instance 3): …`), interleaved with any Quoin
+segments from blocks this call invoked, in unwind order. Quoin code reads it as
+`ex.remoteStack`, and the default traceback printer shows it fenced (`--- in extension
+---`) at the failing call — so an extension author sees both sides of the story with no
+handler code at all. Reserve panics/exits for genuine bugs; the VM isolates those too,
+but the connection dies with the process.
+
+Re-entrancy: a block your handler invokes may call **back into this extension** — the
+nested call is serviced while your `apply_block`/`invoke_block` waits (strictly LIFO on
+the one socket), bounded by the host's nesting depth cap. One Rust-specific limit: a
+nested call addressed to the *outer call's receiver* (or one of its instance arguments)
+reports "no live instance" — they're taken out of the object table for the handler's
+`&mut` — while different instances, class-side sends, and the whole generic surface work.
 
 ## Reaching back into the host
 

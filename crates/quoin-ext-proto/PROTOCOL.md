@@ -30,7 +30,7 @@ unsigned ints; `str`/`bin`/`bool`/arrays/maps are their native MessagePack forms
 |---|---|---|---|
 | 0 | Call | host → ext | `op:str, arg:str, handles:[u64], resources:[u64], releases:[u64], arrays:[ArrowArray], data:Value|nil, class_name:str, recv:u64, method_args:[Arg]` |
 | 1 | CallReturn | ext → host | `result:str` |
-| 2 | CallReturnError | ext → host | `message:str` |
+| 2 | CallReturnError | ext → host | `message:str, remote_stack:str` |
 | 3 | CallReturnResource | ext → host | `resource:u64, class_name:str` |
 | 4 | CallReturnArray | ext → host | `array:ArrowArray` |
 | 5 | CallReturnData | ext → host | `value:Value` |
@@ -43,12 +43,12 @@ unsigned ints; `str`/`bin`/`bool`/arrays/maps are their native MessagePack forms
 | 12 | Release | ext → host | `handles:[u64]` |
 | 13 | CallMethodOnHandle | ext → host | `receiver:u64, selector:str, args:[u64]` |
 | 14 | InvokeBlock | ext → host | `block:u64, batches:[[u64]]` |
-| 15 | InvokeBlockReturn | host → ext | `results:[u64], error:str|nil` |
+| 15 | InvokeBlockReturn | host → ext | `results:[u64], error:str|nil, remote_stack:str` |
 | 16 | GetGlobal | ext → host | `name:str` |
 | 17 | MakeValue | ext → host | `value:Value` |
 | 18 | ReadHandle | ext → host | `handle:u64` |
-| 19 | ReadHandleReturn | host → ext | `value:Value, error:str|nil` |
-| 20 | HostOpReturn | host → ext | `handle:u64, str:str|nil, error:str|nil` |
+| 19 | ReadHandleReturn | host → ext | `value:Value, error:str|nil, remote_stack:str` |
+| 20 | HostOpReturn | host → ext | `handle:u64, str:str|nil, error:str|nil, remote_stack:str` |
 
 Composite fields (also MessagePack arrays):
 
@@ -111,10 +111,29 @@ are indistinguishable on every SDK surface).
    `CallReturnData`, `CallReturnHandle`), optionally preceded by any number of re-entrant
    host-ops (types 9–14, 16–18), each of which the host answers (`HostOpReturn`,
    `InvokeBlockReturn`, `ReadHandleReturn`) before reading on.
+   **Nesting**: while the extension awaits a host-op reply, the host may send a nested
+   `Call` — the host re-entering the extension from inside a block/method the extension
+   is having it run. The extension services it (answering with its own terminal) before
+   reading on for the pending reply; frames are strictly LIFO, a call stack over the
+   socket. The host caps the nesting depth and refuses deeper re-entry with a catchable
+   error, so mutual recursion cannot exhaust either process.
 3. Two id spaces: **handles** are host-side value ids (call-local unless `Retain`ed;
    a block argument arrives in `Call.handles`); **resources** are ext-side object-table
    ids (the host holds them opaquely and returns dropped ones in the next `Call.releases`
    — the batched reap).
+
+## Errors and the cross-process stack blob
+
+Every error-bearing reply carries an appended `remote_stack: str` (empty = none): an
+**opaque, human-oriented stack blob**. Producers SHOULD fill it with their language's
+conventional stack rendering — a Python traceback, a Rust error chain under a synthesized
+dispatch-frame line, the host's rendered Quoin frames — and, when the failure came from a
+deeper layer (a failed host-op, a failed nested call), append that layer's blob below
+their own segment, preserving **unwind order**. Consumers MUST NOT parse the blob: the
+host displays it fenced in tracebacks and surfaces it to Quoin code as `ex.remoteStack`;
+it caps the size on ingest and sanitizes control characters at display (untrusted foreign
+text). An empty/omitted blob degrades to message-only behavior, so old peers interoperate
+unchanged.
 
 ## Evolution
 

@@ -171,38 +171,215 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 }
 
 #[test]
-fn extension_concurrent_calls_are_serialized() {
-    // Regression (audit): the transport is a single request/response socket with no
-    // request ids, so two tasks calling one extension at once interleaved frames and
-    // desynced the connection ("unknown stream id", or a killed serve loop). A second
-    // top-level call while one is in flight must now fail with a catchable "busy"
-    // error — deterministic, and the connection survives for the winner and for later
-    // sequential calls.
+fn extension_concurrent_calls_queue_fairly() {
+    // Fair queuing (audit follow-up, upgraded from the busy-error guard): the transport
+    // is a single request/response socket, so calls serialize — but a concurrent caller
+    // now PARKS on the connection and is handed the claim FIFO when the in-flight call
+    // finishes, instead of failing fast. `Async.gather:` over one connection just works.
     let ext_bin = env!("CARGO_BIN_EXE_ext_echo");
     let script = format!(
         r#"
 var ok = true;
 var e = Extension.spawn:'{ext_bin}';
 
-"* Two calls raced on one connection: exactly one wins, the other gets a catchable
-"* busy error — never a desync/corruption.
+"* Six concurrent calls on ONE connection — a slow one first so the rest genuinely
+"* queue — every one succeeds with its own answer (no busy errors, no desync).
 var r = Async.gather:#(
-    {{ {{ e.call:'echo' with:'A' }}.catch:{{ |ex| 'busy' }} }}
-    {{ {{ e.call:'echo' with:'B' }}.catch:{{ |ex| 'busy' }} }}
+    {{ e.call:'slow' with:'S' }}
+    {{ e.call:'echo' with:'A' }}
+    {{ e.call:'upper' with:'b' }}
+    {{ e.call:'echo' with:'C' }}
+    {{ e.call:'upper' with:'d' }}
+    {{ e.call:'echo' with:'E' }}
 );
-var a = r.at:0;
-var b = r.at:1;
-var oneWon = ((a == 'A') && (b == 'busy')) || ((a == 'busy') && (b == 'B'));
-oneWon.else:{{ ok = false; ('FAIL race: ' + r.s).print }};
+(r == #( 'S' 'A' 'B' 'C' 'D' 'E' )).else:{{ ok = false; ('FAIL gather: ' + r.s).print }};
 
-"* The connection is intact: sequential calls still work after the rejected one.
+"* The connection is intact afterwards.
 ((e.call:'echo' with:'again') == 'again').else:{{ ok = false; 'FAIL: connection desynced'.print }};
-((e.call:'upper' with:'z') == 'Z').else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
-    assert_script_passes("qn_ext_serialize_test.qn", &script);
+    assert_script_passes("qn_ext_queue_test.qn", &script);
+}
+
+#[test]
+fn extension_nested_calls_service() {
+    // Re-entrant host-op servicing: a block the extension is invoking may call BACK into
+    // the same extension — the nested call's frames ride the same stream strictly LIFO,
+    // the extension servicing them while awaiting its own host-op reply. Cross-task
+    // contention still queues (fair queuing); this is the same-task NESTING path.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+var va = Vector.ofFloats:#( 1.0 2.0 3.0 );
+var vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
+
+"* a nested INSTANCE call (to a different instance than the outer receiver)
+((va.map:{{ |x| vb.sum }}).sum == 45.0).else:{{ ok = false; 'FAIL nested instance'.print }};
+
+"* a nested CLASS-SIDE call
+((va.map:{{ |x| x + Vector.dtypeName.length }}).sum == 27.0)
+    .else:{{ ok = false; 'FAIL nested class-side'.print }};
+
+"* Rust-SDK limitation, pinned: a nested call to the OUTER call's own receiver finds
+"* "no live instance" (it is taken out for the handler's &mut) — recoverable, and the
+"* receiver comes back intact.
+var caught = {{ va.map:{{ |x| va.sum }} }}.catch:{{ |ex| ex.message }};
+(caught.contains?:'no live instance').else:{{ ok = false; ('FAIL msg: ' + caught.s).print }};
+(va.sum == 6.0).else:{{ ok = false; 'FAIL: receiver lost after failed nest'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_nested_test.qn", &script);
+}
+
+#[test]
+fn extension_remote_stack_single_hop() {
+    // A failed extension call carries the extension's opaque stack blob: `ex.remoteStack`
+    // exposes it to Quoin code (nil for ordinary, non-extension errors).
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+var v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+
+var blob = {{ v.at:9 }}.catch:{{ |ex| ex.remoteStack }};
+(blob.contains?:'in Vector#at: (instance').else:{{ ok = false; ('FAIL blob: ' + blob.s).print }};
+
+"* an ordinary Quoin error has no remote stack
+var plain = {{ Error.throw:'plain' }}.catch:{{ |ex| ex.remoteStack }};
+(plain == nil).else:{{ ok = false; 'FAIL: plain error grew a remoteStack'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_rstack_test.qn", &script);
+}
+
+#[test]
+fn extension_remote_stack_interleaves() {
+    // A failure three layers deep — outer ext method -> Quoin block -> nested ext call —
+    // accumulates one blob with each side's segment in unwind order: the outer extension
+    // frame, the host's segment for the failed block, and the inner extension frame.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+var va = Vector.ofFloats:#( 1.0 2.0 3.0 );
+var vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
+
+var blob = {{ va.map:{{ |x| vb.at:99 }} }}.catch:{{ |ex| ex.remoteStack }};
+(blob.contains?:'in Vector#map:').else:{{ ok = false; 'FAIL: outer ext frame missing'.print }};
+(blob.contains?:'--- Quoin (host) ---').else:{{ ok = false; 'FAIL: host segment missing'.print }};
+(blob.contains?:'in Vector#at:').else:{{ ok = false; 'FAIL: inner ext frame missing'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_rstack_nest_test.qn", &script);
+}
+
+#[test]
+fn extension_remote_stack_prints_fenced() {
+    // The default uncaught-error printer inserts the blob, fenced, between the failing
+    // line and the Quoin trace — the interleaved display, with no handler code at all.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+Extension.spawn:'{ext_bin}';
+var v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+v.at:9;
+"#
+    );
+    let (_, diag) = run_script_once("qn_ext_rstack_print_test.qn", &script);
+    assert!(
+        diag.contains("--- in extension ---") && diag.contains("in Vector#at: (instance"),
+        "uncaught printer did not fence the remote stack:\n{diag}"
+    );
+}
+
+#[test]
+fn extension_nested_calls_depth_capped() {
+    // Mutual host<->extension recursion dies loudly and catchably at the connection depth
+    // cap — both processes spend real stack per level — and the extension survives.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+
+"* class-side recursion is receiver-less, so nothing stops it before the cap
+var rec = nil;
+rec = {{ |x| Vector.applying:rec }};
+var caught = {{ Vector.applying:rec }}.catch:{{ |ex| ex.message }};
+(caught.contains?:'16 levels').else:{{ ok = false; ('FAIL msg: ' + caught.s).print }};
+
+"* ...and the connection survived the refused nest.
+((Vector.dtypeName) == 'float64').else:{{ ok = false; 'FAIL: extension did not survive'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_depth_test.qn", &script);
+}
+
+#[test]
+fn extension_queued_call_cancels_cleanly() {
+    // A waiter cancelled WHILE QUEUED (its timeout fires before it ever gets the claim)
+    // leaves only a ghost entry — skipped by park-epoch identity when the claim is next
+    // handed on — and every other caller proceeds untouched. The sleeps order the queue
+    // deterministically: A claims first (150ms), B and C park behind it, B's 40ms
+    // timeout fires long before A finishes.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_echo");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+
+var r = Async.gather:#(
+    {{ e.call:'slow' with:'A' }}
+    {{ Async.sleep:20; {{ Async.timeout:40 do:{{ e.call:'slow' with:'B' }} }}.catch:{{ |ex| 'cancelled' }} }}
+    {{ Async.sleep:30; e.call:'echo' with:'C' }}
+);
+(r == #( 'A' 'cancelled' 'C' )).else:{{ ok = false; ('FAIL: ' + r.s).print }};
+
+"* The connection is intact: the ghost waiter was skipped, not handed the claim.
+((e.call:'echo' with:'after') == 'after').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_queue_cancel_test.qn", &script);
+}
+
+#[test]
+fn extension_death_while_queued_fails_fast() {
+    // The extension dies mid-call while others are queued: the dying call surfaces its
+    // error and hands the claim on; each waiter claims in turn, sees the dead flag, and
+    // fails fast with a catchable error — no hang, no leak, and the VM survives.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+
+var r = Async.gather:#(
+    {{ {{ e.call:'crash' with:'' }}.catch:{{ |ex| 'caught' }} }}
+    {{ Async.sleep:10; {{ e.call:'echo' with:'B' }}.catch:{{ |ex| 'caught' }} }}
+    {{ Async.sleep:20; {{ e.call:'echo' with:'C' }}.catch:{{ |ex| 'caught' }} }}
+);
+(r == #( 'caught' 'caught' 'caught' )).else:{{ ok = false; ('FAIL: ' + r.s).print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_queue_death_test.qn", &script);
 }
 
 #[test]
@@ -703,6 +880,24 @@ var basis = Vector.basis:3;
 
 "* inbound instance refs: live Vectors nested in a data argument resolve extension-side
 ((Vector.sumOf:#( va vb )) == 21.0).else:{{ ok = false }};
+
+"* re-entrant nesting: a block the extension invokes calls back in — including to the
+"* OUTER receiver itself, which works in Python (no take/reinsert; the Rust SDK's
+"* same-receiver limitation is pinned in extension_nested_calls_service)
+((va.map:{{ |x| vb.sum }}).sum == 45.0).else:{{ ok = false; 'FAIL nested instance'.print }};
+((va.map:{{ |x| va.sum }}).sum == 18.0).else:{{ ok = false; 'FAIL nested self'.print }};
+
+"* mutual recursion dies catchably at the host's connection depth cap
+var rec = nil;
+rec = {{ |x| Vector.applying:rec }};
+var deep = {{ Vector.applying:rec }}.catch:{{ |ex| ex.message }};
+(deep.contains?:'16 levels').else:{{ ok = false; ('FAIL depth: ' + deep.s).print }};
+((Vector.dtypeName) == 'float64').else:{{ ok = false; 'FAIL: did not survive depth cap'.print }};
+
+"* the Python SDK's remoteStack is its real traceback
+var blob = {{ va.at:9 }}.catch:{{ |ex| ex.remoteStack }};
+((blob.contains?:'Traceback') && (blob.contains?:'IndexError'))
+    .else:{{ ok = false; ('FAIL py blob: ' + blob.s).print }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#

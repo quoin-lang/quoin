@@ -92,6 +92,9 @@ if __name__ == "__main__":
             "dtypeName": lambda: "float64",
             "basis:": basis,
             "sumOf:": sum_of,
+            # Class-side block application — the nested-call recursion ladder (a block that
+            # calls back into this extension recurses to the host's connection depth cap).
+            "applying:": lambda block: block(0.0),
         },
         methods={
             "sum": Vector.sum,

@@ -159,6 +159,13 @@ fn main() {
                     .collect(),
             ))
         });
+        // Class-side block application — receiver-less, so nested-call recursion through it
+        // is bounded only by the connection depth cap (the depth-bomb test's ladder).
+        c.class_method("applying:", |host, args| {
+            let block = args[0].handle().ok_or("applying: expects a block")?;
+            let out = host.apply_block(block, &[DataValue::Float(0.0)])?;
+            Ok(out.into_iter().next().unwrap_or(DataValue::Null))
+        });
         // Inbound instance references: the single list argument carries `Resource` leaves that
         // `Host::instance` resolves to this extension's live `Vector`s.
         c.class_method("sumOf:", |host, args| {
