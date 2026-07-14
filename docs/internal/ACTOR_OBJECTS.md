@@ -113,6 +113,19 @@ What convergence must build, in rough order of weight:
 3. **Retiring the `{t,v}` envelope** — process-worker pump speaks `Msg` frames;
    `worker-serve` decodes with `decode_frame`. The control lane's request-id machinery
    (`worker_spawn.rs:351-405`) collapses into the protocol's conversation shape.
+   **DONE (slice 3, as built):** TWO sockets per process worker — lanes, never
+   frame-multiplexing (§5's rule). The *conversation* socket carries the
+   `GetManifest`/`ManifestReturn` handshake (parent enforces the version gate, killing
+   a mismatched child — the gate workers previously lacked) and one-at-a-time
+   conversations (`Call{op:"psTree"}` → `CallReturnData`); both sides' id-correlation
+   machinery is deleted, and hosted-object dispatch lands here next. The *mailbox*
+   socket is one long-lived implicit conversation: `Worker.send:` either direction is
+   an intermediate `Call{op:"send", data}` frame (fire-and-forget by design — real
+   backpressure is the §6 channel-relay work), and the done report is its TERMINAL —
+   `CallReturnData{value}` or `CallReturnError{message, remote_stack}` (blob empty
+   until structured stacks). The child answers the handshake synchronously before
+   anything fallible runs, so a fast-failing unit still gets its done terminal read.
+   Thread workers untouched (item 5's rule).
 4. **Claim machinery generalized** — `NativeExtension`'s owner/depth/waiters become a
    shared "peer connection" state used by extension and worker proxies alike, and the
    claim key moves from the connection to the hosted object (§5).
@@ -284,7 +297,8 @@ injection wrapper, which feeds recorded results instead of re-performing.
    `handler_micros` — early because it is valuable against extensions *today*. DONE.
 3. **Peer-protocol convergence for process workers**: `worker-serve` speaks `Msg`
    (manifest, Call, host-ops, nesting); the pump/envelope retire; plain
-   `send:`/`receive` ride `Call`-shaped frames.
+   `send:`/`receive` ride `Call`-shaped frames. DONE (see the gap list's as-built
+   note: two sockets — conversation + mailbox).
 4. **Hosted objects** (`Worker.host:`): object table + MNU proxy on the converged
    protocol, thread + process backings; claim machinery shared with extensions;
    lifetime via proxy-drop release.

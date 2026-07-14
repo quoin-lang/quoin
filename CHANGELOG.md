@@ -39,6 +39,15 @@ under **Changed**, with the migration.
 
 ### Changed
 
+- Workers (experimental): the process-worker wire now speaks the **extension
+  protocol's frames** instead of a bespoke envelope — one remote-peer protocol
+  (`docs/internal/ACTOR_OBJECTS.md`). Two sockets per process worker: a conversation
+  socket that opens with the `GetManifest` **version handshake** (a mixed-binary
+  worker is now refused with a clear error instead of misbehaving) and carries
+  control conversations, and a mailbox socket whose `send:`s are `Call` frames and
+  whose done report is a `CallReturn*` terminal. Behavior of
+  `spawn:`/`send:`/`receive`/`join`/`terminate`/`psTree` is unchanged; thread
+  workers are untouched.
 - Extensions (experimental): SDK manifests now list a class's selectors in **sorted
   order** (both SDKs). The Rust SDK serialized them in hash order, so the manifest's
   wire bytes differed from process to process for the same extension — semantically

@@ -245,36 +245,76 @@ fn run_worker_block(job: PortableBlock, link: WorkerLink) -> Result<WireData, St
 }
 
 // =====================================================================
-// Process backing (docs/internal/CONCURRENCY_ARCH.md §13.1): the SAME lanes, with a
-// PUMP on the other end — four small threads bridging the channels over a
-// unix socket (length-prefixed msgpack `DataValue` frames) to a child
-// `qn worker-serve` process, whose own pump feeds identical channels into
-// the same worker body. Everything above the lanes (handles, registry,
-// services, psTree) inherits process backing by construction.
+// Process backing (docs/internal/CONCURRENCY_ARCH.md §13.1, converged per
+// ACTOR_OBJECTS.md §1/§4): the SAME lanes, bridged to a child
+// `qn worker-serve` process over TWO unix sockets speaking the extension
+// protocol's `Msg` frames (u32-LE + msgpack, `quoin-ext-proto`) — one
+// protocol, three peer kinds; the bespoke `{t,v}` envelope is retired.
+//
+// The two sockets are two LANES with different disciplines (lanes, never
+// frame-multiplexing — the §5 rule):
+//
+// - The CONVERSATION socket: extension-protocol discipline verbatim,
+//   parent = host. Opens with the `GetManifest`/`ManifestReturn` version
+//   handshake (the gate workers previously lacked; provided classes stay
+//   empty until hosted objects). Control requests are conversations —
+//   `Call{op:"psTree"}` answered by `CallReturnData` — one at a time, so
+//   the old request-id correlation machinery is gone on both sides.
+//   Hosted-object dispatch (arc-2 slice 4) rides this socket next.
+//
+// - The MAILBOX socket: the async flows as ONE long-lived implicit
+//   conversation — the spawn is the "call". `Worker.send:` in either
+//   direction is an intermediate `Call{op:"send", data}` frame (fire and
+//   forget: an enqueue-ack from a pump thread would prove nothing;
+//   real cross-isolate backpressure is the channel-relay design), and the
+//   child's done report is the conversation's TERMINAL: `CallReturnData`
+//   with the join value, or `CallReturnError` on failure (whose
+//   `remote_stack` slot the structured-stacks work will fill).
+//
+// Everything above the lanes (handles, registry, services, psTree)
+// inherits process backing by construction, unchanged.
 // =====================================================================
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-/// One wire frame, itself a `DataValue` map:
-/// d=data, k=done-ok, e=done-err, c=control, r=control-reply.
-fn frame_write(sock: &mut UnixStream, frame: &WireData) -> std::io::Result<()> {
-    let bytes = quoin_ext_proto::codec::pack_dv(frame);
+use quoin_ext_proto::{Msg, PROTOCOL_VERSION};
+
+/// The worker link's reserved ops on the `Call` frame (`class_name` stays
+/// empty; hosted objects will dispatch with real class names).
+const OP_SEND: &str = "send";
+const OP_PS_TREE: &str = "psTree";
+
+/// A bare `Call` frame carrying only an op and an optional data payload —
+/// the worker link's message shape.
+fn call_frame(op: &str, data: Option<WireData>) -> Msg {
+    Msg::Call {
+        op: op.to_string(),
+        arg: String::new(),
+        handles: Vec::new(),
+        resources: Vec::new(),
+        releases: Vec::new(),
+        arrays: Vec::new(),
+        data,
+        class_name: String::new(),
+        recv: 0,
+        method_args: Vec::new(),
+    }
+}
+
+fn write_msg_frame(sock: &mut UnixStream, msg: &Msg) -> std::io::Result<()> {
+    let bytes = quoin_ext_proto::encode(msg);
     sock.write_all(&(bytes.len() as u32).to_le_bytes())?;
     sock.write_all(&bytes)
 }
 
-fn frame_read(sock: &mut UnixStream) -> std::io::Result<WireData> {
+fn read_msg_frame(sock: &mut UnixStream) -> std::io::Result<Msg> {
     let mut len = [0u8; 4];
     sock.read_exact(&mut len)?;
     let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
     sock.read_exact(&mut buf)?;
-    quoin_ext_proto::codec::unpack_dv(&buf)
+    quoin_ext_proto::decode_frame(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
-
-fn fget<'a>(pairs: &'a [(String, WireData)], key: &str) -> Option<&'a WireData> {
-    pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
 /// Spawn a PROCESS-backed worker running `unit` (with `service` naming a
@@ -305,68 +345,129 @@ pub fn spawn_worker_process(
     let grip: ChildGrip = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
 
     // Accept with a bounded wait: poll the listener in nonblocking mode so a
-    // child that dies pre-connect becomes an error, not a hang.
+    // child that dies pre-connect becomes an error, not a hang. The child
+    // connects TWICE, in a fixed order: conversation socket, then mailbox.
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("worker socket: {e}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let sock = loop {
-        match listener.accept() {
-            Ok((s, _)) => break s,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                let mut slot = grip.lock().expect("child grip");
-                if let Some(c) = slot.as_mut()
-                    && let Ok(Some(status)) = c.try_wait()
-                {
-                    let _ = std::fs::remove_file(&sock_path);
-                    return Err(format!(
-                        "worker process exited before connecting ({status})"
-                    ));
+    let accept_one = |listener: &UnixListener| -> Result<UnixStream, String> {
+        loop {
+            match listener.accept() {
+                Ok((s, _)) => {
+                    s.set_nonblocking(false).ok();
+                    return Ok(s);
                 }
-                if std::time::Instant::now() > deadline {
-                    if let Some(c) = slot.as_mut() {
-                        let _ = c.kill();
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let mut slot = grip.lock().expect("child grip");
+                    if let Some(c) = slot.as_mut()
+                        && let Ok(Some(status)) = c.try_wait()
+                    {
+                        let _ = std::fs::remove_file(&sock_path);
+                        return Err(format!(
+                            "worker process exited before connecting ({status})"
+                        ));
                     }
-                    let _ = std::fs::remove_file(&sock_path);
-                    return Err("worker process did not connect within 10s".to_string());
+                    if std::time::Instant::now() > deadline {
+                        if let Some(c) = slot.as_mut() {
+                            let _ = c.kill();
+                        }
+                        let _ = std::fs::remove_file(&sock_path);
+                        return Err("worker process did not connect within 10s".to_string());
+                    }
+                    drop(slot);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                drop(slot);
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&sock_path);
-                return Err(format!("worker socket accept: {e}"));
+                Err(e) => {
+                    let _ = std::fs::remove_file(&sock_path);
+                    return Err(format!("worker socket accept: {e}"));
+                }
             }
         }
     };
-    sock.set_nonblocking(false).ok();
+    let mut conv_sock = accept_one(&listener)?;
+    let mail_sock = accept_one(&listener)?;
     let _ = std::fs::remove_file(&sock_path);
+
+    // The manifest handshake — the version gate (mirrors the extension spawn:
+    // this side enforces; a mismatched child is killed, never misdecoded).
+    // Bounded, so a wedged child is an error rather than a hang.
+    let fail = |grip: &ChildGrip, msg: String| -> String {
+        if let Some(c) = grip.lock().expect("child grip").as_mut() {
+            let _ = c.kill();
+        }
+        msg
+    };
+    conv_sock
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .ok();
+    write_msg_frame(
+        &mut conv_sock,
+        &Msg::GetManifest {
+            version: PROTOCOL_VERSION,
+        },
+    )
+    .map_err(|e| fail(&grip, format!("worker handshake: {e}")))?;
+    match read_msg_frame(&mut conv_sock) {
+        Ok(Msg::ManifestReturn { version, .. }) if version == PROTOCOL_VERSION => {}
+        Ok(Msg::ManifestReturn { version, .. }) => {
+            return Err(fail(
+                &grip,
+                format!(
+                    "worker process speaks peer-protocol version {version}; this host \
+                     speaks {PROTOCOL_VERSION} (mixed qn binaries?)"
+                ),
+            ));
+        }
+        Ok(other) => {
+            return Err(fail(
+                &grip,
+                format!("worker handshake: expected ManifestReturn, got {other:?}"),
+            ));
+        }
+        Err(e) => return Err(fail(&grip, format!("worker handshake: {e}"))),
+    }
+    conv_sock.set_read_timeout(None).ok();
 
     let (inbox_tx, inbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (outbox_tx, outbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (done_tx, done_rx) = async_channel::bounded::<Result<WireData, String>>(1);
     let (control_tx, control_rx) = async_channel::unbounded::<ControlReq>();
 
-    // Single write path: every to-child frame funnels through one channel.
-    let (to_sock_tx, to_sock_rx) = std::sync::mpsc::channel::<WireData>();
-    let ctl_map: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<u64, async_channel::Sender<WorkerMsg>>>,
-    > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-
-    // fwd: parent sends -> data frames
+    // Conversation pump: one conversation at a time (write the Call, read to its
+    // terminal), so each reply pairs with the request it answers by shape alone.
     {
-        let to_sock = to_sock_tx.clone();
+        let mut sock = conv_sock;
+        std::thread::spawn(move || {
+            while let Ok(req) = control_rx.recv_blocking() {
+                let op = match req.kind {
+                    ControlKind::PsTree => OP_PS_TREE,
+                };
+                if write_msg_frame(&mut sock, &call_frame(op, None)).is_err() {
+                    break;
+                }
+                match read_msg_frame(&mut sock) {
+                    Ok(Msg::CallReturnData { value }) => {
+                        let _ = req.reply.send_blocking(WorkerMsg::Data(value));
+                    }
+                    // An error terminal (or unexpected frame) drops the reply; the
+                    // requester's bounded-staleness deadline reads 'unresponsive'.
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    // Mailbox writer: parent sends -> Call{op:"send"} frames.
+    {
+        let mut sock = mail_sock
+            .try_clone()
+            .map_err(|e| format!("socket clone: {e}"))?;
         std::thread::spawn(move || {
             while let Ok(msg) = inbox_rx.recv_blocking() {
                 match msg {
                     WorkerMsg::Data(dv) => {
-                        if to_sock
-                            .send(WireData::Map(vec![
-                                ("t".into(), WireData::Str("d".into())),
-                                ("v".into(), dv),
-                            ]))
-                            .is_err()
-                        {
+                        if write_msg_frame(&mut sock, &call_frame(OP_SEND, Some(dv))).is_err() {
                             break;
                         }
                     }
@@ -376,83 +477,29 @@ pub fn spawn_worker_process(
                     }
                 }
             }
+            let _ = sock.shutdown(std::net::Shutdown::Write);
         });
     }
-    // fwd: control requests -> ctl frames (reply senders parked in the map)
+    // Mailbox reader: the child's sends, then the lane's terminal (= done).
+    // EOF without a terminal means the child vanished; reap it either way.
     {
-        let to_sock = to_sock_tx.clone();
-        let map = ctl_map.clone();
-        std::thread::spawn(move || {
-            let mut next_id: u64 = 1;
-            while let Ok(req) = control_rx.recv_blocking() {
-                let id = next_id;
-                next_id += 1;
-                map.lock().expect("ctl map").insert(id, req.reply);
-                let kind = match req.kind {
-                    ControlKind::PsTree => "ps",
-                };
-                if to_sock
-                    .send(WireData::Map(vec![
-                        ("t".into(), WireData::Str("c".into())),
-                        ("i".into(), WireData::Int(id as i64)),
-                        ("k".into(), WireData::Str(kind.into())),
-                    ]))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-    }
-    // writer: the only thread that touches the socket's write half
-    {
-        let mut wsock = sock.try_clone().map_err(|e| format!("socket clone: {e}"))?;
-        std::thread::spawn(move || {
-            while let Ok(frame) = to_sock_rx.recv() {
-                if frame_write(&mut wsock, &frame).is_err() {
-                    break;
-                }
-            }
-            let _ = wsock.shutdown(std::net::Shutdown::Write);
-        });
-    }
-    // reader: frames -> lanes; EOF closes everything and reaps the child
-    {
-        let mut rsock = sock;
-        let map = ctl_map;
+        let mut sock = mail_sock;
         let reader_grip = grip.clone();
         std::thread::spawn(move || {
             let mut done_sent = false;
-            while let Ok(frame) = frame_read(&mut rsock) {
-                let WireData::Map(pairs) = frame else {
-                    continue;
-                };
-                match fget(&pairs, "t") {
-                    Some(WireData::Str(t)) if t == "d" => {
-                        if let Some(v) = fget(&pairs, "v") {
-                            let _ = outbox_tx.send_blocking(WorkerMsg::Data(v.clone()));
-                        }
+            while let Ok(msg) = read_msg_frame(&mut sock) {
+                match msg {
+                    Msg::Call { op, data, .. } if op == OP_SEND => {
+                        let dv = data.unwrap_or(WireData::Null);
+                        let _ = outbox_tx.send_blocking(WorkerMsg::Data(dv));
                     }
-                    Some(WireData::Str(t)) if t == "k" => {
-                        let v = fget(&pairs, "v").cloned().unwrap_or(WireData::Null);
-                        let _ = done_tx.send_blocking(Ok(v));
+                    Msg::CallReturnData { value } => {
+                        let _ = done_tx.send_blocking(Ok(value));
                         done_sent = true;
                     }
-                    Some(WireData::Str(t)) if t == "e" => {
-                        let m = match fget(&pairs, "m") {
-                            Some(WireData::Str(m)) => m.clone(),
-                            _ => "worker process error".to_string(),
-                        };
-                        let _ = done_tx.send_blocking(Err(m));
+                    Msg::CallReturnError { message, .. } => {
+                        let _ = done_tx.send_blocking(Err(message));
                         done_sent = true;
-                    }
-                    Some(WireData::Str(t)) if t == "r" => {
-                        if let (Some(WireData::Int(id)), Some(v)) =
-                            (fget(&pairs, "i"), fget(&pairs, "v"))
-                            && let Some(reply) = map.lock().expect("ctl map").remove(&(*id as u64))
-                        {
-                            let _ = reply.send_blocking(WorkerMsg::Data(v.clone()));
-                        }
                     }
                     _ => {}
                 }
@@ -467,7 +514,6 @@ pub fn spawn_worker_process(
                     .unwrap_or_default();
                 let _ = done_tx.send_blocking(Err(format!("worker process exited{status}")));
             }
-            map.lock().expect("ctl map").clear();
             COMPLETED.fetch_add(1, Ordering::Relaxed);
             // Reap; leave None so a late `terminate` is a clean no-op.
             if let Some(mut c) = reader_grip.lock().expect("child grip").take() {
@@ -489,119 +535,144 @@ pub fn spawn_worker_process(
 }
 
 /// The CHILD entry (`qn worker-serve <sock> <unit> [<serviceClass>]`):
-/// connect back, bridge socket<->lanes with the mirror pumps, run the
-/// standard worker body, ship the done frame.
+/// connect back TWICE (conversation socket first, then mailbox — the order
+/// the parent accepts in), answer the manifest handshake, bridge the mailbox
+/// to the lanes, run the standard worker body, and ship the done terminal.
 pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> i32 {
-    let sock = match UnixStream::connect(sock_path) {
-        Ok(s) => s,
+    let connect = |what: &str| match UnixStream::connect(sock_path) {
+        Ok(s) => Some(s),
         Err(e) => {
-            eprintln!("qn worker-serve: cannot connect {sock_path}: {e}");
-            return 1;
+            eprintln!("qn worker-serve: cannot connect {what} socket at {sock_path}: {e}");
+            None
         }
     };
+    let Some(mut conv_sock) = connect("conversation") else {
+        return 1;
+    };
+    let Some(mail_sock) = connect("mailbox") else {
+        return 1;
+    };
+
+    // Answer the manifest handshake SYNCHRONOUSLY, before anything that can
+    // fail (a missing unit, a compile error) exits the process — the parent's
+    // spawn blocks on this reply, and a fast-failing body must still get its
+    // done terminal read, which requires the spawn to succeed first. No
+    // classes are provided yet (hosted objects are the next slice); the
+    // version in the reply is what the PARENT enforces.
+    match read_msg_frame(&mut conv_sock) {
+        Ok(Msg::GetManifest { .. }) => {
+            if let Err(e) = write_msg_frame(
+                &mut conv_sock,
+                &Msg::ManifestReturn {
+                    classes: Vec::new(),
+                    version: PROTOCOL_VERSION,
+                },
+            ) {
+                eprintln!("qn worker-serve: handshake reply: {e}");
+                return 1;
+            }
+        }
+        other => {
+            eprintln!("qn worker-serve: handshake: expected GetManifest, got {other:?}");
+            return 1;
+        }
+    }
+
     let (inbox_tx, inbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (outbox_tx, outbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (control_tx, control_rx) = async_channel::unbounded::<ControlReq>();
-    let (to_sock_tx, to_sock_rx) = std::sync::mpsc::channel::<WireData>();
-    // Control replies ride ONE lane, correlated FIFO: the driver services
-    // its queue in order, so ids pop in the order the reader pushed them.
-    let (ctl_reply_tx, ctl_reply_rx) = async_channel::unbounded::<WorkerMsg>();
-    let ctl_ids: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u64>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
 
-    // reader: frames -> inbox / control
+    // Conversation thread: serve conversations one at a time.
     {
-        let mut rsock = match sock.try_clone() {
+        let mut sock = conv_sock;
+        let control_tx = control_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(Msg::Call { op, .. }) = read_msg_frame(&mut sock) {
+                if op != OP_PS_TREE {
+                    // Unknown conversation op: answer recoverably, stay in sync.
+                    if write_msg_frame(
+                        &mut sock,
+                        &Msg::CallReturnError {
+                            message: format!("worker link: unknown op '{op}'"),
+                            remote_stack: String::new(),
+                        },
+                    )
+                    .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                // One conversation at a time: a fresh reply lane per request, the
+                // terminal written before the next Call is read.
+                let (reply_tx, reply_rx) = async_channel::bounded::<WorkerMsg>(1);
+                if control_tx
+                    .send_blocking(ControlReq {
+                        kind: ControlKind::PsTree,
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                let Ok(WorkerMsg::Data(value)) = reply_rx.recv_blocking() else {
+                    return;
+                };
+                if write_msg_frame(&mut sock, &Msg::CallReturnData { value }).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    // Mailbox reader: the parent's sends -> inbox.
+    {
+        let mut sock = match mail_sock.try_clone() {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("qn worker-serve: socket clone: {e}");
                 return 1;
             }
         };
-        let ids = ctl_ids.clone();
         std::thread::spawn(move || {
-            while let Ok(frame) = frame_read(&mut rsock) {
-                let WireData::Map(pairs) = frame else {
-                    continue;
-                };
-                match fget(&pairs, "t") {
-                    Some(WireData::Str(t)) if t == "d" => {
-                        if let Some(v) = fget(&pairs, "v") {
-                            let _ = inbox_tx.send_blocking(WorkerMsg::Data(v.clone()));
-                        }
-                    }
-                    Some(WireData::Str(t)) if t == "c" => {
-                        if let Some(WireData::Int(id)) = fget(&pairs, "i") {
-                            ids.lock().expect("ctl ids").push_back(*id as u64);
-                            let _ = control_tx.send_blocking(ControlReq {
-                                kind: ControlKind::PsTree,
-                                reply: ctl_reply_tx.clone(),
-                            });
-                        }
-                    }
-                    _ => {}
+            while let Ok(msg) = read_msg_frame(&mut sock) {
+                if let Msg::Call { op, data, .. } = msg
+                    && op == OP_SEND
+                {
+                    let dv = data.unwrap_or(WireData::Null);
+                    let _ = inbox_tx.send_blocking(WorkerMsg::Data(dv));
                 }
             }
             // Parent gone: closing inbox_tx (drop) ends Worker.receive with nil.
         });
     }
-    // fwd: worker sends -> data frames
+    // Mailbox writer — a funnel, because the done terminal (from this thread)
+    // must follow every queued send; `None` is the close sentinel that lets it
+    // flush before the process exits.
+    let (to_mail_tx, to_mail_rx) = std::sync::mpsc::channel::<Option<Msg>>();
+    let writer = {
+        let mut sock = mail_sock;
+        std::thread::spawn(move || {
+            while let Ok(Some(msg)) = to_mail_rx.recv() {
+                if write_msg_frame(&mut sock, &msg).is_err() {
+                    break;
+                }
+            }
+            let _ = sock.shutdown(std::net::Shutdown::Write);
+        })
+    };
+    // fwd: worker sends -> Call{op:"send"} frames into the funnel.
     {
-        let to_sock = to_sock_tx.clone();
+        let to_mail = to_mail_tx.clone();
         std::thread::spawn(move || {
             while let Ok(msg) = outbox_rx.recv_blocking() {
                 if let WorkerMsg::Data(dv) = msg
-                    && to_sock
-                        .send(WireData::Map(vec![
-                            ("t".into(), WireData::Str("d".into())),
-                            ("v".into(), dv),
-                        ]))
-                        .is_err()
+                    && to_mail.send(Some(call_frame(OP_SEND, Some(dv)))).is_err()
                 {
                     break;
                 }
             }
         });
     }
-    // fwd: control replies -> ctlr frames (FIFO id correlation)
-    {
-        let to_sock = to_sock_tx.clone();
-        let ids = ctl_ids;
-        std::thread::spawn(move || {
-            while let Ok(msg) = ctl_reply_rx.recv_blocking() {
-                let id = ids.lock().expect("ctl ids").pop_front().unwrap_or(0);
-                if let WorkerMsg::Data(dv) = msg
-                    && to_sock
-                        .send(WireData::Map(vec![
-                            ("t".into(), WireData::Str("r".into())),
-                            ("i".into(), WireData::Int(id as i64)),
-                            ("v".into(), dv),
-                        ]))
-                        .is_err()
-                {
-                    break;
-                }
-            }
-        });
-    }
-    // writer — `Null` is the close sentinel: the fwd threads hold sender
-    // clones (one is pinned on a reader that outlives us), so the channel
-    // never closes on its own; the sentinel lets the done frame flush and
-    // the writer finish before the process exits.
-    let writer = {
-        let mut wsock = sock;
-        std::thread::spawn(move || {
-            while let Ok(frame) = to_sock_rx.recv() {
-                if matches!(frame, WireData::Null) {
-                    break;
-                }
-                if frame_write(&mut wsock, &frame).is_err() {
-                    break;
-                }
-            }
-            let _ = wsock.shutdown(std::net::Shutdown::Write);
-        })
-    };
 
     let link = WorkerLink {
         inbox_rx,
@@ -621,21 +692,19 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
             .unwrap_or_else(|| "unknown panic".to_string());
         Err(format!("worker panicked: {what}"))
     });
+    // The mailbox lane's terminal: the whole run was one implicit conversation.
     let done = match &out {
-        Ok(v) => WireData::Map(vec![
-            ("t".into(), WireData::Str("k".into())),
-            ("v".into(), v.clone()),
-        ]),
-        Err(m) => WireData::Map(vec![
-            ("t".into(), WireData::Str("e".into())),
-            ("m".into(), WireData::Str(m.clone())),
-        ]),
+        Ok(v) => Msg::CallReturnData { value: v.clone() },
+        Err(m) => Msg::CallReturnError {
+            message: m.clone(),
+            remote_stack: String::new(),
+        },
     };
-    let _ = to_sock_tx.send(done);
-    let _ = to_sock_tx.send(WireData::Null); // close sentinel (see writer)
-    drop(to_sock_tx);
+    let _ = to_mail_tx.send(Some(done));
+    let _ = to_mail_tx.send(None); // close sentinel (see writer)
+    drop(to_mail_tx);
     let _ = writer.join();
-    // Exit now: the reader/fwd threads are parked on a socket the PARENT
-    // still holds open; returning would leave this process lingering.
+    // Exit now: the reader/conversation threads are parked on sockets the
+    // PARENT still holds open; returning would leave this process lingering.
     i32::from(out.is_err())
 }
