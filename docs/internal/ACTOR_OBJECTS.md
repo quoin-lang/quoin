@@ -206,6 +206,84 @@ between object claims and lane claims under nested re-entrancy. A nested call mu
 ride its conversation's existing lane; the acquisition discipline for (object claim,
 lane claim) must be provably deadlock-free against lane waiters, and tested as such.
 
+### §5.1 The acquisition discipline (SETTLED 2026-07-14, frozen before any code)
+
+Two facts defuse the OS-lock intuition. Claims here are *cooperative fiber claims* —
+`owner: (TaskId, epoch)`, FIFO waiters, depth for same-owner re-entry — plain
+parent-side data mutated only between yields (the `ext_prelude` machinery). So we get
+two powers OS locks never have: **atomic multi-acquire** (take several resources in
+one scheduler step, or none) and a **complete waits-for graph** (host-op callbacks run
+on the *caller's own fiber* — `service_host_op` runs inside `extension_call`'s frame
+loop — so every wait in a re-entrant call web is an ordinary task parked on a claim
+with a known owner, all in one VM).
+
+Disciplines considered and rejected: *object-then-lane* deadlocks (A holds O waiting
+for a lane; all lanes held by calls whose callbacks nested-send to O — cycle);
+*lane-then-object* (strict hierarchy) is provably free of cross-kind cycles but pins a
+lane per queue-sitter, so one slow hot object starves every other object on the peer —
+head-of-line blocking is the disease lanes exist to cure.
+
+**The frozen rules:**
+
+1. Resources: per-object claims (FIFO mailbox, owner = (task, epoch), depth-capped
+   re-entry) and per-peer lane pools. All state parent-side, mutated between yields.
+2. A top-level send acquires **(object, lane) jointly and atomically** — it parks with
+   a want and is granted both or neither; it never holds one kind while waiting for
+   the other. Object FIFO is primary (mailbox order); a freed object is **reserved for
+   its head waiter** (no barging); freed lanes go to reserved heads in per-peer FIFO
+   order.
+3. A **nested** send (the task already has a bound conversation on the peer — it is
+   executing a host-op callback) **rides the bound lane** and acquires the object
+   claim only. A nested send never waits for a lane. (If nested calls took fresh
+   lanes, N concurrent calls whose handlers all call back would exhaust N lanes and
+   deadlock at full load.)
+4. Same-owner re-entry on an object nests `depth++`, capped at 16 (as extensions).
+5. Class-side calls and `serviceStop` claim a lane only, never an object.
+6. At every object-claim park, walk the waits-for graph
+   (`waits_for(task) = owner of the claim the task is parked on`; a joint waiter's
+   edge is its wanted object's owner). If the walk closes on the parking task,
+   **raise a catchable deadlock error naming the cycle instead of parking**.
+   Decision: the error lands at whichever task closes the cycle (timing-dependent);
+   it is catchable and names every participant.
+7. The actor guarantee is a **boundary-mailbox** guarantee: worker-side, a hosted
+   object passed as a live `Arg::Resource` is called directly — ordinary cooperative
+   local code, interleaving only at park points, as anywhere in a single VM.
+
+**Why detection is complete for the resource layer:** joint waiters hold nothing
+while waiting; a stuck lane always traces to its holder task being parked on an
+object claim (callbacks run on the holder's own fiber); therefore every true
+claims-layer deadlock contains an object-claim cycle, and every object-claim cycle
+is caught at park time. The irreducible residue — object↔object cycles from mutual
+synchronous re-entrant calls — is application-level (two gen_servers calling each
+other), detected and raised, never a silent hang. A worker whose handler simply
+never answers hangs exactly as it can today with one lane; not a slice-5 regression.
+
+**Deadlock tests (land with the machinery, before/with the wiring):**
+- Shape-1 regression: all N lanes busy with calls whose callbacks nested-send to an
+  object held by an (N+1)th slow call — drains.
+- Lane exhaustion under nesting: N lanes, N+k callers, every handler calls back —
+  completes (rule 3).
+- No head-of-line blocking: one slow hot object saturated; calls to a second object
+  on the same peer proceed at lane speed (joint-atomic beats lane-first).
+- Mutual-call cycles: two-party, three-party ring, and cross-peer (the waits-for
+  graph is parent-side regardless) → catchable error naming the cycle, no hang.
+- Re-entry to the depth cap and past it.
+- FIFO fairness per object under contention; reserved head not barged.
+- Per-object totals stay exact with lanes > 1 (the serialization test, generalized).
+Scoping note: end-to-end mutual-call cycles need peer→host callbacks, which worker
+peers don't have yet (gap item 1) — extension peers have them today (`InvokeBlock`).
+The cycle/nesting rules are therefore unit-tested against the claim module directly
+in 5a, and integration-tested via extensions when they adopt the machinery (5c).
+
+**Sequencing:** 5a = generalize the claim machinery (shared module + exhaustive unit
+tests) and adopt it for thread workers (per-object claims + in-memory lanes; the
+one-token serializer dies; `WorkerService.host:class:lanes:` — decided surface).
+5b = process workers (N conversation sockets at spawn). 5c = extensions: manifest
+`lanes` field (append-only, absent = 1), SDKs serve lanes on threads, claim key
+moves from connection to resource id — the DB story cashes out here.
+`serviceStop` decision: stop-flag + drain — refuse new top-level sends immediately,
+wait for in-flight conversations to finish, then stop each lane and join.
+
 ## 6. Cross-isolate channels (CSP across the boundary)
 
 A channel endpoint becomes portable to a Quoin peer. Design, per the seam analysis:
@@ -355,7 +433,10 @@ injection wrapper, which feeds recorded results instead of re-performing.
    remains until hosted manifests (§10).
 5. **Per-object mailboxes + lanes** (§5) — after hosted objects, when the claim
    machinery is already generalized; the lock-ordering discipline gets settled and
-   tested here.
+   tested here. Discipline SETTLED as §5.1 (2026-07-14) before any code; sub-slices:
+   5a = shared claim module + unit-tested discipline + thread workers
+   (`host:class:lanes:`), 5b = process workers (N sockets), 5c = extensions
+   (manifest `lanes`, SDK threading, per-resource claims).
 6. **Portable-block arguments** for Quoin peers (thread first; process blocked on
    source-shipping and falls back to handles). v1 DONE (2026-07-14): the ship path
    for thread backing — snapshot at the encode seam, `DispatchReq.blocks` sidecar,
@@ -379,6 +460,10 @@ Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, 
 - **The lock-ordering discipline** for (object claim, lane claim) under nested
   re-entrancy (§5's care point) — flagged as the scariest part of the design; must be
   written down and deadlock-tested before slice 5, not discovered during it.
+  **SETTLED 2026-07-14 — frozen as §5.1** (joint-atomic top-level acquisition,
+  nested rides the bound lane and waits only for objects, park-time cycle detection
+  raising catchably). Decisions: `host:class:lanes:` surface; the error lands at the
+  cycle-closing task; `serviceStop` = stop-flag + drain.
 - **Decoupling proxy dispatch from the VM miss path** (raised in review, 2026-07-14):
   the service proxy's MNU-seam hook (`try_service_call` in `vm.rs`) is tolerated for
   now but must not be permanent. The exit is the extension pattern, already in-tree:
