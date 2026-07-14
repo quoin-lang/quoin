@@ -8,6 +8,8 @@ description = "Extension-side SDK for writing out-of-process Quoin extensions (T
 readme = "README.md"
 
 [dependencies]
-quoin-ext-proto = { path = "../quoin-ext-proto" }
+# The path keeps in-tree builds on the local crate; the version is what crates.io
+# consumers resolve (cargo strips the path at publish).
+quoin-ext-proto = { path = "../quoin-ext-proto", version = "0.1.1" }
 
 [lib]
