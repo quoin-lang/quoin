@@ -576,14 +576,14 @@ dependencies = [
 
 [[package]]
 name = "quoin-ext"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "quoin-ext-proto",
 ]
 
 [[package]]
 name = "quoin-ext-proto"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "quote"
