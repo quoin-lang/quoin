@@ -9,15 +9,16 @@
 //! var hits = index.query:'quoin';
 //! ```
 //!
-//! The proxy forwards through the dispatch MNU seam: a selector the proxy's own
-//! class doesn't define (everything except `serviceStop`) builds a
-//! `Call{class_name, op, recv, method_args}` and parks for its `CallReturn*`
-//! terminal — so callers compose with `Async.gather:`/`timeout:do:` like any
-//! parked wait, and the hook costs nothing on the hot path (it sits on the
-//! lookup-miss branch). The hook is TEMPORARY by decision (2026-07-14): once
-//! hosted classes declare their selectors, the parent installs a real class
-//! (the `install_ext_class` pattern) and this seam goes away — see
-//! ACTOR_OBJECTS.md §10.
+//! Proxies are REAL INSTALLED CLASSES (ACTOR_OBJECTS.md §2 manifests): the
+//! worker's ready message carries the hosted class's selector manifest, the
+//! parent installs a class of `ServiceDispatch` nodes from it (the
+//! `install_ext_class` pattern, unbound — the parent's own globals are never
+//! touched), and every send is ordinary method lookup landing in
+//! `dispatch_service_method` — no VM dispatch hook. A selector outside the
+//! manifest is an honest MessageNotUnderstood. Classes the worker never
+//! declared up front install LAZILY when their first instance crosses
+//! (`CallReturnResourceDecl`). Calls park, so they compose with
+//! `Async.gather:`/`timeout:do:` like any parked wait.
 //!
 //! HOSTED RETURNS — the actor-object rule: a method's portable return COPIES
 //! back (`CallReturnData`); a non-portable object return is HOSTED in the
@@ -196,19 +197,105 @@ fn snapshot(s: &NativeServiceState) -> CallCtx {
     }
 }
 
-/// The dispatch MNU-seam hook (see `exec_send` / `call_method_cached_inner`):
-/// `None` means "not a service proxy — raise the MNU as usual".
-pub(crate) fn try_service_call<'gc>(
+/// The `Callable::ServiceMethod` body (dispatch.rs): an installed service
+/// class's method landed. An INSTANCE send takes its context from the
+/// receiver's own state; a CLASS-SIDE send (the receiver is the installed
+/// class itself) borrows the root proxy's state and dispatches with `recv 0`
+/// — the hosted table's reserved class-side id.
+pub(crate) fn dispatch_service_method<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    service: Value<'gc>,
+    receiver: Value<'gc>,
+    selector: Symbol,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    if let Ok(ctx) = receiver.with_native_state::<NativeServiceState, _, _>(snapshot) {
+        return service_call(vm, mc, receiver, ctx, selector, &args);
+    }
+    // Class-side. NOTE a deliberate §5.1-rule-5 deviation: class-side sends
+    // claim pseudo-object 0 (serializing them per service) rather than a lane
+    // only — safer for class-state mutation, and the lane-only acquire can
+    // land later without changing the surface.
+    let mut ctx = service
+        .with_native_state::<NativeServiceState, _, _>(snapshot)
+        .map_err(QuoinError::Other)?;
+    ctx.object_id = 0;
+    service_call(vm, mc, service, ctx, selector, &args)
+}
+
+/// The proxy-owned `==:`: two proxies are equal iff they address the SAME
+/// hosted object of the SAME service (worker identity = the shared reap Rc;
+/// the worker-side table dedupes by identity, so ids compare faithfully).
+fn service_eq<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
-    selector: Symbol,
-    args: &[Value<'gc>],
-) -> Option<Result<Value<'gc>, QuoinError>> {
-    let ctx = receiver
-        .with_native_state::<NativeServiceState, _, _>(snapshot)
-        .ok()?;
-    Some(service_call(vm, mc, receiver, ctx, selector, args))
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let mine = receiver
+        .with_native_state::<NativeServiceState, _, _>(|s| (s.reap.clone(), s.object_id))
+        .map_err(QuoinError::Other)?;
+    let other = args.first().and_then(|a| {
+        a.with_native_state::<NativeServiceState, _, _>(|s| (s.reap.clone(), s.object_id))
+            .ok()
+    });
+    let eq = matches!(other, Some((reap, id)) if Rc::ptr_eq(&reap, &mine.0) && id == mine.1);
+    Ok(vm.new_bool(mc, eq))
+}
+
+/// Find or install the service class for `(link, name)`: the shell is created
+/// empty, registered, and populated from the manifest — the two-step that
+/// breaks the proxy/class circularity (`anchor` is any live proxy of the
+/// service; its state carries everything worker-wide).
+pub(crate) fn installed_service_class<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    link: usize,
+    name: &str,
+    instance_selectors: &[String],
+    class_selectors: &[String],
+    anchor: Value<'gc>,
+) -> gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::Class<'gc>>> {
+    if let Some(entry) = vm
+        .service_classes
+        .iter()
+        .find(|e| e.link == link && e.name == name)
+        && let Value::Class(c) = entry.class
+    {
+        return c;
+    }
+    let shell = vm.make_service_class_shell(mc, name);
+    vm.service_classes.push(crate::vm::ServiceClassEntry {
+        link,
+        name: name.to_string(),
+        class: Value::Class(shell),
+    });
+    vm.populate_service_class(
+        mc,
+        shell,
+        anchor,
+        instance_selectors,
+        class_selectors,
+        &[("serviceStop", service_stop), ("==:", service_eq)],
+    );
+    shell
+}
+
+/// Look up an already-installed service class (sub-proxy returns of an
+/// announced class carry only the name).
+fn lookup_service_class<'gc>(
+    vm: &VmState<'gc>,
+    link: usize,
+    name: &str,
+) -> Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::Class<'gc>>>> {
+    vm.service_classes
+        .iter()
+        .find(|e| e.link == link && e.name == name)
+        .and_then(|e| match e.class {
+            Value::Class(c) => Some(c),
+            _ => None,
+        })
 }
 
 /// A bare `Call` frame for a hosted-object dispatch.
@@ -686,36 +773,39 @@ fn interpret_terminal<'gc>(
         Msg::CallReturnChannel { chan } => {
             crate::runtime::channel_relay::relay_endpoint(vm, mc, ctx.chan_link, chan)
         }
+        // A previously-announced class: only the name crosses.
         Msg::CallReturnResource {
             resource,
             class_name,
         } => {
-            let Value::Object(obj) = receiver else {
+            let Some(class) = lookup_service_class(vm, ctx.chan_link, &class_name) else {
                 return Err(QuoinError::Other(format!(
-                    "service call '{}': bad proxy receiver",
+                    "service call '{}': the worker returned an instance of \
+                     '{class_name}', which it never declared",
                     selector.as_str()
                 )));
             };
-            let class = obj.borrow().class;
-            Ok(vm.new_native_state(
+            Ok(sub_proxy(vm, mc, ctx, class, resource, class_name))
+        }
+        // First sighting of a class: the terminal carries its manifest — the
+        // parent installs a real class (ACTOR_OBJECTS.md §2), then proceeds
+        // as above.
+        Msg::CallReturnResourceDecl {
+            resource,
+            class_name,
+            instance_selectors,
+            class_selectors,
+        } => {
+            let class = installed_service_class(
+                vm,
                 mc,
-                class,
-                NativeServiceState {
-                    dispatch_tx: ctx.dispatch_tx.clone(),
-                    done_rx: ctx.done_rx.clone(),
-                    claims: ctx.claims.clone(),
-                    lanes: ctx.lanes,
-                    stopped: ctx.stopped.clone(),
-                    reap: ctx.reap.clone(),
-                    object_id: resource,
-                    class_name,
-                    process: ctx.process,
-                    convs: ctx.convs.clone(),
-                    block_handles: ctx.block_handles.clone(),
-                    boundary: ctx.boundary.clone(),
-                    chan_link: ctx.chan_link,
-                },
-            ))
+                ctx.chan_link,
+                &class_name,
+                &instance_selectors,
+                &class_selectors,
+                receiver,
+            );
+            Ok(sub_proxy(vm, mc, ctx, class, resource, class_name))
         }
         Msg::CallReturnError {
             message,
@@ -731,6 +821,37 @@ fn interpret_terminal<'gc>(
     }
 }
 
+/// Mint a sub-proxy: an instance of the service's installed class for
+/// `class_name`, sharing every worker-wide handle with its siblings.
+fn sub_proxy<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    ctx: &CallCtx,
+    class: gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::Class<'gc>>>,
+    resource: u64,
+    class_name: String,
+) -> Value<'gc> {
+    vm.new_native_state(
+        mc,
+        class,
+        NativeServiceState {
+            dispatch_tx: ctx.dispatch_tx.clone(),
+            done_rx: ctx.done_rx.clone(),
+            claims: ctx.claims.clone(),
+            lanes: ctx.lanes,
+            stopped: ctx.stopped.clone(),
+            reap: ctx.reap.clone(),
+            object_id: resource,
+            class_name,
+            process: ctx.process,
+            convs: ctx.convs.clone(),
+            block_handles: ctx.block_handles.clone(),
+            boundary: ctx.boundary.clone(),
+            chan_link: ctx.chan_link,
+        },
+    )
+}
+
 fn host<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -740,7 +861,7 @@ fn host<'gc>(
     backing: &'static str,
     lanes: u32,
 ) -> Result<Value<'gc>, QuoinError> {
-    let Value::Class(class) = receiver else {
+    let Value::Class(_) = receiver else {
         return Err(QuoinError::Other("WorkerService: bad receiver".into()));
     };
     let (ch, pid) = match backing {
@@ -785,24 +906,26 @@ fn host<'gc>(
         outbox_rx: ch.outbox_rx.clone(),
         control_tx: ch.control_tx.clone(),
     });
-    // Handshake: the serve loop's first act is a 'ready' message; a closed lane
-    // instead means boot/compile/instantiation failed — the done lane says
-    // why. Parks, so slow boots don't block other tasks.
-    match vm.await_io(IoRequest::WorkerRecv(ch.outbox_rx.clone()))? {
-        IoResult::WorkerMsg(Some(_)) => {}
-        IoResult::WorkerMsg(None) => {
-            let why = match vm.await_io(IoRequest::WorkerJoin(ch.done_rx.clone()))? {
-                IoResult::WorkerDone(Err(msg)) => msg,
-                _ => "the service exited before reporting ready".to_string(),
-            };
-            return Err(QuoinError::Other(format!("WorkerService.host: {why}")));
-        }
-        other => {
-            return Err(QuoinError::Other(format!(
-                "WorkerService.host: unexpected result {other:?}"
-            )));
-        }
-    }
+    // Handshake: the serve loop's first act is a 'ready' message carrying the
+    // hosted class's MANIFEST (name + selector lists — ACTOR_OBJECTS.md §2); a
+    // closed lane instead means boot/compile/instantiation failed — the done
+    // lane says why. Parks, so slow boots don't block other tasks.
+    let (instance_selectors, class_selectors) =
+        match vm.await_io(IoRequest::WorkerRecv(ch.outbox_rx.clone()))? {
+            IoResult::WorkerMsg(Some(msg)) => parse_ready_manifest(&msg),
+            IoResult::WorkerMsg(None) => {
+                let why = match vm.await_io(IoRequest::WorkerJoin(ch.done_rx.clone()))? {
+                    IoResult::WorkerDone(Err(msg)) => msg,
+                    _ => "the service exited before reporting ready".to_string(),
+                };
+                return Err(QuoinError::Other(format!("WorkerService.host: {why}")));
+            }
+            other => {
+                return Err(QuoinError::Other(format!(
+                    "WorkerService.host: unexpected result {other:?}"
+                )));
+            }
+        };
     // Claims: the §5.1 machinery, one per worker, registered for VM.claims
     // and the cross-peer cycle walk; boundary rows registered beside the
     // extensions' (§7 — one diagnosis surface).
@@ -818,9 +941,13 @@ fn host<'gc>(
         ch.chan_tx.clone(),
         ch.chan_rx.clone(),
     );
-    Ok(vm.new_native_state(
+    // Install the hosted class from its manifest (the two-step: the shell
+    // exists first so the root proxy can be its instance, then the method
+    // nodes — which carry the proxy — fill it in).
+    let shell = vm.make_service_class_shell(mc, &class_name);
+    let proxy = vm.new_native_state(
         mc,
-        class,
+        shell,
         NativeServiceState {
             dispatch_tx: ch.dispatch_tx,
             done_rx: ch.done_rx,
@@ -829,14 +956,54 @@ fn host<'gc>(
             stopped: Rc::new(Cell::new(false)),
             reap: Rc::new(RefCell::new(Vec::new())),
             object_id: 1,
-            class_name,
+            class_name: class_name.clone(),
             process: backing == "process",
             convs: Rc::new(RefCell::new(HashMap::new())),
             block_handles: Rc::new(RefCell::new(Vec::new())),
             boundary,
             chan_link,
         },
-    ))
+    );
+    vm.service_classes.push(crate::vm::ServiceClassEntry {
+        link: chan_link,
+        name: class_name,
+        class: Value::Class(shell),
+    });
+    vm.populate_service_class(
+        mc,
+        shell,
+        proxy,
+        &instance_selectors,
+        &class_selectors,
+        &[("serviceStop", service_stop), ("==:", service_eq)],
+    );
+    Ok(proxy)
+}
+
+/// Pull the selector lists out of the ready message (absent lists — a plain
+/// `ready: true` — decode as empty, leaving a proxy that answers only the
+/// proxy-owned selectors).
+fn parse_ready_manifest(msg: &crate::worker::WorkerMsg) -> (Vec<String>, Vec<String>) {
+    let crate::worker::WorkerMsg::Data(WireData::Map(entries)) = msg else {
+        return (Vec::new(), Vec::new());
+    };
+    let strings = |key: &str| -> Vec<String> {
+        entries
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| match v {
+                WireData::List(items) => items
+                    .iter()
+                    .filter_map(|i| match i {
+                        WireData::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default()
+    };
+    (strings("instance"), strings("classSide"))
 }
 
 /// `serviceStop`'s drain: park until every lane is home (each in-flight
@@ -981,56 +1148,57 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
              thread-backed one runs one serve fiber per lane. Semantics are identical \
              -- calls to one object serialize, calls to different objects overlap.",
         )
-        // Stop the service: flag + drain (refuse new calls, wait for every
-        // in-flight conversation), then one stop op per lane, then join.
-        // Worker-wide: every proxy of the service refuses calls afterwards.
-        .instance_method("serviceStop", |vm, mc, receiver, _args| {
-            let ctx = receiver
-                .with_native_state::<NativeServiceState, _, _>(|s| {
-                    s.stopped.set(true);
-                    snapshot(s)
-                })
-                .map_err(QuoinError::Other)?;
-            drain_lanes(vm, receiver, &ctx)?;
-            // One reserved stop op per lane fiber; a dead worker skips
-            // straight to the join, which reports why.
-            for _ in 0..ctx.lanes {
-                let (reply_tx, reply_rx) = async_channel::bounded::<Msg>(1);
-                let (_hostop_tx, hostop_rx) = async_channel::bounded::<Msg>(1);
-                let frame = hosted_call(&ctx, OP_STOP.to_string(), Vec::new(), Vec::new());
-                if ctx
-                    .dispatch_tx
-                    .try_send(DispatchReq {
-                        frame,
-                        blocks: Vec::new(),
-                        reply: reply_tx,
-                        hostops: hostop_rx,
-                        handler_micros: StdArc::new(AtomicU64::new(0)),
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                let _ = vm.await_io(IoRequest::FrameRecv(reply_rx))?;
-            }
-            let joined = vm.await_io(IoRequest::WorkerJoin(ctx.done_rx.clone()))?;
-            // The worker is gone: release the block handles its stored
-            // HostBlocks addressed (minted for block arguments that crossed
-            // as handles).
-            for id in ctx.block_handles.borrow_mut().drain(..) {
-                vm.hosted_release(id);
-            }
-            match joined {
-                IoResult::WorkerDone(Ok(_)) => Ok(vm.new_nil(mc)),
-                IoResult::WorkerDone(Err(msg)) => Err(QuoinError::Other(msg)),
-                other => Err(QuoinError::Other(format!(
-                    "serviceStop: unexpected result {other:?}"
-                ))),
-            }
+}
+
+/// The proxy-owned `serviceStop` (installed on every service class): flag +
+/// drain (refuse new calls, wait for every in-flight conversation), then one
+/// stop op per lane, then join. Worker-wide — every proxy of the service
+/// refuses calls afterwards.
+pub(crate) fn service_stop<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    _args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let ctx = receiver
+        .with_native_state::<NativeServiceState, _, _>(|s| {
+            s.stopped.set(true);
+            snapshot(s)
         })
-        .doc(
-            "Stop the service: wait for in-flight calls to finish, send the stop message, \
-             and join the worker. Worker-wide -- further calls through ANY proxy of this \
-             service raise 'the service is stopped'. Answers nil.",
-        )
+        .map_err(QuoinError::Other)?;
+    drain_lanes(vm, receiver, &ctx)?;
+    // One reserved stop op per lane fiber; a dead worker skips straight to
+    // the join, which reports why.
+    for _ in 0..ctx.lanes {
+        let (reply_tx, reply_rx) = async_channel::bounded::<Msg>(1);
+        let (_hostop_tx, hostop_rx) = async_channel::bounded::<Msg>(1);
+        let frame = hosted_call(&ctx, OP_STOP.to_string(), Vec::new(), Vec::new());
+        if ctx
+            .dispatch_tx
+            .try_send(DispatchReq {
+                frame,
+                blocks: Vec::new(),
+                reply: reply_tx,
+                hostops: hostop_rx,
+                handler_micros: StdArc::new(AtomicU64::new(0)),
+            })
+            .is_err()
+        {
+            break;
+        }
+        let _ = vm.await_io(IoRequest::FrameRecv(reply_rx))?;
+    }
+    let joined = vm.await_io(IoRequest::WorkerJoin(ctx.done_rx.clone()))?;
+    // The worker is gone: release the block handles its stored HostBlocks
+    // addressed (minted for block arguments that crossed as handles).
+    for id in ctx.block_handles.borrow_mut().drain(..) {
+        vm.hosted_release(id);
+    }
+    match joined {
+        IoResult::WorkerDone(Ok(_)) => Ok(vm.new_nil(mc)),
+        IoResult::WorkerDone(Err(msg)) => Err(QuoinError::Other(msg)),
+        other => Err(QuoinError::Other(format!(
+            "serviceStop: unexpected result {other:?}"
+        ))),
+    }
 }

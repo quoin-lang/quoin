@@ -51,6 +51,7 @@ unsigned ints; `str`/`bin`/`bool`/arrays/maps are their native MessagePack forms
 | 20 | HostOpReturn | host → ext | `handle:u64, str:str|nil, error:str|nil, remote_stack:str` |
 | 21 | CallReturnChannel | worker → host | `chan:u64, handler_micros:u64`† — Quoin worker peers only (a shipped channel endpoint, docs/internal/ACTOR_OBJECTS.md §6); extensions never produce or receive it |
 | 22 | Chan | worker ↔ host | `kind:u8, chan:u64, corr:u64, value:Value|nil, message:str` — one channel-relay event on a worker link's relay socket (Quoin worker peers only, docs/internal/ACTOR_OBJECTS.md §6); extensions never produce or receive it |
+| 23 | CallReturnResourceDecl | worker → host | `resource:u64, class_name:str, instance_selectors:[str], class_selectors:[str], handler_micros:u64`† — Quoin worker peers only (first crossing of a hosted class carries its manifest, docs/internal/ACTOR_OBJECTS.md §2); extensions never produce or receive it |
 
 † `handler_micros` is an appended field (see Evolution) on every `CallReturn*`
 terminal: the wall time the peer spent servicing the call, in microseconds, from

@@ -64,6 +64,13 @@ pub enum Callable<'gc> {
     /// owning `Extension` instance). The class and class-vs-instance side are derived from the
     /// receiver at call time; `selector` is the message to forward.
     ExtMethod { ext: Value<'gc>, selector: Symbol },
+    /// A hosted-service method (docs/internal/ACTOR_OBJECTS.md §2, manifests): the send
+    /// dispatches to the worker behind the receiver — or, class-side, behind `service`
+    /// (the root proxy the method table roots).
+    ServiceMethod {
+        service: Value<'gc>,
+        selector: Symbol,
+    },
     /// An AOT-compiled user method (docs/internal/AOT_ARCH.md): `entry` is the native
     /// code, `block` the ordinary interpreter body it overlays (the fallback if
     /// the argument shapes ever fail to unbox — which dispatch's typed-variant
@@ -312,6 +319,30 @@ impl<'gc> Callable<'gc> {
                 vm.push(ret);
                 Ok(())
             }
+            Callable::ServiceMethod { service, selector } => {
+                let receiver = receiver.ok_or_else(|| {
+                    QuoinError::Other("service method called without a receiver".to_string())
+                })?;
+                // Root (receiver, args) across the conversation (which parks and
+                // yields), the ExtMethod pattern; `service` stays rooted via the
+                // installed class's method table.
+                vm.active_native_args.push(NativeCall {
+                    receiver,
+                    args: NativeArgs::Owned(args.clone()),
+                });
+                let ret = crate::runtime::worker_service::dispatch_service_method(
+                    vm, mc, service, receiver, selector, args,
+                );
+                if ret.is_err()
+                    && let Some(call) = vm.active_native_args.last()
+                {
+                    vm.exceptions.last_send_args = call.args_vec(&vm.stack);
+                }
+                vm.active_native_args.pop();
+                let ret = ret?;
+                vm.push(ret);
+                Ok(())
+            }
         }
     }
 }
@@ -442,6 +473,8 @@ impl<'gc> VmState<'gc> {
                     if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
                         if let Some(ext) = method_state.ext_dispatch() {
                             Ok(Some(Callable::ExtMethod { ext, selector }))
+                        } else if let Some(service) = method_state.service_dispatch() {
+                            Ok(Some(Callable::ServiceMethod { service, selector }))
                         } else if let Some(func) = method_state.native_func() {
                             Ok(Some(Callable::Native(func)))
                         } else if let Some(Value::Object(block_obj)) = method_state.get_block()

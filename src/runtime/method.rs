@@ -30,6 +30,13 @@ pub enum MethodBody {
     ExtDispatch {
         ext: Value<'static>,
     },
+    /// A hosted-service method (docs/internal/ACTOR_OBJECTS.md §2, manifests): the selector
+    /// dispatches to a worker-hosted object. An instance send takes its context from the
+    /// RECEIVER (the proxy's native state); a class-side send uses `service` — the service's
+    /// root proxy, kept GC-rooted via the method table exactly like `ExtDispatch.ext`.
+    ServiceDispatch {
+        service: Value<'static>,
+    },
 }
 
 #[derive(Debug)]
@@ -95,13 +102,39 @@ impl NativeMethodState {
         }
     }
 
+    /// A hosted-service method variant: `selector` dispatches to the worker behind the
+    /// receiver (or, class-side, behind `service` — the root proxy).
+    pub fn new_service(selector: String, service: Value<'_>) -> Self {
+        let service_static: Value<'static> = unsafe { transmute(service) };
+        Self {
+            selector,
+            body: MethodBody::ServiceDispatch {
+                service: service_static,
+            },
+            is_extension: false,
+            next: None,
+        }
+    }
+
+    /// The root-proxy value for a hosted-service method, or `None` otherwise.
+    pub fn service_dispatch<'gc>(&self) -> Option<Value<'gc>> {
+        match &self.body {
+            MethodBody::ServiceDispatch { service } => {
+                Some(unsafe { transmute::<Value<'static>, Value<'gc>>(*service) })
+            }
+            _ => None,
+        }
+    }
+
     /// The wrapped user `Block` value, or `None` for a native or extension-backed method body.
     pub fn get_block<'gc>(&self) -> Option<Value<'gc>> {
         match &self.body {
             MethodBody::UserBlock(block) => {
                 Some(unsafe { transmute::<Value<'static>, Value<'gc>>(*block) })
             }
-            MethodBody::Native { .. } | MethodBody::ExtDispatch { .. } => None,
+            MethodBody::Native { .. }
+            | MethodBody::ExtDispatch { .. }
+            | MethodBody::ServiceDispatch { .. } => None,
         }
     }
 
@@ -114,7 +147,9 @@ impl NativeMethodState {
     pub fn native_func(&self) -> Option<NativeFunc> {
         match &self.body {
             MethodBody::Native { func, .. } => Some(*func),
-            MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
+            MethodBody::UserBlock(_)
+            | MethodBody::ExtDispatch { .. }
+            | MethodBody::ServiceDispatch { .. } => None,
         }
     }
 
@@ -125,7 +160,9 @@ impl NativeMethodState {
     pub fn native_param_types(&self) -> Option<Vec<String>> {
         match &self.body {
             MethodBody::Native { param_types, .. } => param_types.clone(),
-            MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
+            MethodBody::UserBlock(_)
+            | MethodBody::ExtDispatch { .. }
+            | MethodBody::ServiceDispatch { .. } => None,
         }
     }
 
@@ -134,7 +171,9 @@ impl NativeMethodState {
     pub fn native_ret_type(&self) -> Option<String> {
         match &self.body {
             MethodBody::Native { ret_type, .. } => ret_type.clone(),
-            MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
+            MethodBody::UserBlock(_)
+            | MethodBody::ExtDispatch { .. }
+            | MethodBody::ServiceDispatch { .. } => None,
         }
     }
 
@@ -143,7 +182,9 @@ impl NativeMethodState {
     pub fn native_doc(&self) -> Option<String> {
         match &self.body {
             MethodBody::Native { doc, .. } => doc.clone(),
-            MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
+            MethodBody::UserBlock(_)
+            | MethodBody::ExtDispatch { .. }
+            | MethodBody::ServiceDispatch { .. } => None,
         }
     }
 }
@@ -168,6 +209,10 @@ impl AnyCollect for NativeMethodState {
             MethodBody::ExtDispatch { ext } => {
                 let ext_gc: &Value<'gc> = unsafe { transmute(ext) };
                 ext_gc.dyn_trace(cc);
+            }
+            MethodBody::ServiceDispatch { service } => {
+                let service_gc: &Value<'gc> = unsafe { transmute(service) };
+                service_gc.dyn_trace(cc);
             }
             // MethodBody::Native holds only a fn pointer — nothing to trace.
             MethodBody::Native { .. } => {}

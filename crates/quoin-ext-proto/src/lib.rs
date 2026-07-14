@@ -161,6 +161,16 @@ pub enum Msg {
     /// hosted table. The receiver wraps it as a relay endpoint. Foreign extensions
     /// never produce or receive this frame.
     CallReturnChannel { chan: u64 },
+    /// worker -> host (Quoin peers only, docs/internal/ACTOR_OBJECTS.md §2 manifests): as
+    /// `CallReturnResource`, for a class this worker has not yet declared — the terminal
+    /// carries the class's selector manifest so the host installs a real class before
+    /// wrapping the sub-proxy. Later returns of the same class use `CallReturnResource`.
+    CallReturnResourceDecl {
+        resource: u64,
+        class_name: String,
+        instance_selectors: Vec<String>,
+        class_selectors: Vec<String>,
+    },
     /// worker <-> host, both directions (Quoin peers only, docs/internal/ACTOR_OBJECTS.md
     /// §6): one channel-relay event on the link's relay socket. `kind` discriminates the
     /// event (the VM's `ChanFrame` vocabulary: send/ack/recv/value/closed/recv-error/

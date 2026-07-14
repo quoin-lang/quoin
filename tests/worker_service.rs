@@ -151,11 +151,17 @@ Cell <- { |@value|
     plus: -> { |other| @value + other.value };
     boomCell -> { 'cell went boom'.throw }
 };
-Pool <- { |@made|
-    init -> { @made = 0 };
+Pool <- { |@made @stash|
+    .meta <-- {
+        poolKind -> { 'classy' }
+    }
+    init -> { @made = 0; @stash = nil };
     makeCell -> { @made = @made + 1; Cell.new };
     made -> { @made };
-    sum: -> { |cell| cell.value + @made }
+    sum: -> { |cell| cell.value + @made };
+    stash: -> { |cell| @stash = cell; nil };
+    stashed -> { @stash };
+    thunk -> { { |n| n + @made } }
 };
 "#;
 
@@ -190,6 +196,48 @@ var after = { a.value; 'no-error' }.catch:{ |e|
 
 ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
+
+/// Hosted manifests (ACTOR_OBJECTS.md §2): proxies are REAL installed classes
+/// — the VM dispatch hook is gone. Introspection answers the manifest, misses
+/// are honest MNUs, `==` is hosted-object identity (the worker table dedupes),
+/// class-side sends reach the hosted class, and classes the worker never
+/// declared up front (here: Cell, and even Block) install lazily when their
+/// first instance crosses.
+#[test]
+fn service_manifest_classes() {
+    let script = r#"
+var ok = true;
+var p = WorkerService.host:'@pool.qn@' class:'Pool';
+
+"* the proxy's class is a REAL class named after the hosted one, and
+"* introspection answers the manifest without any round trip
+((p.class.name.s) == 'Pool').else:{ ok = false; ('FAIL name: ' + p.class.name.s).print };
+(p.can?:#makeCell).else:{ ok = false; 'FAIL: can? manifest'.print };
+(p.can?:#frobnicate).if:{ ok = false; 'FAIL: ghost selector'.print };
+
+"* class-side sends reach the hosted CLASS (recv 0)
+((p.class.poolKind) == 'classy').else:{ ok = false; 'FAIL: class-side'.print };
+
+"* == is hosted-object identity: the same cell, stashed and re-returned,
+"* answers the same proxy identity; distinct cells do not
+var a = p.makeCell;
+p.stash:a;
+var b = p.stashed;
+(a == b).else:{ ok = false; 'FAIL: identity =='.print };
+var c = p.makeCell;
+(a == c).if:{ ok = false; 'FAIL: distinct =='.print };
+
+"* a returned BLOCK is a sub-proxy of the lazily-declared Block class —
+"* value: dispatches remotely (the S10 question, answered)
+var t = p.thunk;
+p.makeCell;
+((t.value:1) == 4).else:{ ok = false; ('FAIL thunk: ' + (t.value:1).s).print };
+
+p.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("manifest", script, &[("pool.qn", POOL_UNIT)]);
+}
 
 #[test]
 fn service_hosts_returned_objects() {

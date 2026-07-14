@@ -187,6 +187,7 @@ fn dispatch_hosted<'gc>(
     vm: &mut crate::vm::VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     op: &str,
+    class_name: &str,
     recv: u64,
     method_args: &[quoin_ext_proto::Arg],
     blocks: &[(usize, PortableBlock)],
@@ -205,8 +206,22 @@ fn dispatch_hosted<'gc>(
             return err(format!("hosted call '{op}': {e}"));
         }
     }
-    let Some(target) = vm.hosted_get(recv) else {
-        return err(format!("hosted call '{op}': no live hosted object {recv}"));
+    // recv 0 is the reserved class-side id: the send targets the hosted
+    // CLASS itself (`Pool.classMethod` through the installed class).
+    let target = if recv == 0 {
+        match crate::runtime::extension::resolve_global(vm, class_name) {
+            Some(v) => v,
+            None => {
+                return err(format!(
+                    "hosted call '{op}': no class named '{class_name}' in the worker"
+                ));
+            }
+        }
+    } else {
+        match vm.hosted_get(recv) {
+            Some(v) => v,
+            None => return err(format!("hosted call '{op}': no live hosted object {recv}")),
+        }
     };
     let mut argv = Vec::with_capacity(method_args.len());
     for (i, a) in method_args.iter().enumerate() {
@@ -275,10 +290,24 @@ fn dispatch_hosted<'gc>(
                 }
                 if let Value::Object(obj) = v {
                     let class_name = obj.borrow().class_name().to_string();
+                    let class_val = Value::Class(obj.borrow().class);
                     let id = vm.hosted_insert(v);
-                    Msg::CallReturnResource {
-                        resource: id,
-                        class_name,
+                    // First sighting of this class crossing the boundary: the
+                    // terminal carries its manifest so the parent can install
+                    // a real class (§2); later returns carry only the name.
+                    if vm.hosted_announced.insert(class_name.clone()) {
+                        let (instance_selectors, class_selectors) = manifest_selectors(class_val);
+                        Msg::CallReturnResourceDecl {
+                            resource: id,
+                            class_name,
+                            instance_selectors,
+                            class_selectors,
+                        }
+                    } else {
+                        Msg::CallReturnResource {
+                            resource: id,
+                            class_name,
+                        }
                     }
                 } else {
                     err(format!(
@@ -290,6 +319,50 @@ fn dispatch_hosted<'gc>(
         },
         Err(e) => error_terminal(vm, &e, "worker"),
     }
+}
+
+/// A hosted class's selector manifest (ACTOR_OBJECTS.md §2): instance and
+/// class-side selectors from the class, its mixins, and its ancestors —
+/// stopping at `Object`, whose protocol (`s`, `pp`, `==`…) stays LOCAL on the
+/// proxy, exactly as the MNU-era hook behaved. Sorted: manifests are wire
+/// bytes, and wire bytes never come from hash iteration.
+pub(crate) fn manifest_selectors<'gc>(class_val: Value<'gc>) -> (Vec<String>, Vec<String>) {
+    use std::collections::HashSet;
+    let mut instance: HashSet<String> = HashSet::new();
+    let mut class_side: HashSet<String> = HashSet::new();
+    let mut queue: Vec<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::Class<'gc>>>> =
+        Vec::new();
+    if let Value::Class(c) = class_val {
+        queue.push(c);
+    }
+    let mut walked = 0usize;
+    while let Some(c) = queue.pop() {
+        walked += 1;
+        if walked > 256 {
+            break; // defensive: a hierarchy cycle would be a VM bug
+        }
+        let b = c.borrow();
+        if b.name.to_string() == "Object" {
+            continue;
+        }
+        for sym in b.instance_methods.keys() {
+            instance.insert(sym.as_str().to_string());
+        }
+        for sym in b.class_methods.keys() {
+            class_side.insert(sym.as_str().to_string());
+        }
+        for m in &b.mixin_classes {
+            queue.push(*m);
+        }
+        if let Some(p) = b.parent {
+            queue.push(p);
+        }
+    }
+    let mut instance: Vec<String> = instance.into_iter().collect();
+    let mut class_side: Vec<String> = class_side.into_iter().collect();
+    instance.sort();
+    class_side.sort();
+    (instance, class_side)
 }
 
 /// Render an error as a `CallReturnError` terminal: a Quoin-level throw parks
@@ -467,6 +540,7 @@ fn invoke_parent_block_inner<'gc>(
             // the parent block runs: serve it and keep waiting (LIFO).
             Msg::Call {
                 op: nested_op,
+                class_name: nested_class,
                 recv,
                 method_args,
                 releases,
@@ -475,7 +549,8 @@ fn invoke_parent_block_inner<'gc>(
                 for rid in &releases {
                     vm.hosted_release(*rid);
                 }
-                let reply = dispatch_hosted(vm, mc, &nested_op, recv, &method_args, &[]);
+                let reply =
+                    dispatch_hosted(vm, mc, &nested_op, &nested_class, recv, &method_args, &[]);
                 if conv.reply_tx.try_send(reply).is_err() {
                     return Err(QuoinError::Other(format!(
                         "host block '{op}': the caller abandoned the conversation"
@@ -545,11 +620,22 @@ pub fn build_worker_class() -> NativeClassBuilder {
             // to the done lane exactly as any unit error does.
             let root = vm.call_method(mc, class_val, "new", Vec::new())?;
             vm.hosted_insert(root);
-            // Ready: the parent's host: parks on this before answering the proxy.
-            let _ = outbox_tx.try_send(WorkerMsg::Data(WireData::Map(vec![(
-                "ready".to_string(),
-                WireData::Bool(true),
-            )])));
+            // Ready — carrying the hosted class's MANIFEST (§2): the parent
+            // installs a real class from it, so proxy dispatch is ordinary
+            // method lookup, no VM hook.
+            let (instance, class_side) = manifest_selectors(class_val);
+            vm.hosted_announced.insert(class_name.clone());
+            let _ = outbox_tx.try_send(WorkerMsg::Data(WireData::Map(vec![
+                ("ready".to_string(), WireData::Bool(true)),
+                (
+                    "instance".to_string(),
+                    WireData::List(instance.into_iter().map(WireData::Str).collect()),
+                ),
+                (
+                    "classSide".to_string(),
+                    WireData::List(class_side.into_iter().map(WireData::Str).collect()),
+                ),
+            ])));
             Ok(Value::Nil)
         })
         .doc(
@@ -580,6 +666,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 let blocks = req.blocks;
                 let quoin_ext_proto::Msg::Call {
                     op,
+                    class_name,
                     recv,
                     method_args,
                     releases,
@@ -618,7 +705,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     },
                 );
                 let started = std::time::Instant::now();
-                let reply = dispatch_hosted(vm, mc, &op, recv, &method_args, &blocks);
+                let reply = dispatch_hosted(vm, mc, &op, &class_name, recv, &method_args, &blocks);
                 req.handler_micros.store(
                     started.elapsed().as_micros() as u64,
                     std::sync::atomic::Ordering::Relaxed,

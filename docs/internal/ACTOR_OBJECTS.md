@@ -629,7 +629,9 @@ Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, 
   (`WorkerService.host:class:` shape)? Block form is more general; class form survives
   process peers without source-shipping. Likely: both, block form thread-only at first.
 - Proxy identity: `==` on two proxies to the same hosted object; `ps`/introspection
-  rendering of hosted objects.
+  rendering of hosted objects. **`==` DONE (2026-07-14):** hosted-object identity —
+  same worker (reap Rc) + same table id, with `hosted_insert` deduping by identity
+  so re-returned objects compare equal. Rendering polish still open.
 - **The lock-ordering discipline** for (object claim, lane claim) under nested
   re-entrancy (§5's care point) — flagged as the scariest part of the design; must be
   written down and deadlock-tested before slice 5, not discovered during it.
@@ -639,18 +641,24 @@ Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, 
   cycle-closing task; `serviceStop` = stop-flag + drain.
 - **Decoupling proxy dispatch from the VM miss path** (raised in review, 2026-07-14):
   the service proxy's MNU-seam hook (`try_service_call` in `vm.rs`) is tolerated for
-  now but must not be permanent. The exit is the extension pattern, already in-tree:
-  `install_ext_class` puts a dispatch node in an ordinary method table — no hook —
-  because the manifest enumerates selectors. Once hosted classes declare theirs (the
-  ready message carries the selector list; the handshake itself runs before the unit
-  compiles), the parent installs a real class and the hook is deleted. Full dynamism
-  (`doesNotUnderstand:` as a language protocol, Smalltalk-style) is a separate,
-  independent language feature — QUOIN_TODO — not the load-bearing mechanism here.
+  now but must not be permanent. The exit is the extension pattern, already in-tree.
+  **DONE (2026-07-14, hosted manifests):** the ready message carries the root class's
+  selector manifest (enumerated to — but excluding — `Object`, whose protocol stays
+  local, matching the hook-era behavior); sub-proxy classes install lazily via
+  `CallReturnResourceDecl` on first crossing (which also covers stdlib-classed and
+  even Block returns — remote `value:` works); the installed classes are UNBOUND
+  (`vm.service_classes` roots them; no global clobbering) and their method nodes
+  (`MethodBody::ServiceDispatch`) carry the root proxy for class-side sends
+  (`recv 0`, the reserved id). `try_service_call` and both VM miss-path sites are
+  DELETED. Deviation noted: class-side sends claim pseudo-object 0 (serialized per
+  service) rather than rule 5's lane-only claim. Full dynamism
+  (`doesNotUnderstand:`) remains a separate QUOIN_TODO language feature.
 - Should plain `Worker.send:`/`receive` mailboxes be re-expressed as a cross-isolate
   channel pair once §6 lands (one concept fewer)?
 - Block RETURNS from hosted methods (noticed during slice 6): today they take the
-  hosted-resource path and come back as sub-proxies — is remote `value:` dispatch on
-  a block sub-proxy the semantics we want, or should a portable block ship back
-  symmetrically (needs a reply-side sidecar)?
+  hosted-resource path and come back as sub-proxies. **Answered by manifests
+  (2026-07-14):** remote `value:` on a Block sub-proxy works (the lazy Decl installs
+  Block's selector surface) and is the shipped semantic; symmetric ship-back of
+  portable block returns stays possible later without breaking it.
 - Structured (non-blob) Quoin-to-Quoin stack frames — format, and whether the debugger
   can step across the boundary.
