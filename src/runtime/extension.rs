@@ -288,9 +288,16 @@ pub struct NativeExtension {
     /// on the socket). The transport is a single request/response stream with no request ids,
     /// so a second top-level call while one is live would interleave frames and desync the
     /// connection. A DIFFERENT task's call parks in `call_waiters` and is handed the claim
-    /// FIFO by `ext_end_call`; the SAME task re-entering (through a host block) still errors
-    /// — it can never be woken by a call it is itself blocking. Guarded in `ext_prelude`.
+    /// FIFO by `ext_end_call`. The SAME task re-entering (calling this extension from inside
+    /// a block it is invoking) NESTS instead: the nested call's frames ride the same stream
+    /// strictly LIFO — the extension services the nested `Call` while awaiting its own
+    /// host-op reply — tracked by `depth`. Guarded in `ext_prelude`.
     owner: Option<TaskId>,
+    /// How many conversations the owner task has open on this connection (1 = a plain
+    /// call; >1 = re-entrant nesting). The claim is handed on / released only when the
+    /// OUTERMOST call ends (`depth` back to 0). Capped so mutual host<->extension
+    /// recursion dies loudly instead of exhausting both processes.
+    depth: u32,
     /// Tasks parked waiting for the connection claim, FIFO, each stamped with its
     /// `park_epoch` so a cancelled waiter's ghost entry is skipped on pop — the exact
     /// channel park model (`channel.rs`).
@@ -980,12 +987,10 @@ struct ExtCall {
 
 /// One attempt to claim the connection for the current task.
 enum Claim {
-    /// Claimed — the `ExtCall` context, releases drained.
+    /// Claimed — outermost or nested — with the `ExtCall` context, releases drained.
     Granted(ExtCall),
-    /// The CURRENT task already owns the connection: same-task re-entry (the extension
-    /// re-entering itself through a host block), which can never be queued — the waiter
-    /// would be waiting on the very call it is blocking.
-    ReEntry,
+    /// The owner task tried to nest past [`MAX_CALL_DEPTH`].
+    TooDeep,
     /// Another task's call is in flight; the current task was appended to `call_waiters`.
     Queued,
 }
@@ -1001,13 +1006,21 @@ fn ext_call_ctx(e: &mut NativeExtension) -> ExtCall {
     }
 }
 
+/// The most deeply the owner task may nest conversations on one connection (a host block
+/// calling back into the extension that is invoking it, recursively). Both processes spend
+/// real stack per level; past this, mutual host<->extension recursion is a bug — die loudly
+/// and catchably rather than exhausting either side.
+const MAX_CALL_DEPTH: u32 = 16;
+
 /// Peek at the extension's native state and drain its pending dropped-resource releases (one peek
 /// per call), shared by the generic `call:with:` path and extension-backed-class dispatch. Also
 /// claims the connection for this top-level call: the transport is a single request/response
 /// stream, so one call runs at a time — a concurrent call from ANOTHER task parks FIFO and is
 /// handed the claim when the in-flight call finishes (`ext_end_call`), so `Async.gather:` over
-/// one connection just works; same-task re-entry stays a catchable error. The caller must
-/// release the claim (`ext_end_call`) once the call completes.
+/// one connection just works. The OWNER task re-entering (from inside a block the extension is
+/// invoking) NESTS: its frames ride the same stream strictly LIFO, the extension servicing the
+/// nested call while awaiting its own host-op reply. The caller must release the claim
+/// (`ext_end_call`) once the call completes — nested or not.
 fn ext_prelude<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -1017,25 +1030,32 @@ fn ext_prelude<'gc>(
     let epoch = vm.current_park_epoch();
     let claim = receiver
         .with_native_state_mut::<NativeExtension, _, _>(mc, |e| match e.owner {
-            Some(owner) if owner == me => Claim::ReEntry,
+            Some(owner) if owner == me => {
+                if e.depth >= MAX_CALL_DEPTH {
+                    Claim::TooDeep
+                } else {
+                    e.depth += 1;
+                    Claim::Granted(ext_call_ctx(e))
+                }
+            }
             Some(_) => {
                 e.call_waiters.push_back((me, epoch));
                 Claim::Queued
             }
             None => {
                 e.owner = Some(me);
+                e.depth = 1;
                 Claim::Granted(ext_call_ctx(e))
             }
         })
         .map_err(QuoinError::Other)?;
     match claim {
         Claim::Granted(call) => Ok(call),
-        Claim::ReEntry => Err(QuoinError::Other(
-            "extension call re-entered from within its own call: an extension connection \
-             serves one call at a time, and a call made while servicing this extension's \
-             host-op (e.g. inside a block it is invoking) would wait on itself"
-                .to_string(),
-        )),
+        Claim::TooDeep => Err(QuoinError::Other(format!(
+            "extension call nested {MAX_CALL_DEPTH} levels deep on one connection — \
+             mutual host<->extension recursion? (each level is a live call frame in \
+             both processes)"
+        ))),
         Claim::Queued => {
             // Park until the in-flight call HANDS us the claim (fair FIFO, no re-race
             // with running tasks) — the channel park model verbatim.
@@ -1075,11 +1095,22 @@ fn ext_prelude<'gc>(
     }
 }
 
-/// Release the claim taken by [`ext_prelude`] once a top-level call has finished (whether it
-/// succeeded, errored, or the extension died): hand it to the front LIVE waiter — stale
-/// (cancelled) entries are skipped by park-epoch identity, exactly as in `channel.rs` — or
-/// clear it when no one waits. Never touches state when the extension is gone from the table.
+/// Release the claim taken by [`ext_prelude`] once a call has finished (whether it succeeded,
+/// errored, or the extension died). A NESTED call's end only pops one depth level — the owner
+/// task still has the outer conversation open. The OUTERMOST end hands the claim to the front
+/// LIVE waiter — stale (cancelled) entries are skipped by park-epoch identity, exactly as in
+/// `channel.rs` — or clears it when no one waits. Never touches state when the extension is
+/// gone from the table.
 fn ext_end_call<'gc>(vm: &mut VmState<'gc>, mc: &gc_arena::Mutation<'gc>, receiver: Value<'gc>) {
+    let still_nested = receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+            e.depth = e.depth.saturating_sub(1);
+            e.depth > 0
+        })
+        .unwrap_or(false);
+    if still_nested {
+        return;
+    }
     loop {
         let next = receiver
             .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
@@ -1087,6 +1118,7 @@ fn ext_end_call<'gc>(vm: &mut VmState<'gc>, mc: &gc_arena::Mutation<'gc>, receiv
                     Some(waiter) => {
                         // Tentatively assign; confirmed below iff the waiter is live.
                         e.owner = Some(waiter.0);
+                        e.depth = 1;
                         Some(waiter)
                     }
                     None => {
@@ -1400,6 +1432,7 @@ fn spawn_and_connect<'gc>(
             handle_reap: vm.io.ext_handle_reap.clone(),
             dead: false,
             owner: None,
+            depth: 0,
             call_waiters: VecDeque::new(),
             resource_reap: Rc::new(RefCell::new(Vec::new())),
             namespace,

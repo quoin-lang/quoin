@@ -15,8 +15,13 @@ under **Changed**, with the migration.
   connection FIFO when the in-flight call finishes, so `Async.gather:` over one long-lived
   connection (e.g. an `[ADBC]Connection`) just works. A cancelled waiter leaves the queue
   cleanly, and callers queued behind a dying extension fail fast with the usual catchable
-  error. Same-task re-entry (calling the extension from inside a block it is invoking)
-  still raises — it would wait on the very call it is blocking.
+  error.
+- Extensions (experimental): **re-entrant calls now work** — a Quoin block an extension
+  is invoking may call back into that same extension; the nested call's frames ride the
+  same connection strictly LIFO while the extension services them, bounded by a nesting
+  depth cap (a catchable error past 16 levels). In the Rust SDK a nested call to the
+  outer call's own receiver (or one of its instance arguments) reports "no live instance"
+  (they are taken out for the handler's `&mut`); Python has no such limit.
 
 ## [0.1.1] — 2026-07-13
 

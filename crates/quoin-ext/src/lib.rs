@@ -90,9 +90,21 @@ pub struct Host<'a> {
     arrays: Vec<ArrowArray>,
     /// The structured-value payload passed via `call:with:data:`, if any.
     data: Option<DataValue>,
-    /// The extension's object table (class dispatch only; `None` on the generic `serve` path),
-    /// so [`Host::instance`] can resolve live-instance references nested in data args.
-    objects: Option<&'a ObjectTable>,
+    /// The class-dispatch context (`None` on the generic `serve` path): the registry and the
+    /// object table, so [`Host::instance`] resolves live-instance references AND the wait
+    /// loops can service a NESTED `Call` — the host re-entering this extension from inside
+    /// a block/method it is currently servicing for us (strictly LIFO on the shared stream).
+    ctx: Option<HostCtx<'a>>,
+    /// Host-sent stack segments from FAILED host-ops (a Quoin block this call invoked raised,
+    /// or a nested call failed deeper down) — appended to this call's `remote_stack` when the
+    /// handler propagates the failure, preserving the cross-process interleave in unwind order.
+    nested_error_stacks: Vec<String>,
+}
+
+/// The dispatch context a class extension threads into each call's [`Host`].
+struct HostCtx<'a> {
+    ext: &'a Extension,
+    table: &'a mut ObjectTable,
 }
 
 impl<'a> Host<'a> {
@@ -124,13 +136,15 @@ impl<'a> Host<'a> {
     /// Resolve a live-instance reference nested inside a data tree (a [`DataValue::Resource`]
     /// leaf — e.g. inside a `List`/`Map` method argument, the way the Python SDK hands the live
     /// object directly) to this extension's instance. `None` for a non-`Resource` value, a dead
-    /// or foreign id, a type mismatch, the receiver of the current call (it is taken out of the
-    /// table for the call's duration), or on the generic `serve` path (no object table).
-    pub fn instance<T: 'static>(&self, value: &DataValue) -> Option<&'a T> {
+    /// or foreign id, a type mismatch, the receiver or an instance ARGUMENT of the current call
+    /// (both are taken out of the table for the call's duration), or on the generic `serve`
+    /// path (no object table). The reference borrows `self`, so copy what you need out before
+    /// the next `&mut` host-op.
+    pub fn instance<T: 'static>(&self, value: &DataValue) -> Option<&T> {
         let DataValue::Resource { id, .. } = value else {
             return None;
         };
-        self.objects?.get(*id)?.downcast_ref::<T>()
+        self.ctx.as_ref()?.table.get(*id)?.downcast_ref::<T>()
     }
 
     /// Make a host `String` value and return a (call-local) handle to it.
@@ -193,12 +207,16 @@ impl<'a> Host<'a> {
                 batches: batches.to_vec(),
             }),
         )?;
-        let frame = read_frame(self.stream)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
-        })?;
-        match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
-            Msg::InvokeBlockReturn { results, error } => match error {
-                Some(e) => Err(io::Error::other(e)),
+        match self.read_op_reply()? {
+            Msg::InvokeBlockReturn {
+                results,
+                error,
+                remote_stack,
+            } => match error {
+                Some(e) => {
+                    self.note_remote_stack(remote_stack);
+                    Err(io::Error::other(e))
+                }
                 None => Ok(results),
             },
             other => Err(invalid_data(format!(
@@ -249,12 +267,16 @@ impl<'a> Host<'a> {
             self.stream,
             &quoin_ext_proto::encode(&Msg::ReadHandle { handle }),
         )?;
-        let frame = read_frame(self.stream)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
-        })?;
-        match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
-            Msg::ReadHandleReturn { value, error } => match error {
-                Some(e) => Err(io::Error::other(e)),
+        match self.read_op_reply()? {
+            Msg::ReadHandleReturn {
+                value,
+                error,
+                remote_stack,
+            } => match error {
+                Some(e) => {
+                    self.note_remote_stack(remote_stack);
+                    Err(io::Error::other(e))
+                }
                 None => Ok(value),
             },
             other => Err(invalid_data(format!(
@@ -267,17 +289,89 @@ impl<'a> Host<'a> {
     /// `io::Error`. Returns the reply's `(handle, str)` payload (either may be unset).
     fn host_op(&mut self, msg: &Msg) -> io::Result<(Handle, Option<String>)> {
         write_frame(self.stream, &quoin_ext_proto::encode(msg))?;
-        let frame = read_frame(self.stream)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
-        })?;
-        match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
-            Msg::HostOpReturn { handle, str, error } => match error {
-                Some(e) => Err(io::Error::other(e)),
+        match self.read_op_reply()? {
+            Msg::HostOpReturn {
+                handle,
+                str,
+                error,
+                remote_stack,
+            } => match error {
+                Some(e) => {
+                    self.note_remote_stack(remote_stack);
+                    Err(io::Error::other(e))
+                }
                 None => Ok((handle, str)),
             },
             other => Err(invalid_data(format!(
                 "expected HostOpReturn, got {other:?}"
             ))),
+        }
+    }
+
+    /// Record the host's stack segment from a failed host-op (empty = none) for this call's
+    /// eventual `remote_stack`.
+    fn note_remote_stack(&mut self, segment: String) {
+        if !segment.is_empty() {
+            self.nested_error_stacks.push(segment);
+        }
+    }
+
+    /// Read the reply to a pending host-op. A **nested `Call`** arriving here instead is the
+    /// host RE-ENTERING this extension — a block/method we are servicing called back in —
+    /// so dispatch it and keep waiting: the conversation is a call stack over the socket,
+    /// strictly LIFO, and our reply frame always follows the nested call's completion.
+    fn read_op_reply(&mut self) -> io::Result<Msg> {
+        loop {
+            let frame = read_frame(self.stream)?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
+            })?;
+            let msg = quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)?;
+            let Msg::Call {
+                op,
+                class_name,
+                recv,
+                method_args,
+                releases,
+                ..
+            } = msg
+            else {
+                return Ok(msg);
+            };
+            // Borrow the fields disjointly: the nested dispatch needs the stream AND the
+            // dispatch context at once.
+            let Host { stream, ctx, .. } = self;
+            let reply = match ctx {
+                Some(ctx) => {
+                    // The host batches dropped instances onto every Call, nested ones too.
+                    for rid in &releases {
+                        ctx.table.take(*rid);
+                    }
+                    // A dispatch failure here must ANSWER the nested call (recoverably) —
+                    // propagating would abandon its reply slot and desync the whole
+                    // conversation. Includes the documented Rust limitation: a nested call
+                    // to the outer call's receiver (or an instance argument) is taken out
+                    // of the table and reports "no live instance".
+                    match ctx
+                        .ext
+                        .dispatch(stream, ctx.table, &class_name, &op, recv, &method_args)
+                    {
+                        Ok(reply) => reply,
+                        Err(e) => Msg::CallReturnError {
+                            message: format!("nested extension call failed: {e}"),
+                            remote_stack: String::new(),
+                        },
+                    }
+                }
+                // A generic handler is one closure with no dispatch table to re-enter;
+                // answer the nested call with a recoverable error rather than desyncing.
+                None => Msg::CallReturnError {
+                    message: "nested extension call: this extension's generic handler \
+                              cannot service a re-entrant call"
+                        .to_string(),
+                    remote_stack: String::new(),
+                },
+            };
+            write_frame(stream, &quoin_ext_proto::encode(&reply))?;
         }
     }
 }
@@ -490,7 +584,8 @@ pub fn serve<R: Into<Reply>>(
                         releases,
                         arrays,
                         data,
-                        objects: None,
+                        ctx: None,
+                        nested_error_stacks: Vec::new(),
                     };
                     handler(&mut host, &op, &arg).into()
                 };
@@ -838,19 +933,25 @@ impl Extension {
             .iter()
             .find(|c| c.name == class_name)
             .ok_or_else(|| invalid_data(format!("no extension-backed class '{class_name}'")))?;
-        // Each branch builds its `Host` after the receiver (if any) is taken out of the table:
-        // `Host` holds a shared table borrow (`Host::instance` resolves live-instance references
-        // nested in data args), which must not overlap the `take`'s mutable one.
+        // Each branch TAKES the receiver and the ext-instance arguments out of the table for
+        // the handler's duration: the receiver so its `&mut` can't alias, the arguments so
+        // the table stays free — `Host` holds it `&mut` to service NESTED calls arriving
+        // while the handler waits on a host-op. Consequence: a nested call addressed to the
+        // outer call's receiver (or one of its instance arguments) finds "no live instance".
         if recv == 0 {
             if let Some(ctor) = class.constructors.get(op) {
                 // Class-side: a constructor builds a new instance.
-                let obj = {
-                    let args = resolve_args(method_args, table)?;
-                    let mut host = host_for_call(stream, table);
-                    match ctor(&mut host, &args) {
-                        Ok(o) => o,
-                        Err(message) => return Ok(Msg::CallReturnError { message }),
-                    }
+                let taken = take_arg_instances(table, method_args)?;
+                let (result, nested) = {
+                    let args = resolve_args(method_args, &taken);
+                    let mut host = host_for_call(self, stream, table);
+                    let r = ctor(&mut host, &args);
+                    (r, std::mem::take(&mut host.nested_error_stacks))
+                };
+                reinsert_instances(table, taken);
+                let obj = match result {
+                    Ok(o) => o,
+                    Err(failure) => return Ok(call_error(class_name, op, recv, failure, nested)),
                 };
                 let class_name = self.class_name_of(&*obj);
                 Ok(Msg::CallReturnResource {
@@ -859,14 +960,17 @@ impl Extension {
                 })
             } else if let Some(class_method) = class.class_methods.get(op) {
                 // Class-side selector returning a value (possibly a tree carrying new instances).
-                let result = {
-                    let args = resolve_args(method_args, table)?;
-                    let mut host = host_for_call(stream, table);
-                    class_method(&mut host, &args)
+                let taken = take_arg_instances(table, method_args)?;
+                let (result, nested) = {
+                    let args = resolve_args(method_args, &taken);
+                    let mut host = host_for_call(self, stream, table);
+                    let r = class_method(&mut host, &args);
+                    (r, std::mem::take(&mut host.nested_error_stacks))
                 };
+                reinsert_instances(table, taken);
                 match result {
                     Ok(reply) => Ok(self.finish_reply(reply, table)),
-                    Err(message) => Ok(Msg::CallReturnError { message }),
+                    Err(failure) => Ok(call_error(class_name, op, recv, failure, nested)),
                 }
             } else {
                 Err(invalid_data(format!(
@@ -874,35 +978,52 @@ impl Extension {
                 )))
             }
         } else if let Some(method) = class.methods.get(op) {
-            // Take the receiver out of the table so its `&mut` can't alias an ext-instance argument
-            // resolved from the same table, then put it back under its id — even if the handler
-            // errors, so a recoverable error (e.g. a SQL error) leaves the instance usable.
+            // Reinserted even when the handler errors, so a recoverable error (e.g. a SQL
+            // error) leaves the instance usable.
             let mut recv_box = table
                 .take(recv)
                 .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
-            let result = {
-                let args = resolve_args(method_args, table)?;
-                let mut host = host_for_call(stream, table);
-                method(recv_box.as_mut(), &mut host, &args)
+            let taken = match take_arg_instances(table, method_args) {
+                Ok(t) => t,
+                Err(e) => {
+                    table.reinsert(recv, recv_box);
+                    return Err(e);
+                }
             };
+            let (result, nested) = {
+                let args = resolve_args(method_args, &taken);
+                let mut host = host_for_call(self, stream, table);
+                let r = method(recv_box.as_mut(), &mut host, &args);
+                (r, std::mem::take(&mut host.nested_error_stacks))
+            };
+            reinsert_instances(table, taken);
             table.reinsert(recv, recv_box);
             match result {
                 Ok(reply) => Ok(self.finish_reply(reply, table)),
-                Err(message) => Ok(Msg::CallReturnError { message }),
+                Err(failure) => Ok(call_error(class_name, op, recv, failure, nested)),
             }
         } else if let Some(makes) = class.makes.get(op) {
             let mut recv_box = table
                 .take(recv)
                 .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
-            let result = {
-                let args = resolve_args(method_args, table)?;
-                let mut host = host_for_call(stream, table);
-                makes(recv_box.as_mut(), &mut host, &args)
+            let taken = match take_arg_instances(table, method_args) {
+                Ok(t) => t,
+                Err(e) => {
+                    table.reinsert(recv, recv_box);
+                    return Err(e);
+                }
             };
+            let (result, nested) = {
+                let args = resolve_args(method_args, &taken);
+                let mut host = host_for_call(self, stream, table);
+                let r = makes(recv_box.as_mut(), &mut host, &args);
+                (r, std::mem::take(&mut host.nested_error_stacks))
+            };
+            reinsert_instances(table, taken);
             table.reinsert(recv, recv_box);
             let new_obj = match result {
                 Ok(o) => o,
-                Err(message) => return Ok(Msg::CallReturnError { message }),
+                Err(failure) => return Ok(call_error(class_name, op, recv, failure, nested)),
             };
             let class_name = self.class_name_of(&*new_obj);
             Ok(Msg::CallReturnResource {
@@ -990,9 +1111,13 @@ impl Extension {
 }
 
 /// Build the per-call [`Host`] for a class dispatch: the class path carries everything in
-/// `method_args`, so the legacy arg vectors are empty, and the shared table borrow backs
-/// [`Host::instance`].
-fn host_for_call<'a>(stream: &'a mut UnixStream, table: &'a ObjectTable) -> Host<'a> {
+/// `method_args`, so the legacy arg vectors are empty, and the dispatch context backs
+/// [`Host::instance`] and nested-`Call` servicing (`read_op_reply`).
+fn host_for_call<'a>(
+    ext: &'a Extension,
+    stream: &'a mut UnixStream,
+    table: &'a mut ObjectTable,
+) -> Host<'a> {
     Host {
         stream,
         handles: Vec::new(),
@@ -1000,26 +1125,97 @@ fn host_for_call<'a>(stream: &'a mut UnixStream, table: &'a ObjectTable) -> Host
         releases: Vec::new(),
         arrays: Vec::new(),
         data: None,
-        objects: Some(table),
+        ctx: Some(HostCtx { ext, table }),
+        nested_error_stacks: Vec::new(),
     }
 }
 
-/// Resolve the wire arguments to the handler-facing [`Arg`]s: data passes through, an ext-instance
-/// id is looked up to a live object (a shared borrow of the table), and a handle passes through.
+/// Compose a failed call's `CallReturnError`: this extension's stack segment — the
+/// dispatch frame line, then the error's `caused by:` chain — followed by any host
+/// segments from failed host-ops (a Quoin block that raised), in unwind order. The blob
+/// is OPAQUE to the host: it displays it fenced, never parses it (PROTOCOL.md §Errors).
+fn call_error(
+    class_name: &str,
+    op: &str,
+    recv: u64,
+    failure: HandlerFailure,
+    nested: Vec<String>,
+) -> Msg {
+    let mut remote_stack = if recv == 0 {
+        format!("in {class_name}.{op}: {}\n", failure.message)
+    } else {
+        format!(
+            "in {class_name}#{op} (instance {recv}): {}\n",
+            failure.message
+        )
+    };
+    remote_stack.push_str(&failure.remote_stack);
+    for segment in nested {
+        remote_stack.push_str(&segment);
+        if !remote_stack.ends_with('\n') {
+            remote_stack.push('\n');
+        }
+    }
+    Msg::CallReturnError {
+        message: failure.message,
+        remote_stack,
+    }
+}
+
+/// TAKE each ext-instance argument out of the table for the call's duration (duplicates
+/// share one entry) — like the receiver, so the table stays free for a NESTED dispatch
+/// while the handler runs. A bad id reinserts everything taken so far before erroring
+/// (a protocol bug must not eat live instances).
+fn take_arg_instances(
+    table: &mut ObjectTable,
+    method_args: &[quoin_ext_proto::Arg],
+) -> io::Result<Vec<(u64, Box<dyn Any>)>> {
+    let mut taken: Vec<(u64, Box<dyn Any>)> = Vec::new();
+    for arg in method_args {
+        if let quoin_ext_proto::Arg::Resource(id) = arg {
+            if taken.iter().any(|(t, _)| t == id) {
+                continue;
+            }
+            match table.take(*id) {
+                Some(obj) => taken.push((*id, obj)),
+                None => {
+                    let message = format!("argument references no live instance {id}");
+                    reinsert_instances(table, taken);
+                    return Err(invalid_data(message));
+                }
+            }
+        }
+    }
+    Ok(taken)
+}
+
+/// Put every taken argument instance back under its id once the handler is done.
+fn reinsert_instances(table: &mut ObjectTable, taken: Vec<(u64, Box<dyn Any>)>) {
+    for (id, obj) in taken {
+        table.reinsert(id, obj);
+    }
+}
+
+/// Resolve the wire arguments to the handler-facing [`Arg`]s: data passes through, an
+/// ext-instance id resolves into the TAKEN set (see [`take_arg_instances`] — infallible
+/// after a successful take), and a handle passes through.
 fn resolve_args<'t>(
     method_args: &[quoin_ext_proto::Arg],
-    table: &'t ObjectTable,
-) -> io::Result<Vec<Arg<'t>>> {
+    taken: &'t [(u64, Box<dyn Any>)],
+) -> Vec<Arg<'t>> {
     method_args
         .iter()
         .map(|a| match a {
-            quoin_ext_proto::Arg::Data(d) => Ok(Arg::Data(d.clone())),
-            quoin_ext_proto::Arg::Resource(id) => table
-                .get(*id)
-                .map(Arg::Object)
-                .ok_or_else(|| invalid_data(format!("argument references no live instance {id}"))),
-            quoin_ext_proto::Arg::Handle(h) => Ok(Arg::Handle(*h)),
-            quoin_ext_proto::Arg::Array(a) => Ok(Arg::Array(a.clone())),
+            quoin_ext_proto::Arg::Data(d) => Arg::Data(d.clone()),
+            quoin_ext_proto::Arg::Resource(id) => {
+                let (_, obj) = taken
+                    .iter()
+                    .find(|(t, _)| t == id)
+                    .expect("resolve_args: id vanished from the taken set");
+                Arg::Object(obj.as_ref())
+            }
+            quoin_ext_proto::Arg::Handle(h) => Arg::Handle(*h),
+            quoin_ext_proto::Arg::Array(a) => Arg::Array(a.clone()),
         })
         .collect()
 }

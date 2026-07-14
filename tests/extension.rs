@@ -204,11 +204,43 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 }
 
 #[test]
-fn extension_same_task_reentry_still_errors() {
-    // Only CROSS-task contention queues. The same task re-entering the extension from
-    // within its own call (here: inside a block the extension is invoking via a host-op)
-    // can never be queued — it would wait on the very call it is blocking — so it stays
-    // a catchable error, and the extension survives it.
+fn extension_nested_calls_service() {
+    // Re-entrant host-op servicing: a block the extension is invoking may call BACK into
+    // the same extension — the nested call's frames ride the same stream strictly LIFO,
+    // the extension servicing them while awaiting its own host-op reply. Cross-task
+    // contention still queues (fair queuing); this is the same-task NESTING path.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+var va = Vector.ofFloats:#( 1.0 2.0 3.0 );
+var vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
+
+"* a nested INSTANCE call (to a different instance than the outer receiver)
+((va.map:{{ |x| vb.sum }}).sum == 45.0).else:{{ ok = false; 'FAIL nested instance'.print }};
+
+"* a nested CLASS-SIDE call
+((va.map:{{ |x| x + Vector.dtypeName.length }}).sum == 27.0)
+    .else:{{ ok = false; 'FAIL nested class-side'.print }};
+
+"* Rust-SDK limitation, pinned: a nested call to the OUTER call's own receiver finds
+"* "no live instance" (it is taken out for the handler's &mut) — recoverable, and the
+"* receiver comes back intact.
+var caught = {{ va.map:{{ |x| va.sum }} }}.catch:{{ |ex| ex.message }};
+(caught.contains?:'no live instance').else:{{ ok = false; ('FAIL msg: ' + caught.s).print }};
+(va.sum == 6.0).else:{{ ok = false; 'FAIL: receiver lost after failed nest'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_nested_test.qn", &script);
+}
+
+#[test]
+fn extension_remote_stack_single_hop() {
+    // A failed extension call carries the extension's opaque stack blob: `ex.remoteStack`
+    // exposes it to Quoin code (nil for ordinary, non-extension errors).
     let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
     let script = format!(
         r#"
@@ -216,16 +248,85 @@ var ok = true;
 var e = Extension.spawn:'{ext_bin}';
 var v = Vector.ofFloats:#( 1.0 2.0 3.0 );
 
-var caught = {{ v.map:{{ |x| v.sum }} }}.catch:{{ |ex| ex.message }};
-(caught.contains?:'re-entered').else:{{ ok = false; ('FAIL msg: ' + caught.s).print }};
+var blob = {{ v.at:9 }}.catch:{{ |ex| ex.remoteStack }};
+(blob.contains?:'in Vector#at: (instance').else:{{ ok = false; ('FAIL blob: ' + blob.s).print }};
 
-"* ...and the extension is still alive and consistent.
-(v.sum == 6.0).else:{{ ok = false; 'FAIL: extension did not survive'.print }};
+"* an ordinary Quoin error has no remote stack
+var plain = {{ Error.throw:'plain' }}.catch:{{ |ex| ex.remoteStack }};
+(plain == nil).else:{{ ok = false; 'FAIL: plain error grew a remoteStack'.print }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
-    assert_script_passes("qn_ext_reentry_test.qn", &script);
+    assert_script_passes("qn_ext_rstack_test.qn", &script);
+}
+
+#[test]
+fn extension_remote_stack_interleaves() {
+    // A failure three layers deep — outer ext method -> Quoin block -> nested ext call —
+    // accumulates one blob with each side's segment in unwind order: the outer extension
+    // frame, the host's segment for the failed block, and the inner extension frame.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+var va = Vector.ofFloats:#( 1.0 2.0 3.0 );
+var vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
+
+var blob = {{ va.map:{{ |x| vb.at:99 }} }}.catch:{{ |ex| ex.remoteStack }};
+(blob.contains?:'in Vector#map:').else:{{ ok = false; 'FAIL: outer ext frame missing'.print }};
+(blob.contains?:'--- Quoin (host) ---').else:{{ ok = false; 'FAIL: host segment missing'.print }};
+(blob.contains?:'in Vector#at:').else:{{ ok = false; 'FAIL: inner ext frame missing'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_rstack_nest_test.qn", &script);
+}
+
+#[test]
+fn extension_remote_stack_prints_fenced() {
+    // The default uncaught-error printer inserts the blob, fenced, between the failing
+    // line and the Quoin trace — the interleaved display, with no handler code at all.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+Extension.spawn:'{ext_bin}';
+var v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+v.at:9;
+"#
+    );
+    let (_, diag) = run_script_once("qn_ext_rstack_print_test.qn", &script);
+    assert!(
+        diag.contains("--- in extension ---") && diag.contains("in Vector#at: (instance"),
+        "uncaught printer did not fence the remote stack:\n{diag}"
+    );
+}
+
+#[test]
+fn extension_nested_calls_depth_capped() {
+    // Mutual host<->extension recursion dies loudly and catchably at the connection depth
+    // cap — both processes spend real stack per level — and the extension survives.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+
+"* class-side recursion is receiver-less, so nothing stops it before the cap
+var rec = nil;
+rec = {{ |x| Vector.applying:rec }};
+var caught = {{ Vector.applying:rec }}.catch:{{ |ex| ex.message }};
+(caught.contains?:'16 levels').else:{{ ok = false; ('FAIL msg: ' + caught.s).print }};
+
+"* ...and the connection survived the refused nest.
+((Vector.dtypeName) == 'float64').else:{{ ok = false; 'FAIL: extension did not survive'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_depth_test.qn", &script);
 }
 
 #[test]
@@ -779,6 +880,24 @@ var basis = Vector.basis:3;
 
 "* inbound instance refs: live Vectors nested in a data argument resolve extension-side
 ((Vector.sumOf:#( va vb )) == 21.0).else:{{ ok = false }};
+
+"* re-entrant nesting: a block the extension invokes calls back in — including to the
+"* OUTER receiver itself, which works in Python (no take/reinsert; the Rust SDK's
+"* same-receiver limitation is pinned in extension_nested_calls_service)
+((va.map:{{ |x| vb.sum }}).sum == 45.0).else:{{ ok = false; 'FAIL nested instance'.print }};
+((va.map:{{ |x| va.sum }}).sum == 18.0).else:{{ ok = false; 'FAIL nested self'.print }};
+
+"* mutual recursion dies catchably at the host's connection depth cap
+var rec = nil;
+rec = {{ |x| Vector.applying:rec }};
+var deep = {{ Vector.applying:rec }}.catch:{{ |ex| ex.message }};
+(deep.contains?:'16 levels').else:{{ ok = false; ('FAIL depth: ' + deep.s).print }};
+((Vector.dtypeName) == 'float64').else:{{ ok = false; 'FAIL: did not survive depth cap'.print }};
+
+"* the Python SDK's remoteStack is its real traceback
+var blob = {{ va.at:9 }}.catch:{{ |ex| ex.remoteStack }};
+((blob.contains?:'Traceback') && (blob.contains?:'IndexError'))
+    .else:{{ ok = false; ('FAIL py blob: ' + blob.s).print }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#

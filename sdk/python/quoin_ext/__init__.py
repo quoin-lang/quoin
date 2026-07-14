@@ -321,13 +321,22 @@ class Host:
     issues re-entrant host-ops over the connection (each a synchronous round-trip the host
     services while parked on the reply). Mirrors the Rust `Host`."""
 
-    def __init__(self, conn, handles, resources, releases, arrays, data):
+    def __init__(self, conn, handles, resources, releases, arrays, data, nested=None):
         self._conn = conn
         self._handles = handles
         self._resources = resources
         self._releases = releases
         self._arrays = arrays
         self._data = data
+        # Services a nested ``Call`` (raw frame -> encoded reply) arriving while a host-op
+        # awaits its reply — the host re-entering this extension from inside a block/method
+        # it is servicing for us. ``None`` (the generic path) answers it with a recoverable
+        # error instead. The conversation is a call stack over the socket, strictly LIFO.
+        self._nested = nested
+        # Host-sent stack segments from FAILED host-ops (a Quoin block that raised),
+        # appended to this call's remote_stack when the failure propagates — the
+        # cross-process interleave, in unwind order.
+        self.error_stacks = []
 
     # --- the call's arguments ---
     def handles(self):
@@ -401,24 +410,46 @@ class Host:
         reply = self._round_trip([_T_READ_HANDLE, handle])
         value, error = _fields(reply, _T_READ_HANDLE_RETURN, 2, "ReadHandleReturn")
         if error is not None:
+            self._note_remote_stack(reply, 3)
             raise RuntimeError(error)
         return value
 
     # --- internals ---
     def _round_trip(self, fields):
         write_frame(self._conn, _pack(fields))
-        reply = read_frame(self._conn)
-        if reply is None:
-            raise EOFError("extension: host closed during a host-op")
-        return _unpack(reply)
+        while True:
+            reply = read_frame(self._conn)
+            if reply is None:
+                raise EOFError("extension: host closed during a host-op")
+            msg = _unpack(reply)
+            if not (msg and msg[0] == _T_CALL):
+                return msg
+            # A nested Call: service it (or refuse it recoverably) and keep waiting for
+            # our own reply — it always follows the nested call's completion (LIFO).
+            if self._nested is None:
+                write_frame(
+                    self._conn,
+                    _encode_call_return_error(
+                        "nested extension call: this extension's generic handler "
+                        "cannot service a re-entrant call"
+                    ),
+                )
+            else:
+                write_frame(self._conn, self._nested(reply))
 
     def _host_op(self, fields):
-        handle, s, error = _fields(
-            self._round_trip(fields), _T_HOST_OP_RETURN, 3, "HostOpReturn"
-        )
+        reply = self._round_trip(fields)
+        handle, s, error = _fields(reply, _T_HOST_OP_RETURN, 3, "HostOpReturn")
         if error is not None:
+            self._note_remote_stack(reply, 4)
             raise RuntimeError(error)
         return handle, s
+
+    def _note_remote_stack(self, reply, index):
+        """Record the appended host stack segment from a failed host-op reply, when the host
+        is new enough to send one (append-only field evolution)."""
+        if len(reply) > index and reply[index]:
+            self.error_stacks.append(reply[index])
 
 
 def serve(path, handler):
@@ -516,8 +547,12 @@ class _HostBlock:
     to that value over the socket, returning the result as a native Python value — so a handler can
     treat it like an ordinary function (e.g. ``[block(x) for x in self.data]``)."""
 
-    def __init__(self, conn, handle):
-        self._host = Host(conn, [], [], [], [], None)
+    def __init__(self, conn, handle, nested=None, sink=None):
+        self._host = Host(conn, [], [], [], [], None, nested=nested)
+        if sink is not None:
+            # Share the per-call collector: a failed application's host segment must reach
+            # the DISPATCH that reports the failure, not die with this block wrapper.
+            self._host.error_stacks = sink
         self._handle = handle
 
     def __call__(self, value):
@@ -618,7 +653,7 @@ class Extension:
                 return reg.name
         return ""
 
-    def _resolve_args(self, raw_args, table, conn):
+    def _resolve_args(self, raw_args, table, conn, nested=None, sink=None):
         """Resolve the tagged wire args to native Python values: data passes through (any live-
         instance references inside were already resolved by the table-aware unpack), an
         ext-instance id becomes the live instance, an ``Array`` stays an :class:`ArrowArray`, and
@@ -634,7 +669,7 @@ class Extension:
                     raise ValueError(f"argument references no live instance {val}")
                 out.append(obj)
             else:  # handle
-                out.append(_HostBlock(conn, val))
+                out.append(_HostBlock(conn, val, nested=nested, sink=sink))
         return out
 
     def _dispatch(self, conn, msg, table, registered_types):
@@ -647,7 +682,26 @@ class Extension:
         reg = self._classes.get(class_name)
         if reg is None:
             raise ValueError(f"no extension-backed class '{class_name}'")
-        args = self._resolve_args(raw_args, table, conn)
+        # Blocks carry the nested-call servicer, so a Quoin block this extension invokes
+        # may call back into it (re-entrancy): the nested Call is dispatched right here,
+        # against the same table, while the block application awaits its result.
+        def nested(frame):
+            return self._dispatch(
+                conn, self._unpack_frame(table, frame), table, registered_types
+            )
+
+        # Host-sent stack segments from failed block applications land here (shared with
+        # every _HostBlock this call receives), for the cross-process blob on failure.
+        collector = []
+
+        def failure(exc):
+            header = (
+                f"in {class_name}.{op}\n" if recv == 0 else f"in {class_name}#{op} (instance {recv})\n"
+            )
+            remote = header + traceback.format_exc() + "".join(collector)
+            return _encode_call_return_error(str(exc), remote)
+
+        args = self._resolve_args(raw_args, table, conn, nested=nested, sink=collector)
         if recv == 0:
             # Class-side: usually a constructor building a new instance.
             ctor = reg.constructors.get(op)
