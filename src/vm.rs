@@ -492,6 +492,11 @@ pub struct Io {
             Vec<std::rc::Rc<std::cell::RefCell<crate::runtime::extension::BoundaryStats>>>,
         >,
     >,
+    /// Claim state, one entry per hosted-service peer (`ACTOR_OBJECTS.md`
+    /// §5.1), registered at host and read by `VM.claims` and the cross-peer
+    /// deadlock walk. Entries outlive their peer — counters are the
+    /// post-mortem.
+    pub claim_peers: crate::runtime::claims::ClaimRegistry,
 }
 
 /// Per-instruction instrumentation hooks, grouped out of `VmState`. Both `None` on a normal run, so
@@ -870,6 +875,7 @@ impl<'gc> VmState<'gc> {
                 ext_handle_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 child_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 ext_stats: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                claim_peers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             },
             instrumentation: Instrumentation {
                 debug: None,

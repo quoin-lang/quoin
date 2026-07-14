@@ -332,6 +332,35 @@ moves from connection to resource id — the DB story cashes out here.
 `serviceStop` decision: stop-flag + drain — refuse new top-level sends immediately,
 wait for in-flight conversations to finish, then stop each lane and join.
 
+**5a AS BUILT (2026-07-14).** `src/runtime/claims.rs`: the frozen rules as a
+scheduler-agnostic state machine (decisions in, wakes out — `try_acquire` /
+`enqueue` / `end_call` / `retract` / `request_drain`), unit-tested against the
+whole §5.1 deadlock list plus ghost-skipping, stale-edge filtering, and drain; one
+`PeerClaims` per service in `vm.io.claim_peers`. Two mechanics beyond the frozen
+text, discovered in construction: (a) `try_acquire` returns `WouldQueue` WITHOUT
+committing, the caller runs the cycle walk un-borrowed, then `enqueue`s — no park
+separates them, so the decision cannot go stale (and the walk can read every peer
+without a RefCell double-borrow); (b) a cancelled-but-unretracted waiter's
+`parked_on` entry could fabricate a false cycle, so edges carry the park epoch and
+the walk (like grant handoff) validates liveness; the cancel path `retract`s
+explicitly. Wiring: `service_call` claims jointly (park = the `ext_prelude`
+ChannelPark shape; handoff = `Wake::ServiceClaim` carrying the lane; verified
+against wake-log record/replay under lane contention), nested sends claim
+object-only; the one-token serializer and the 4.5 single-`active` record are gone
+(per-task `convs` map). A lane = one worker serve fiber; all fibers consume ONE
+MPMC dispatch channel, so parent-side lanes are pure counting tokens
+(`Worker.hostRoot:` + N× `Worker.hostServeLane` via a synthesized gather; stop
+sends one OP_STOP per lane after drain). Thread services stamp `handler_micros`
+through a shared atomic on `DispatchReq` and every call feeds `VM.boundaryStats`
+(process handler stays 0 until the pumps carry `ReplyMeta` — 5b). Observability
+shipped as decided: `VM.claims` (lanes, per-object owner/depth/queue/reservation,
+the live waits-for edges, counters incl. deadlocks-detected) and
+`VM.claimsReport` (contention-sorted, longest live wait-chain called out).
+End-to-end tests ride the 4.5 callbacks: lanes overlap, exact per-object totals on
+4 lanes, no head-of-line blocking, nested-rides-bound-lane at N=1, and the
+mutual-call cycle raising catchably at the closing task while the other call
+completes and the service survives.
+
 ## 6. Cross-isolate channels (CSP across the boundary)
 
 A channel endpoint becomes portable to a Quoin peer. Design, per the seam analysis:
@@ -489,7 +518,8 @@ injection wrapper, which feeds recorded results instead of re-performing.
    5a = shared claim module + unit-tested discipline + thread workers
    (`host:class:lanes:`) + claim observability (`VM.claims`/`VM.claimsReport`),
    5b = process workers (N sockets), 5c = extensions (manifest `lanes`, SDK
-   threading, per-resource claims).
+   threading, per-resource claims). **5a DONE (2026-07-14)** — see §5.1's as-built
+   note; the one-token serializer is gone.
 6. **Portable-block arguments** for Quoin peers (thread first; process blocked on
    source-shipping and falls back to handles). v1 DONE (2026-07-14): the ship path
    for thread backing — snapshot at the encode seam, `DispatchReq.blocks` sidecar,

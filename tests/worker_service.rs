@@ -209,9 +209,17 @@ fn service_hosts_returned_objects_process() {
 /// blocks refuse at the encode seam (before the token); a block whose
 /// captures reference a global the worker lacks errors clearly at rebuild.
 const RUNNER_UNIT: &str = r#"
-Runner <- { |@stash|
-    init -> { @stash = nil };
+Runner <- { |@stash @tally|
+    init -> { @stash = nil; @tally = 0 };
     double: -> { |n| n * 2 };
+    slowDouble: -> { |n| Async.sleep:300; n * 2 };
+    mate -> { Runner.new };
+    tally: -> { |n|
+        var v = @tally;
+        Async.sleep:5;
+        @tally = v + n;
+        @tally
+    };
     apply:to: -> { |blk n| blk.value:n };
     sumOver:with: -> { |items blk|
         var t = 0;
@@ -342,4 +350,111 @@ r.serviceStop;
 ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
     assert_service_script_passes("block_args_proc", script, &[("runner.qn", RUNNER_UNIT)]);
+}
+
+/// Per-object mailboxes + lanes (ACTOR_OBJECTS.md §5.1): calls to DIFFERENT
+/// objects of one service overlap up to the lane count; calls to ONE object
+/// still serialize exactly (its mailbox); a hot object's queue never blocks
+/// the peer's other objects; and the claim shapes are visible in `VM.claims`.
+#[test]
+fn service_lanes_overlap_and_serialize() {
+    let script = r#"
+var ok = true;
+var r = WorkerService.host:'@runner.qn@' class:'Runner' lanes:4;
+var m = r.mate;
+
+"* two lanes genuinely overlap: a slow call on one object does not delay a
+"* fast call on another (with one lane the fast call would queue behind it)
+var order = List.new;
+var slow = Task.spawn:{ r.slowDouble:5; order.add:'slow' };
+Async.sleep:60;
+m.double:3;
+order.add:'fast';
+slow.join;
+((order.at:0) == 'fast').else:{ ok = false; ('FAIL order: ' + order.s).print };
+
+"* one object's mailbox stays exact under concurrent callers on 4 lanes:
+"* tally: reads, parks, writes — interleaving would lose updates
+Async.gather:#(
+    { m.tally:1 } { m.tally:1 } { m.tally:1 }
+    { m.tally:1 } { m.tally:1 } { m.tally:1 }
+);
+((m.tally:0) == 6).else:{ ok = false; 'FAIL: tally'.print };
+
+"* the hot-object queue never pinned a lane: while callers queue on one
+"* object, another object answers immediately (bounded by its own work)
+var hot = r.mate;
+var queued = Task.spawn:{ Async.gather:#(
+    { hot.slowDouble:1 } { hot.slowDouble:1 } { hot.slowDouble:1 }
+) };
+Async.sleep:60;
+((m.double:2) == 4).else:{ ok = false; 'FAIL: HOL'.print };
+
+"* the claim shapes are observable while the hot object is contended
+var claims = VM.claims;
+(claims.count >= 1).else:{ ok = false; 'FAIL: claims empty'.print };
+var report = VM.claimsReport;
+(report.contains?:'svc:').else:{ ok = false; ('FAIL report: ' + report).print };
+queued.join;
+
+"* contention was counted
+var contended = ((VM.claims.at:0).at:'stats').at:'contended';
+(contended >= 1).else:{ ok = false; 'FAIL: no contention counted'.print };
+
+r.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("lanes", script, &[("runner.qn", RUNNER_UNIT)]);
+}
+
+/// §5.1 rule 3, end to end: a nested send (a callback calling back into
+/// another object of the same worker) rides its bound lane — with ONE lane,
+/// this deadlocks under any discipline where nested calls wait for lanes.
+#[test]
+fn service_nested_rides_bound_lane() {
+    let script = r#"
+var ok = true;
+var r = WorkerService.host:'@runner.qn@' class:'Runner';
+var m = r.mate;
+((r.apply:{ |n| m.double:n } to:9) == 18)
+    .else:{ ok = false; 'FAIL: nested cross-object'.print };
+r.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("nested_lane", script, &[("runner.qn", RUNNER_UNIT)]);
+}
+
+/// §5.1 rule 6, end to end: two tasks whose callbacks synchronously call
+/// each other's held objects — the cycle raises catchably at the task that
+/// closes it; the other call completes; the service survives.
+#[test]
+fn service_mutual_call_deadlock_detected() {
+    let script = r#"
+var ok = true;
+var r = WorkerService.host:'@runner.qn@' class:'Runner' lanes:2;
+var a = r.mate;
+var b = r.mate;
+
+var ta = Task.spawn:{ { (a.apply:{ |n| Async.sleep:80; b.double:n } to:1).s }.catch:{ |e| e.s } };
+var tb = Task.spawn:{ { (b.apply:{ |n| Async.sleep:80; a.double:n } to:1).s }.catch:{ |e| e.s } };
+var oa = ta.join;
+var ob = tb.join;
+
+"* exactly one side closed the cycle and got the catchable deadlock error;
+"* the other completed normally once the loser unwound
+var died = 0;
+(oa.contains?:'deadlock').if:{ died = died + 1 };
+(ob.contains?:'deadlock').if:{ died = died + 1 };
+(died == 1).else:{ ok = false; ('FAIL died=' + died.s + ' oa=' + oa + ' ob=' + ob).print };
+((oa == '2') || (ob == '2')).else:{ ok = false; ('FAIL winner: ' + oa + ' / ' + ob).print };
+
+"* the detection was counted, and the service still answers
+var dl = ((VM.claims.at:0).at:'stats').at:'deadlocks';
+(dl == 1).else:{ ok = false; ('FAIL dl=' + dl.s).print };
+((a.double:4) == 8).else:{ ok = false; 'FAIL: unusable after deadlock'.print };
+
+r.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("deadlock", script, &[("runner.qn", RUNNER_UNIT)]);
 }

@@ -69,22 +69,30 @@ fn spawn_worker_with(
     }
 }
 
-/// The hosting line appended to a hosted unit's source: `Worker.hostServe:`
-/// (src/runtime/worker.rs) instantiates the class, roots it in the worker's
-/// hosted-object table, reports ready, and serves peer-protocol `Call`
-/// dispatches from the dispatch lane — one at a time, actor-style — until
-/// the reserved stop op or the lane closing ends it.
-const SERVICE_LOOP_QN: &str = "\nWorker.hostServe:'@CLASS@';\n";
+/// Synthesize the hosting lines appended to a hosted unit's source
+/// (src/runtime/worker.rs): `Worker.hostRoot:` instantiates the class, roots
+/// it in the worker's hosted-object table, and reports ready; then a gather
+/// of `Worker.hostServeLane` thunks serves peer-protocol `Call` dispatches —
+/// one fiber per lane, all consuming the shared dispatch channel — until the
+/// reserved stop op (one per lane) or the lane closing ends them
+/// (ACTOR_OBJECTS.md §5.1).
+fn service_loop_qn(class_name: &str, lanes: u32) -> String {
+    let thunks = "{ Worker.hostServeLane } ".repeat(lanes.max(1) as usize);
+    format!("\nWorker.hostRoot:'{class_name}';\nAsync.gather:#( {thunks});\n")
+}
 
 /// Spawn a SERVICE worker: the unit at `path` (which defines `class_name`)
-/// plus the generic serve loop, compiled as one program.
-pub fn spawn_worker_service(path: String, class_name: String) -> WorkerChannels {
-    spawn_worker_with(move |link| run_worker_service(&path, &class_name, link))
+/// plus the generic serve loop, compiled as one program. `lanes` fibers serve
+/// concurrently (the parent's claim machinery bounds in-flight conversations
+/// to the same number).
+pub fn spawn_worker_service(path: String, class_name: String, lanes: u32) -> WorkerChannels {
+    spawn_worker_with(move |link| run_worker_service(&path, &class_name, lanes, link))
 }
 
 pub(crate) fn run_worker_service(
     path: &str,
     class_name: &str,
+    lanes: u32,
     link: WorkerLink,
 ) -> Result<WireData, String> {
     // The class name is interpolated into synthesized source — insist on a
@@ -102,11 +110,7 @@ pub(crate) fn run_worker_service(
     }
     let unit_source = std::fs::read_to_string(PathBuf::from(path))
         .map_err(|e| format!("service unit {path}: {e}"))?;
-    let source = format!(
-        "{unit_source}
-{}",
-        SERVICE_LOOP_QN.replace("@CLASS@", class_name)
-    );
+    let source = format!("{unit_source}\n{}", service_loop_qn(class_name, lanes));
     run_worker_source(path, &source, link)
 }
 
@@ -705,6 +709,7 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
                         blocks: Vec::new(),
                         reply: reply_tx,
                         hostops: hostop_rx,
+                        handler_micros: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                     })
                     .is_err()
                 {
@@ -832,7 +837,7 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
         process: true,
     };
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match service {
-        Some(class) => run_worker_service(unit, class, link),
+        Some(class) => run_worker_service(unit, class, 1, link),
         None => run_worker_unit(unit, link),
     }))
     .unwrap_or_else(|p| {

@@ -27,11 +27,16 @@
 //! where they travel as live references (`Arg::Resource`). A dropped proxy's id
 //! is reaped and flushed on the next call (`Call.releases`).
 //!
-//! SERIALIZATION: the service processes one call at a time by construction (one
-//! serve loop), and callers serialize on a one-token internal channel — take
-//! the token (parks fairly), dispatch, park for the terminal, return the token.
-//! The per-object claim machinery (ACTOR_OBJECTS.md §5) replaces this token in
-//! the mailboxes+lanes slice.
+//! SERIALIZATION — per-object mailboxes + lanes (ACTOR_OBJECTS.md §5.1): a
+//! top-level send acquires (its object's claim, a lane) JOINTLY and
+//! atomically via the shared `PeerClaims` state machine (`claims.rs`) — sends
+//! to one object serialize FIFO (the mailbox), sends to different objects
+//! overlap up to `lanes:` (each lane is a worker serve fiber). A queued
+//! caller holds nothing while it waits; a nested send rides its bound lane
+//! and waits only for objects; every remaining deadlock is an object-claim
+//! cycle, detected at park time and raised catchably at the task that closes
+//! it. Shapes are observable via `VM.claims` / `VM.claimsReport`, and calls
+//! feed `VM.boundaryStats` rows beside the extensions'.
 //!
 //! CONVERSATIONS (host-ops, §3a): a call is a strictly LIFO conversation, not a
 //! single round trip. While the caller pumps toward its terminal, the worker
@@ -51,34 +56,47 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc as StdArc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use gc_arena::Collect;
 use gc_arena::collect::Trace;
 use quoin_ext_proto::{Arg, DataValue as WireData, Msg};
 
 use crate::error::QuoinError;
+use crate::fiber::YieldReason;
 use crate::io_backend::{IoRequest, IoResult};
-use crate::runtime::extension::{truncate_blob, value_to_wire, wire_to_value};
+use crate::runtime::claims::{Acquire, PeerClaims, WaitKind, would_deadlock};
+use crate::runtime::extension::{
+    BoundaryStats, record_boundary_row, truncate_blob, value_to_wire, wire_to_value,
+};
 use crate::runtime::worker::block_parts;
 use crate::symbol::Symbol;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
+use crate::vm_scheduler::{TaskId, Wake};
 use crate::worker::{
-    DispatchReq, OP_STOP, PortableBlock, WorkerMsg, note_message, rebuild_portable_value,
-    snapshot_block, spawn_worker_service,
+    DispatchReq, OP_STOP, PortableBlock, note_message, rebuild_portable_value, snapshot_block,
+    spawn_worker_service,
 };
 
 /// Proxy-side state: the worker's dispatch lane plus this proxy's hosted-object
-/// id. Everything worker-wide (lanes, token, stop flag, reap queue) is shared by
-/// every proxy of the worker; only `object_id`/`class_name` are per-proxy.
+/// id. Everything worker-wide (dispatch lane, claims, stop flag, reap queue,
+/// open conversations) is shared by every proxy of the worker; only
+/// `object_id`/`class_name` are per-proxy.
 #[derive(Debug)]
 pub struct NativeServiceState {
     dispatch_tx: async_channel::Sender<DispatchReq>,
     done_rx: async_channel::Receiver<Result<WireData, String>>,
-    /// One-token call serializer (see the module doc).
-    token_tx: async_channel::Sender<WorkerMsg>,
-    token_rx: async_channel::Receiver<WorkerMsg>,
+    /// The §5.1 claim machinery: per-object mailboxes + the lane pool.
+    /// Registered in `vm.io.claim_peers` (`VM.claims`, cycle walks).
+    claims: Rc<RefCell<PeerClaims>>,
+    /// Lane count (in-flight conversation bound; also how many stop ops
+    /// `serviceStop` sends — one per worker serve fiber).
+    lanes: u32,
     /// Worker-wide stop flag — a stopped service refuses calls from every proxy.
     stopped: Rc<Cell<bool>>,
     /// Dropped-proxy ids awaiting flush as `Call.releases` (the reap pattern:
@@ -91,16 +109,18 @@ pub struct NativeServiceState {
     /// True for process backing: block arguments take the handle path (no
     /// shipping — templates are in-process references; ACTOR_OBJECTS.md §3a).
     process: bool,
-    /// The conversation currently open on this worker, if any (worker-wide,
-    /// like the token): a send from the SAME task while it is servicing a
-    /// host-op rides this conversation as a NESTED call (§5.1 rule 3 with one
-    /// lane) instead of deadlocking on the token.
-    active: Rc<RefCell<Option<ActiveConv>>>,
+    /// The conversation each task currently has open on this worker: a send
+    /// from a task that is servicing a host-op rides its own conversation as
+    /// a NESTED call (§5.1 rule 3) instead of deadlocking behind itself.
+    convs: Rc<RefCell<HashMap<usize, ActiveConv>>>,
     /// Parent-side hosted-table ids minted for block arguments that crossed
     /// as handles; released when the service stops (a stored `HostBlock` in
     /// the worker may be invoked by any later call, so per-call release would
     /// be wrong — the reap pattern doesn't reach worker-held handles yet).
     block_handles: Rc<RefCell<Vec<u64>>>,
+    /// Boundary-profiling rows (§7), registered in `vm.io.ext_stats` beside
+    /// the extensions' — one diagnosis surface.
+    boundary: Rc<RefCell<BoundaryStats>>,
 }
 
 /// The channels of the conversation a task currently has open on a worker:
@@ -109,7 +129,6 @@ pub struct NativeServiceState {
 /// the one fiber that owns the conversation.
 #[derive(Clone, Debug)]
 struct ActiveConv {
-    task: usize,
     depth: u32,
     hostop_tx: async_channel::Sender<Msg>,
     reply_rx: async_channel::Receiver<Msg>,
@@ -144,30 +163,32 @@ unsafe impl<'gc> Collect<'gc> for NativeServiceState {
 struct CallCtx {
     dispatch_tx: async_channel::Sender<DispatchReq>,
     done_rx: async_channel::Receiver<Result<WireData, String>>,
-    token_tx: async_channel::Sender<WorkerMsg>,
-    token_rx: async_channel::Receiver<WorkerMsg>,
+    claims: Rc<RefCell<PeerClaims>>,
+    lanes: u32,
     stopped: Rc<Cell<bool>>,
     reap: Rc<RefCell<Vec<u64>>>,
     object_id: u64,
     class_name: String,
     process: bool,
-    active: Rc<RefCell<Option<ActiveConv>>>,
+    convs: Rc<RefCell<HashMap<usize, ActiveConv>>>,
     block_handles: Rc<RefCell<Vec<u64>>>,
+    boundary: Rc<RefCell<BoundaryStats>>,
 }
 
 fn snapshot(s: &NativeServiceState) -> CallCtx {
     CallCtx {
         dispatch_tx: s.dispatch_tx.clone(),
         done_rx: s.done_rx.clone(),
-        token_tx: s.token_tx.clone(),
-        token_rx: s.token_rx.clone(),
+        claims: s.claims.clone(),
+        lanes: s.lanes,
         stopped: s.stopped.clone(),
         reap: s.reap.clone(),
         object_id: s.object_id,
         class_name: s.class_name.clone(),
         process: s.process,
-        active: s.active.clone(),
+        convs: s.convs.clone(),
         block_handles: s.block_handles.clone(),
+        boundary: s.boundary.clone(),
     }
 }
 
@@ -210,24 +231,20 @@ fn service_call<'gc>(
     selector: Symbol,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, QuoinError> {
-    // A send from the task that owns the OPEN conversation on this worker is
-    // a NESTED call: it rides that conversation (§5.1 rule 3 with one lane)
-    // rather than parking on the token it itself holds. Checked before the
-    // stopped flag — stop is flag + drain, and a nested call is part of an
-    // in-flight conversation, which drain lets finish.
+    // A send from a task with an OPEN conversation on this worker is a NESTED
+    // call: it rides that conversation (§5.1 rule 3) rather than parking on a
+    // lane it transitively holds. Checked before the stopped flag — stop is
+    // flag + drain, and a nested call is part of an in-flight conversation,
+    // which drain lets finish.
     let me = vm.sched.current_task.0;
-    let nested = ctx
-        .active
-        .borrow()
-        .as_ref()
-        .is_some_and(|conv| conv.task == me);
+    let nested = ctx.convs.borrow().contains_key(&me);
     if !nested && ctx.stopped.get() {
         return Err(QuoinError::Other(format!(
             "service call '{}': the service is stopped",
             selector.as_str()
         )));
     }
-    // Encode BEFORE taking the token: a refused argument shouldn't occupy the
+    // Encode BEFORE claiming: a refused argument shouldn't occupy the
     // service. A proxy of the SAME worker travels as a live reference; a
     // portable BLOCK ships to a thread peer as a capture snapshot riding the
     // dispatch request out-of-band (§3a); any other block crosses as a HANDLE
@@ -292,17 +309,12 @@ fn service_call<'gc>(
         return nested_call(vm, mc, receiver, &ctx, selector, frame);
     }
 
-    // Serialize: take the token (parks fairly behind other callers).
-    match vm.await_io(IoRequest::WorkerRecv(ctx.token_rx.clone()))? {
-        IoResult::WorkerMsg(Some(_)) => {}
-        _ => {
-            return Err(QuoinError::Other(format!(
-                "service call '{}': the service is stopped",
-                selector.as_str()
-            )));
-        }
-    }
+    // Claim (object, lane) jointly and atomically (§5.1 rule 2): granted both
+    // or parked wanting both — a queued caller holds NOTHING while it waits.
+    let claim = claim_object(vm, receiver, &ctx, selector, WaitKind::TopLevel)?;
     note_message();
+    let started = Instant::now();
+    let handler = StdArc::new(AtomicU64::new(0));
     let (reply_tx, reply_rx) = async_channel::unbounded::<Msg>();
     let (hostop_tx, hostop_rx) = async_channel::unbounded::<Msg>();
     if ctx
@@ -312,36 +324,159 @@ fn service_call<'gc>(
             blocks,
             reply: reply_tx,
             hostops: hostop_rx,
+            handler_micros: handler.clone(),
         })
         .is_err()
     {
-        let _ = ctx.token_tx.try_send(WorkerMsg::Data(WireData::Null));
+        end_call_and_wake(vm, &ctx, me);
         return Err(QuoinError::Other(format!(
             "service call '{}': the service has exited",
             selector.as_str()
         )));
     }
     // Open the conversation (nested sends from host-op callbacks ride it),
-    // pump it to the terminal, then close it and hand the token on — on the
+    // pump it to the terminal, then close it and release the claim — on the
     // error path too (cancellation mid-conversation): dropping our channel
     // ends tells the worker the conversation was abandoned, and it unwinds
     // catchably rather than wedging.
-    ctx.active.replace(Some(ActiveConv {
-        task: me,
-        depth: 1,
-        hostop_tx: hostop_tx.clone(),
-        reply_rx: reply_rx.clone(),
-    }));
+    ctx.convs.borrow_mut().insert(
+        me,
+        ActiveConv {
+            depth: 1,
+            hostop_tx: hostop_tx.clone(),
+            reply_rx: reply_rx.clone(),
+        },
+    );
     let outcome = conversation(vm, mc, selector, &reply_rx, &hostop_tx);
-    ctx.active.replace(None);
-    let _ = ctx.token_tx.try_send(WorkerMsg::Data(WireData::Null));
+    ctx.convs.borrow_mut().remove(&me);
+    end_call_and_wake(vm, &ctx, me);
+    record_boundary_row(
+        &ctx.boundary,
+        &ctx.class_name,
+        selector.as_str(),
+        started.elapsed().as_micros() as u64,
+        claim.wait_micros,
+        handler.load(Ordering::Relaxed),
+        outcome.is_err() || matches!(outcome, Ok(Msg::CallReturnError { .. })),
+    );
     interpret_terminal(vm, mc, receiver, &ctx, selector, outcome?)
+}
+
+/// The outcome of a successful claim: which lane came with it (top-level
+/// grants) and how long the caller queued.
+struct Claimed {
+    wait_micros: u64,
+}
+
+/// Acquire the receiver's object claim per §5.1 — jointly with a lane for a
+/// top-level send, object-only for a nested one — parking FIFO when
+/// contended, with the rule-6 cycle walk run before every park: a walk that
+/// closes on this task raises catchably instead of parking (the deadlock
+/// lands at the task that closes the cycle, by decision).
+fn claim_object<'gc>(
+    vm: &mut VmState<'gc>,
+    receiver: Value<'gc>,
+    ctx: &CallCtx,
+    selector: Symbol,
+    kind: WaitKind,
+) -> Result<Claimed, QuoinError> {
+    let me = vm.sched.current_task;
+    let epoch = vm.current_park_epoch();
+    let nested = kind == WaitKind::Nested;
+    let decision =
+        ctx.claims
+            .borrow_mut()
+            .try_acquire(me.0, epoch, ctx.object_id, &ctx.class_name, nested);
+    let blocker = match decision {
+        Acquire::Granted { .. } | Acquire::Reentrant => {
+            return Ok(Claimed { wait_micros: 0 });
+        }
+        Acquire::TooDeep => {
+            return Err(QuoinError::Other(format!(
+                "service call '{}': re-entered {} too deeply — mutual recursion?",
+                selector.as_str(),
+                ctx.class_name
+            )));
+        }
+        Acquire::WouldQueue { blocker } => blocker,
+    };
+    // Rule 6: would parking close a waits-for cycle? (Only an owned object
+    // can extend the walk; a reservation blocks on a task that holds nothing.)
+    if let Some(start) = blocker {
+        let registry = vm.io.claim_peers.clone();
+        let label = format!("{}#{}", ctx.class_name, ctx.object_id);
+        let cycle = {
+            let mut live = |t: usize, e: u64| vm.channel_waiter_live(TaskId(t), e);
+            would_deadlock(&registry, me.0, start, &label, &mut live)
+        };
+        if let Some(cycle) = cycle {
+            ctx.claims.borrow_mut().stats.deadlocks += 1;
+            return Err(QuoinError::Other(format!(
+                "service call '{}': {cycle}",
+                selector.as_str()
+            )));
+        }
+    }
+    ctx.claims
+        .borrow_mut()
+        .enqueue(me.0, epoch, ctx.object_id, &ctx.class_name, kind);
+    // Park until the finishing call HANDS us the claim (fair FIFO — the
+    // ext_prelude park verbatim). The wait is boundary-profiled separately:
+    // mailbox contention is its own diagnosis (§7).
+    let queued_at = Instant::now();
+    if let Some(t) = vm.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
+        t.parked_on_channel = true;
+    }
+    vm.set_park_info("service claim".to_string(), Some(receiver));
+    if let Some(yielder) = unsafe { vm.get_yielder() } {
+        yielder.suspend(YieldReason::ChannelPark);
+    } else {
+        ctx.claims.borrow_mut().retract(me.0, ctx.object_id);
+        return Err(QuoinError::Other(
+            "service call queued outside the VM scheduler".to_string(),
+        ));
+    }
+    // On resume: if the claim was already handed to us and a cancel raced in,
+    // pass it onward (mirrors ext_prelude) — never strand the queue.
+    let handed = matches!(vm.sched.wake.take(), Some(Wake::ServiceClaim { .. }));
+    if vm.sched.cancel_current {
+        if handed {
+            end_call_and_wake(vm, ctx, me.0);
+        } else {
+            ctx.claims.borrow_mut().retract(me.0, ctx.object_id);
+        }
+        return Err(vm.take_cancellation());
+    }
+    if !handed {
+        return Err(QuoinError::Other(
+            "service claim park resumed without the claim".to_string(),
+        ));
+    }
+    Ok(Claimed {
+        wait_micros: queued_at.elapsed().as_micros() as u64,
+    })
+}
+
+/// Release one call's claim on the proxy's object (outermost release frees
+/// the lane too) and deliver the resulting handoffs.
+fn end_call_and_wake<'gc>(vm: &mut VmState<'gc>, ctx: &CallCtx, task: usize) {
+    let grants = {
+        let mut live = |t: usize, e: u64| vm.channel_waiter_live(TaskId(t), e);
+        ctx.claims
+            .borrow_mut()
+            .end_call(task, ctx.object_id, &mut live)
+    };
+    for g in grants {
+        vm.wake_channel_task(TaskId(g.task), Wake::ServiceClaim { lane: g.lane });
+    }
 }
 
 /// A nested call riding the task's open conversation: LIFO — the frame goes
 /// down the parent→worker lane, and the reply pump below reads worker→parent
 /// frames until this call's terminal (servicing any deeper host-ops on the
-/// way), all within the outer conversation's stack.
+/// way), all within the outer conversation's stack. The target object's claim
+/// is acquired object-only (§5.1 rule 3: a nested send never waits for a
+/// lane); same-owner re-entry nests depth-capped (rule 4).
 fn nested_call<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -350,12 +485,22 @@ fn nested_call<'gc>(
     selector: Symbol,
     frame: Msg,
 ) -> Result<Value<'gc>, QuoinError> {
+    let me = vm.sched.current_task.0;
+    let claim = claim_object(vm, receiver, ctx, selector, WaitKind::Nested)?;
     let conv = {
-        let mut active = ctx.active.borrow_mut();
-        let conv = active.as_mut().expect("nested call without a conversation");
-        if conv.depth >= MAX_CONV_DEPTH {
+        let mut convs = ctx.convs.borrow_mut();
+        let Some(conv) = convs.get_mut(&me) else {
+            end_call_and_wake(vm, ctx, me);
             return Err(QuoinError::Other(format!(
-                "service call '{}': calls nested {MAX_CONV_DEPTH} levels deep on one \
+                "service call '{}': the conversation closed mid-call",
+                selector.as_str()
+            )));
+        };
+        if conv.depth >= MAX_CONV_DEPTH {
+            let cap = MAX_CONV_DEPTH;
+            end_call_and_wake(vm, ctx, me);
+            return Err(QuoinError::Other(format!(
+                "service call '{}': calls nested {cap} levels deep on one \
                  conversation — mutual parent<->worker recursion?",
                 selector.as_str()
             )));
@@ -364,6 +509,7 @@ fn nested_call<'gc>(
         conv.clone()
     };
     note_message();
+    let started = Instant::now();
     let outcome = if conv.hostop_tx.try_send(frame).is_err() {
         Err(QuoinError::Other(format!(
             "service call '{}': the service exited mid-call",
@@ -372,9 +518,19 @@ fn nested_call<'gc>(
     } else {
         conversation(vm, mc, selector, &conv.reply_rx, &conv.hostop_tx)
     };
-    if let Some(c) = ctx.active.borrow_mut().as_mut() {
+    if let Some(c) = ctx.convs.borrow_mut().get_mut(&me) {
         c.depth = c.depth.saturating_sub(1);
     }
+    end_call_and_wake(vm, ctx, me);
+    record_boundary_row(
+        &ctx.boundary,
+        &ctx.class_name,
+        selector.as_str(),
+        started.elapsed().as_micros() as u64,
+        claim.wait_micros,
+        0,
+        outcome.is_err() || matches!(outcome, Ok(Msg::CallReturnError { .. })),
+    );
     interpret_terminal(vm, mc, receiver, ctx, selector, outcome?)
 }
 
@@ -503,15 +659,16 @@ fn interpret_terminal<'gc>(
                 NativeServiceState {
                     dispatch_tx: ctx.dispatch_tx.clone(),
                     done_rx: ctx.done_rx.clone(),
-                    token_tx: ctx.token_tx.clone(),
-                    token_rx: ctx.token_rx.clone(),
+                    claims: ctx.claims.clone(),
+                    lanes: ctx.lanes,
                     stopped: ctx.stopped.clone(),
                     reap: ctx.reap.clone(),
                     object_id: resource,
                     class_name,
                     process: ctx.process,
-                    active: ctx.active.clone(),
+                    convs: ctx.convs.clone(),
                     block_handles: ctx.block_handles.clone(),
+                    boundary: ctx.boundary.clone(),
                 },
             ))
         }
@@ -536,18 +693,30 @@ fn host<'gc>(
     path: String,
     class_name: String,
     backing: &'static str,
+    lanes: u32,
 ) -> Result<Value<'gc>, QuoinError> {
     let Value::Class(class) = receiver else {
         return Err(QuoinError::Other("WorkerService: bad receiver".into()));
     };
     let (ch, pid) = match backing {
         "process" => {
+            // Process lanes are the §5.1 5b slice (N conversation sockets).
+            if lanes > 1 {
+                return Err(QuoinError::Other(
+                    "WorkerService: process backing serves one lane for now — \
+                     lanes: applies to thread backing"
+                        .into(),
+                ));
+            }
             let (ch, pid, _grip) =
                 crate::worker::spawn_worker_process(path.clone(), Some(class_name.clone()))
                     .map_err(QuoinError::Other)?;
             (ch, Some(pid))
         }
-        _ => (spawn_worker_service(path.clone(), class_name.clone()), None),
+        _ => (
+            spawn_worker_service(path.clone(), class_name.clone(), lanes),
+            None,
+        ),
     };
     vm.worker_registry.push(crate::worker::WorkerReg {
         unit: format!("svc:{path}"),
@@ -576,25 +745,79 @@ fn host<'gc>(
             )));
         }
     }
-    let (token_tx, token_rx) = async_channel::bounded(1);
-    let _ = token_tx.try_send(WorkerMsg::Data(WireData::Null));
+    // Claims: the §5.1 machinery, one per worker, registered for VM.claims
+    // and the cross-peer cycle walk; boundary rows registered beside the
+    // extensions' (§7 — one diagnosis surface).
+    let claims = Rc::new(RefCell::new(PeerClaims::new(format!("svc:{path}"), lanes)));
+    vm.io.claim_peers.borrow_mut().push(claims.clone());
+    let boundary = Rc::new(RefCell::new(BoundaryStats {
+        peer: format!("svc:{path}"),
+        rows: HashMap::new(),
+    }));
+    vm.io.ext_stats.borrow_mut().push(boundary.clone());
     Ok(vm.new_native_state(
         mc,
         class,
         NativeServiceState {
             dispatch_tx: ch.dispatch_tx,
             done_rx: ch.done_rx,
-            token_tx,
-            token_rx,
+            claims,
+            lanes: lanes.max(1),
             stopped: Rc::new(Cell::new(false)),
             reap: Rc::new(RefCell::new(Vec::new())),
             object_id: 1,
             class_name,
             process: backing == "process",
-            active: Rc::new(RefCell::new(None)),
+            convs: Rc::new(RefCell::new(HashMap::new())),
             block_handles: Rc::new(RefCell::new(Vec::new())),
+            boundary,
         },
     ))
+}
+
+/// `serviceStop`'s drain: park until every lane is home (each in-flight
+/// conversation finished). New top-level sends are already refused by the
+/// stopped flag, so the wait is bounded by running work.
+fn drain_lanes<'gc>(
+    vm: &mut VmState<'gc>,
+    receiver: Value<'gc>,
+    ctx: &CallCtx,
+) -> Result<(), QuoinError> {
+    let me = vm.sched.current_task;
+    let epoch = vm.current_park_epoch();
+    if ctx.claims.borrow_mut().request_drain(me.0, epoch) {
+        return Ok(());
+    }
+    if let Some(t) = vm.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
+        t.parked_on_channel = true;
+    }
+    vm.set_park_info("service drain".to_string(), Some(receiver));
+    if let Some(yielder) = unsafe { vm.get_yielder() } {
+        yielder.suspend(YieldReason::ChannelPark);
+    } else {
+        return Err(QuoinError::Other(
+            "service drain outside the VM scheduler".to_string(),
+        ));
+    }
+    let woken = matches!(vm.sched.wake.take(), Some(Wake::ServiceClaim { .. }));
+    if vm.sched.cancel_current {
+        return Err(vm.take_cancellation());
+    }
+    if !woken {
+        return Err(QuoinError::Other(
+            "service drain resumed without a wake".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn lanes_arg<'gc>(v: Value<'gc>) -> Result<u32, QuoinError> {
+    match v.as_i64() {
+        Some(n) if (1..=1024).contains(&n) => Ok(n as u32),
+        _ => Err(QuoinError::Other(
+            "WorkerService: lanes must be an Integer between 1 and 1024".into(),
+        )),
+    }
 }
 
 fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, QuoinError> {
@@ -638,7 +861,7 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
         .class_method("host:class:", |vm, mc, receiver, args| {
             let path = string_arg(args[0], "the unit path")?;
             let class_name = string_arg(args[1], "the class name")?;
-            host(vm, mc, receiver, path, class_name, "thread")
+            host(vm, mc, receiver, path, class_name, "thread", 1)
         })
         .doc(
             "Spawn a worker running the unit at the path, instantiate the named class in it \
@@ -647,13 +870,26 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
              forwards as a call and parks for the reply, so calls compose with \
              `Async.gather:` / `timeout:do:` like any parked wait.",
         )
+        .class_method("host:class:lanes:", |vm, mc, receiver, args| {
+            let path = string_arg(args[0], "the unit path")?;
+            let class_name = string_arg(args[1], "the class name")?;
+            let lanes = lanes_arg(args[2])?;
+            host(vm, mc, receiver, path, class_name, "thread", lanes)
+        })
+        .doc(
+            "As `host:class:` with N concurrent lanes (docs/internal/ACTOR_OBJECTS.md \
+             \u{a7}5): calls to DIFFERENT objects of the service overlap, up to N in \
+             flight; calls to one object still serialize (its mailbox). Worker-side, \
+             each lane is a cooperative fiber -- an object parked on IO doesn't block \
+             its isolate-mates.",
+        )
         .class_method("host:class:backing:", |vm, mc, receiver, args| {
             let path = string_arg(args[0], "the unit path")?;
             let class_name = string_arg(args[1], "the class name")?;
             let backing = string_arg(args[2], "the backing")?;
             match backing.as_str() {
-                "thread" => host(vm, mc, receiver, path, class_name, "thread"),
-                "process" => host(vm, mc, receiver, path, class_name, "process"),
+                "thread" => host(vm, mc, receiver, path, class_name, "thread", 1),
+                "process" => host(vm, mc, receiver, path, class_name, "process", 1),
                 other => Err(QuoinError::Other(format!(
                     "WorkerService: unknown backing '{other}' (thread|process)"
                 ))),
@@ -664,9 +900,9 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
              or 'process' (a child qn process -- the escape from the in-process thread \
              ceiling for compute-heavy services).",
         )
-        // Stop the service: waits for in-flight calls (takes the token), sends
-        // the reserved stop op, and joins the worker. Worker-wide: every proxy
-        // of the service refuses calls afterwards.
+        // Stop the service: flag + drain (refuse new calls, wait for every
+        // in-flight conversation), then one stop op per lane, then join.
+        // Worker-wide: every proxy of the service refuses calls afterwards.
         .instance_method("serviceStop", |vm, mc, receiver, _args| {
             let ctx = receiver
                 .with_native_state::<NativeServiceState, _, _>(|s| {
@@ -674,24 +910,26 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
                     snapshot(s)
                 })
                 .map_err(QuoinError::Other)?;
-            // Drain the token so in-flight calls finish first; ignore a closed
-            // token lane (double stop).
-            let _ = vm.await_io(IoRequest::WorkerRecv(ctx.token_rx.clone()))?;
-            // The reserved stop op ends the serve loop; a dead worker skips
+            drain_lanes(vm, receiver, &ctx)?;
+            // One reserved stop op per lane fiber; a dead worker skips
             // straight to the join, which reports why.
-            let (reply_tx, reply_rx) = async_channel::bounded::<Msg>(1);
-            let (_hostop_tx, hostop_rx) = async_channel::bounded::<Msg>(1);
-            let frame = hosted_call(&ctx, OP_STOP.to_string(), Vec::new(), Vec::new());
-            if ctx
-                .dispatch_tx
-                .try_send(DispatchReq {
-                    frame,
-                    blocks: Vec::new(),
-                    reply: reply_tx,
-                    hostops: hostop_rx,
-                })
-                .is_ok()
-            {
+            for _ in 0..ctx.lanes {
+                let (reply_tx, reply_rx) = async_channel::bounded::<Msg>(1);
+                let (_hostop_tx, hostop_rx) = async_channel::bounded::<Msg>(1);
+                let frame = hosted_call(&ctx, OP_STOP.to_string(), Vec::new(), Vec::new());
+                if ctx
+                    .dispatch_tx
+                    .try_send(DispatchReq {
+                        frame,
+                        blocks: Vec::new(),
+                        reply: reply_tx,
+                        hostops: hostop_rx,
+                        handler_micros: StdArc::new(AtomicU64::new(0)),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
                 let _ = vm.await_io(IoRequest::FrameRecv(reply_rx))?;
             }
             let joined = vm.await_io(IoRequest::WorkerJoin(ctx.done_rx.clone()))?;

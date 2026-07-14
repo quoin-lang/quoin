@@ -332,6 +332,35 @@ fn record_boundary(
     row.handler_micros += meter.handler_micros;
 }
 
+/// Boundary fold for hosted-service calls (worker_service.rs): no byte meter —
+/// thread lanes carry owned frames, so there is nothing to weigh; `handler`
+/// comes from the dispatch-side stamp (`DispatchReq.handler_micros`, 0 for
+/// process backing until the pumps carry `ReplyMeta`).
+pub(crate) fn record_boundary_row(
+    stats: &RefCell<BoundaryStats>,
+    class: &str,
+    op: &str,
+    wall_micros: u64,
+    claim_wait_micros: u64,
+    handler_micros: u64,
+    errored: bool,
+) {
+    let meter = CallMeter {
+        bytes_out: 0,
+        bytes_in: 0,
+        handler_micros,
+    };
+    record_boundary(
+        stats,
+        class,
+        op,
+        &meter,
+        wall_micros,
+        claim_wait_micros,
+        errored,
+    );
+}
+
 /// Native state behind an `Extension` value: the registered stream id for the UDS, the child
 /// process, its socket path (for cleanup), the shared fd-reap queue, whether the extension has
 /// been observed dead, and the queue of ext-side resource ids dropped by the host (flushed to

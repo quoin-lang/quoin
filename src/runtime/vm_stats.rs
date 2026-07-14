@@ -724,4 +724,223 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
              flagged: batch the API or move the object (the cost gradient is placement- \
              controlled, CONCURRENCY_MODEL.md guarantee 5).",
         )
+        // `VM.claims` -> the live claim shapes (docs/internal/ACTOR_OBJECTS.md §5.1):
+        // per hosted-service peer, who holds which object, who waits, lane
+        // occupancy, the waits-for edges, and the accumulated counters.
+        .class_method("claims", |vm, mc, _receiver, _args| {
+            let peers = vm.io.claim_peers.clone();
+            let mut out = Vec::new();
+            for peer in peers.borrow().iter() {
+                let p = peer.borrow();
+                let (total, free) = p.lanes();
+                let lanes = vec![
+                    ("total".to_string(), vm.new_int(mc, total as i64)),
+                    ("free".to_string(), vm.new_int(mc, free as i64)),
+                ];
+                let mut objects = Vec::new();
+                for row in p.object_rows() {
+                    let waiters: Vec<_> = row
+                        .waiters
+                        .iter()
+                        .map(|(task, kind, micros)| {
+                            let w = vec![
+                                ("task".to_string(), vm.new_int(mc, *task as i64)),
+                                (
+                                    "kind".to_string(),
+                                    vm.new_string(
+                                        mc,
+                                        match kind {
+                                            crate::runtime::claims::WaitKind::TopLevel => {
+                                                "call".to_string()
+                                            }
+                                            crate::runtime::claims::WaitKind::Nested => {
+                                                "nested".to_string()
+                                            }
+                                        },
+                                    ),
+                                ),
+                                ("waitedMicros".to_string(), vm.new_int(mc, *micros as i64)),
+                            ];
+                            vm.new_map(mc, w)
+                        })
+                        .collect();
+                    let m = vec![
+                        ("object".to_string(), vm.new_int(mc, row.object as i64)),
+                        ("label".to_string(), vm.new_string(mc, row.label)),
+                        (
+                            "owner".to_string(),
+                            match row.owner {
+                                Some(t) => vm.new_int(mc, t as i64),
+                                None => vm.new_nil(mc),
+                            },
+                        ),
+                        ("depth".to_string(), vm.new_int(mc, row.depth as i64)),
+                        ("reserved".to_string(), vm.new_bool(mc, row.reserved)),
+                        ("waiters".to_string(), vm.new_list(mc, waiters)),
+                    ];
+                    objects.push(vm.new_map(mc, m));
+                }
+                let mut edges = Vec::new();
+                for (task, label, owner) in p.edges() {
+                    let e = vec![
+                        ("task".to_string(), vm.new_int(mc, task as i64)),
+                        ("waitsFor".to_string(), vm.new_string(mc, label)),
+                        (
+                            "heldBy".to_string(),
+                            match owner {
+                                Some(t) => vm.new_int(mc, t as i64),
+                                None => vm.new_nil(mc),
+                            },
+                        ),
+                    ];
+                    edges.push(vm.new_map(mc, e));
+                }
+                let s = &p.stats;
+                let stats = vec![
+                    (
+                        "acquisitions".to_string(),
+                        vm.new_int(mc, s.acquisitions as i64),
+                    ),
+                    ("contended".to_string(), vm.new_int(mc, s.contended as i64)),
+                    (
+                        "totalWaitMicros".to_string(),
+                        vm.new_int(mc, s.total_wait_micros as i64),
+                    ),
+                    (
+                        "maxWaitMicros".to_string(),
+                        vm.new_int(mc, s.max_wait_micros as i64),
+                    ),
+                    (
+                        "queueHighWater".to_string(),
+                        vm.new_int(mc, s.queue_high_water as i64),
+                    ),
+                    ("maxDepth".to_string(), vm.new_int(mc, s.max_depth as i64)),
+                    ("deadlocks".to_string(), vm.new_int(mc, s.deadlocks as i64)),
+                ];
+                let m = vec![
+                    ("peer".to_string(), vm.new_string(mc, p.label.clone())),
+                    ("lanes".to_string(), vm.new_map(mc, lanes)),
+                    ("objects".to_string(), vm.new_list(mc, objects)),
+                    ("edges".to_string(), vm.new_list(mc, edges)),
+                    ("stats".to_string(), vm.new_map(mc, stats)),
+                ];
+                out.push(vm.new_map(mc, m));
+            }
+            Ok(vm.new_list(mc, out))
+        })
+        .doc(
+            "The live claim shapes of every hosted service (docs/internal/ACTOR_OBJECTS.md \
+             section 5.1): one Map per peer with `lanes` (total/free), `objects` (owner \
+             task, re-entry depth, reserved flag, queued waiters with their wait so far), \
+             `edges` (the waits-for graph: which task waits for which object held by which \
+             task -- a long chain here is a deadlock you haven't had yet), and accumulated \
+             `stats` (acquisitions, contended, wait totals, queue high-water, max nesting, \
+             deadlocks detected). `VM.claimsReport` renders this.",
+        )
+        // `VM.claimsReport` -> the same shapes rendered for humans, with the
+        // longest live wait-chain called out (the pre-deadlock warning).
+        .class_method("claimsReport", |vm, mc, _receiver, _args| {
+            let peers = vm.io.claim_peers.clone();
+            let peers = peers.borrow();
+            if peers.is_empty() {
+                return Ok(vm.new_string(
+                    mc,
+                    "no claim activity (no hosted service has been created)".to_string(),
+                ));
+            }
+            let mut out = String::new();
+            // The cross-peer waits-for map for chain rendering.
+            let mut waits: std::collections::HashMap<usize, (String, Option<usize>)> =
+                std::collections::HashMap::new();
+            for peer in peers.iter() {
+                for (task, label, owner) in peer.borrow().edges() {
+                    waits.insert(task, (label, owner));
+                }
+            }
+            for peer in peers.iter() {
+                let p = peer.borrow();
+                let (total, free) = p.lanes();
+                let s = &p.stats;
+                out.push_str(&format!(
+                    "[{}] lanes {}/{} free  {} acquisitions ({} contended, {} waiting now)  \
+                     wait {} total / {} max  queue high-water {}  depth max {}{}\n",
+                    p.label,
+                    free,
+                    total,
+                    s.acquisitions,
+                    s.contended,
+                    p.edges().len(),
+                    fmt_micros(s.total_wait_micros),
+                    fmt_micros(s.max_wait_micros),
+                    s.queue_high_water,
+                    s.max_depth,
+                    if s.deadlocks > 0 {
+                        format!("  DEADLOCKS DETECTED: {}", s.deadlocks)
+                    } else {
+                        String::new()
+                    },
+                ));
+                for row in p.object_rows() {
+                    let held = match row.owner {
+                        Some(t) => format!("held by task {t} (depth {})", row.depth),
+                        None if row.reserved => "reserved for its next caller".to_string(),
+                        None => "free".to_string(),
+                    };
+                    let waiters = if row.waiters.is_empty() {
+                        String::new()
+                    } else {
+                        let list: Vec<String> = row
+                            .waiters
+                            .iter()
+                            .map(|(t, _, us)| format!("task {t} ({})", fmt_micros(*us)))
+                            .collect();
+                        format!("  waiting: {}", list.join(", "))
+                    };
+                    out.push_str(&format!("  {} {held}{waiters}\n", row.label));
+                }
+            }
+            // The longest live wait-chain, across peers: a chain of length >1
+            // is contention stacking up; a cycle would have raised already.
+            let mut longest: Vec<String> = Vec::new();
+            for (&task, _) in waits.iter() {
+                let mut chain = Vec::new();
+                let mut current = Some(task);
+                let mut hops = 0;
+                while let Some(t) = current {
+                    let Some((label, owner)) = waits.get(&t) else {
+                        break;
+                    };
+                    chain.push(format!(
+                        "task {t} waits for {label}{}",
+                        match owner {
+                            Some(o) => format!(" (held by task {o})"),
+                            None => String::new(),
+                        }
+                    ));
+                    current = *owner;
+                    hops += 1;
+                    if hops > 64 {
+                        break;
+                    }
+                }
+                if chain.len() > longest.len() {
+                    longest = chain;
+                }
+            }
+            if longest.len() > 1 {
+                out.push_str(&format!(
+                    "longest wait chain ({} deep): {}\n",
+                    longest.len(),
+                    longest.join(" -> ")
+                ));
+            }
+            Ok(vm.new_string(mc, out))
+        })
+        .doc(
+            "`VM.claims` rendered for humans: per hosted service, lane occupancy, the \
+             accumulated contention counters, each live object's holder and queue, and \
+             the LONGEST live wait-chain across all services -- a deep chain is the \
+             pre-deadlock warning (an actual cycle raises catchably at call time \
+             instead of hanging).",
+        )
 }

@@ -56,6 +56,23 @@ under **Changed**, with the migration.
   **handle** the worker invokes back in the parent (one round trip per invocation,
   write-captures see live parent state; portable blocks freeze their captures at
   send time on either path, so the backing never changes meaning).
+- `WorkerService` (experimental): **per-object mailboxes and lanes**
+  (`docs/internal/ACTOR_OBJECTS.md` §5.1). `host:class:lanes:` gives a service N
+  concurrent lanes: calls to *different* hosted objects overlap (worker-side, each
+  lane is a cooperative fiber — an object parked on IO doesn't block its
+  isolate-mates), while calls to one object still serialize in arrival order (its
+  mailbox, fairly queued). The acquisition discipline is deadlock-free by
+  construction for everything except calls that genuinely wait on each other —
+  and those now raise a **catchable deadlock error naming the cycle** at call
+  time instead of hanging, verified end to end.
+- **`VM.claims` / `VM.claimsReport`**: live lock-shape observability for hosted
+  services — per object: holder, re-entry depth, queued waiters and their wait so
+  far; per service: lane occupancy and contention counters (acquisitions,
+  contended, wait totals, queue high-water, deadlocks detected); plus the
+  waits-for edges themselves, with the report calling out the longest live wait
+  chain — the pre-deadlock warning. Hosted-service calls also now feed
+  `VM.boundaryStats` rows beside extensions (thread services report real
+  `handler_micros`; process services report 0 for now).
 - Workers (experimental): **conversations, not round trips** — the peer protocol's
   re-entrancy now works for worker services, both backings. While a call is in
   flight the worker can invoke parent-held block handles (serviced on the caller's

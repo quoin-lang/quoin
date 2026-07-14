@@ -7,6 +7,7 @@ pub mod boolean;
 pub mod bytes;
 pub mod channel;
 pub mod civil;
+pub mod claims;
 pub mod class;
 pub mod codecs;
 pub mod compress;

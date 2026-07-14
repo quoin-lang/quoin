@@ -472,24 +472,25 @@ pub fn build_host_block_class() -> NativeClassBuilder {
 pub fn build_worker_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Worker", Some("Object"))
         .construct_with("use Worker.spawn: / Worker.start:")
-        // ---- worker side: the hosted-object serve loop (ACTOR_OBJECTS.md §2).
-        // Invoked by the synthesized line `Worker.hostServe:'Class'` a service
-        // spawn appends to the unit; not really a user-facing surface.
-        .class_method("hostServe:", |vm, mc, _receiver, args| {
+        // ---- worker side: the hosted-object serve loop (ACTOR_OBJECTS.md §2/§5.1).
+        // Invoked by the synthesized lines a service spawn appends to the unit
+        // (`Worker.hostRoot:'Class'` then a gather of `Worker.hostServeLane`
+        // thunks, one fiber per lane); not really a user-facing surface.
+        .class_method("hostRoot:", |vm, mc, _receiver, args| {
             let class_name = args[0].as_string().ok_or_else(|| {
-                QuoinError::Other("Worker.hostServe: expects a String class name".into())
+                QuoinError::Other("Worker.hostRoot: expects a String class name".into())
             })?;
-            let (dispatch_rx, outbox_tx) = match &vm.worker_link {
-                Some(link) => (link.dispatch_rx.clone(), link.outbox_tx.clone()),
+            let outbox_tx = match &vm.worker_link {
+                Some(link) => link.outbox_tx.clone(),
                 None => {
                     return Err(QuoinError::Other(
-                        "Worker.hostServe: only runs inside a worker".into(),
+                        "Worker.hostRoot: only runs inside a worker".into(),
                     ));
                 }
             };
             let class_val =
                 crate::runtime::extension::resolve_global(vm, &class_name).ok_or_else(|| {
-                    QuoinError::Other(format!("Worker.hostServe: no class named '{class_name}'"))
+                    QuoinError::Other(format!("Worker.hostRoot: no class named '{class_name}'"))
                 })?;
             // The root hosted object (id 1): instantiation failures propagate
             // to the done lane exactly as any unit error does.
@@ -500,6 +501,22 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 "ready".to_string(),
                 WireData::Bool(true),
             )])));
+            Ok(Value::Nil)
+        })
+        .doc(
+            "Worker side of a hosted service (used by the synthesized service unit): \
+             instantiate the named class, root it in the hosted-object table, and \
+             report ready. Not meant to be called directly.",
+        )
+        .class_method("hostServeLane", |vm, mc, _receiver, _args| {
+            let dispatch_rx = match &vm.worker_link {
+                Some(link) => link.dispatch_rx.clone(),
+                None => {
+                    return Err(QuoinError::Other(
+                        "Worker.hostServeLane: only runs inside a worker".into(),
+                    ));
+                }
+            };
             loop {
                 let req = match vm.await_io(IoRequest::DispatchRecv(dispatch_rx.clone()))? {
                     IoResult::DispatchMsg(Some(req)) => req,
@@ -507,7 +524,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     IoResult::DispatchMsg(None) => break,
                     other => {
                         return Err(QuoinError::Other(format!(
-                            "Worker.hostServe: unexpected result {other:?}"
+                            "Worker.hostServeLane: unexpected result {other:?}"
                         )));
                     }
                 };
@@ -521,7 +538,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 } = req.frame
                 else {
                     let _ = req.reply.try_send(quoin_ext_proto::Msg::CallReturnError {
-                        message: "Worker.hostServe: expected a Call frame".to_string(),
+                        message: "Worker.hostServeLane: expected a Call frame".to_string(),
                         remote_stack: String::new(),
                     });
                     continue;
@@ -531,6 +548,8 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     vm.hosted_release(*rid);
                 }
                 if op == crate::worker::OP_STOP {
+                    // One stop per lane: ack and end THIS fiber; the parent
+                    // sends as many stops as there are lanes.
                     let _ = req.reply.try_send(quoin_ext_proto::Msg::CallReturnData {
                         value: WireData::Null,
                     });
@@ -539,6 +558,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 note_message();
                 // Open the conversation for this dispatch: hosted code that
                 // invokes a `HostBlock` finds its way back to the parent here.
+                // Keyed by task — each lane fiber has its own conversation.
                 let task = vm.sched.current_task.0;
                 vm.worker_convs.insert(
                     task,
@@ -548,18 +568,24 @@ pub fn build_worker_class() -> NativeClassBuilder {
                         depth: 0,
                     },
                 );
+                let started = std::time::Instant::now();
                 let reply = dispatch_hosted(vm, mc, &op, recv, &method_args, &blocks);
+                req.handler_micros.store(
+                    started.elapsed().as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 vm.worker_convs.remove(&task);
                 let _ = req.reply.try_send(reply);
             }
-            vm.hosted.clear();
+            // No `hosted.clear()` here: lane fibers share the table, and the
+            // worker exits (dropping the arena) right after the last lane.
             Ok(Value::Nil)
         })
         .doc(
             "Worker side of a hosted service (used by the synthesized service unit): \
-             instantiate the named class, root it in the hosted-object table, report \
-             ready, and serve peer-protocol dispatches one at a time until the stop op \
-             or the lane closing ends the loop. Not meant to be called directly.",
+             serve peer-protocol dispatches from the shared lane, one at a time, until \
+             the stop op or the lane closing ends this fiber. The service spawns one \
+             per lane. Not meant to be called directly.",
         )
         .class_doc(
             "An isolate: a fresh VM on its own OS thread (or child process) with message \

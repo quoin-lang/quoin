@@ -95,6 +95,10 @@ pub struct DispatchReq {
     /// conversation (cancellation) — the worker surfaces that as a catchable
     /// error in the invoking code.
     pub hostops: async_channel::Receiver<quoin_ext_proto::Msg>,
+    /// The worker stamps its handler time here (µs) — the boundary-profiling
+    /// decomposition (§7) for thread backing, where no wire exists to carry
+    /// `ReplyMeta`. Process backing leaves it 0 until the pumps carry meta.
+    pub handler_micros: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The worker-side handles of the conversation a serve task is currently
