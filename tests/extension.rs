@@ -470,6 +470,25 @@ var fromCol = Vector.ofArray:(Array.ofFloats:#( 2.0 4.0 6.0 ));
 (fromCol.sum == 12.0).else:{{ ok = false }};
 (fromCol.length == 3).else:{{ ok = false }};
 
+"* resources-in-data: a method returns a Map whose 'rows' entry is a List of live Vector instances
+var rs = m.rows;
+((rs.at:'count') == 2).else:{{ ok = false }};
+var rlist = rs.at:'rows';
+(rlist.count == 2).else:{{ ok = false }};
+(((rlist.at:0).sum) == 3.0).else:{{ ok = false }};
+((((rlist.at:1).scale:2.0).sum) == 14.0).else:{{ ok = false }};
+
+"* class-side selectors returning values (not instances): a scalar, and a List of NEW instances
+((Vector.dtypeName) == 'float64').else:{{ ok = false }};
+var basis = Vector.basis:3;
+(basis.count == 3).else:{{ ok = false }};
+(((basis.at:0).length) == 3).else:{{ ok = false }};
+(((basis.at:1).at:1) == 1.0).else:{{ ok = false }};
+(((basis.at:1).at:0) == 0.0).else:{{ ok = false }};
+
+"* inbound instance refs: live Vectors nested in a data argument resolve extension-side
+((Vector.sumOf:#( va vb )) == 21.0).else:{{ ok = false }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
@@ -666,6 +685,25 @@ var caught = {{ va.at:9 }}.catch:{{ |ex| ex.message }};
 (caught == 'index 9 out of range (length 3)').else:{{ ok = false }};
 ((va.at:1) == 2.0).else:{{ ok = false }};
 
+"* resources-in-data: a method returns a Map whose 'rows' entry is a List of live Vector instances
+var rs = m.rows;
+((rs.at:'count') == 2).else:{{ ok = false }};
+var rlist = rs.at:'rows';
+(rlist.count == 2).else:{{ ok = false }};
+(((rlist.at:0).sum) == 3.0).else:{{ ok = false }};
+((((rlist.at:1).scale:2.0).sum) == 14.0).else:{{ ok = false }};
+
+"* class-side selectors returning values (not instances): a scalar, and a List of NEW instances
+((Vector.dtypeName) == 'float64').else:{{ ok = false }};
+var basis = Vector.basis:3;
+(basis.count == 3).else:{{ ok = false }};
+(((basis.at:0).length) == 3).else:{{ ok = false }};
+(((basis.at:1).at:1) == 1.0).else:{{ ok = false }};
+(((basis.at:1).at:0) == 0.0).else:{{ ok = false }};
+
+"* inbound instance refs: live Vectors nested in a data argument resolve extension-side
+((Vector.sumOf:#( va vb )) == 21.0).else:{{ ok = false }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
@@ -837,6 +875,38 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_fidelity_test.qn", &script);
+}
+
+/// The same ext-typed wire fidelity (BigInteger = ext 1, decimal = ext 2, nesting, bytes) through
+/// the RUST SDK (`ext_data`) — previously asserted only on the Python path, so a Rust-side codec
+/// regression could slip past the polyglot test.
+#[test]
+fn extension_structured_value_fidelity_rust() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_data");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+
+"* nested structure round-trips unchanged
+var m = #{{ 'xs': #( 1 2.5 'three' true nil ) 'blob': (Bytes.of:#( 1 2 255 )) }};
+((e.call:'echoData' with:'' data:m) == m).else:{{ ok = false }};
+
+"* BigInteger fidelity (must come back a BigInteger, not a string or truncated int)
+var big = BigInteger.of:'123456789012345678901234567890';
+var backBig = e.call:'echoData' with:'' data:big;
+(backBig == big).else:{{ ok = false }};
+((backBig + 1.asBigInteger) == (BigInteger.of:'123456789012345678901234567891'))
+    .else:{{ ok = false }};
+
+"* decimal fidelity (a BigDecimal beyond f64 precision)
+var dec = JSON.parse:'0.12345678901234567890123';
+((e.call:'echoData' with:'' data:dec) == dec).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_fidelity_rust_test.qn", &script);
 }
 
 /// Ownership of live-instance references: an extension-backed instance can only cross to the

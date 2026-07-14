@@ -25,6 +25,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -89,6 +90,9 @@ pub struct Host<'a> {
     arrays: Vec<ArrowArray>,
     /// The structured-value payload passed via `call:with:data:`, if any.
     data: Option<DataValue>,
+    /// The extension's object table (class dispatch only; `None` on the generic `serve` path),
+    /// so [`Host::instance`] can resolve live-instance references nested in data args.
+    objects: Option<&'a ObjectTable>,
 }
 
 impl<'a> Host<'a> {
@@ -115,6 +119,18 @@ impl<'a> Host<'a> {
     /// The structured-value payload passed via `call:with:data:`, as a `DataValue` tree, if any.
     pub fn data(&self) -> Option<&DataValue> {
         self.data.as_ref()
+    }
+
+    /// Resolve a live-instance reference nested inside a data tree (a [`DataValue::Resource`]
+    /// leaf — e.g. inside a `List`/`Map` method argument, the way the Python SDK hands the live
+    /// object directly) to this extension's instance. `None` for a non-`Resource` value, a dead
+    /// or foreign id, a type mismatch, the receiver of the current call (it is taken out of the
+    /// table for the call's duration), or on the generic `serve` path (no object table).
+    pub fn instance<T: 'static>(&self, value: &DataValue) -> Option<&'a T> {
+        let DataValue::Resource { id, .. } = value else {
+            return None;
+        };
+        self.objects?.get(*id)?.downcast_ref::<T>()
     }
 
     /// Make a host `String` value and return a (call-local) handle to it.
@@ -277,7 +293,7 @@ pub enum Reply {
     Scalar(String),
     Resource(u64),
     Array(ArrowArray),
-    Data(DataValue),
+    Data(Value),
     /// Return a live host value the extension holds (a handle from `get_global`/`make_value`/
     /// `call_method`); the host resolves it to the value and returns it to the caller.
     Handle(Handle),
@@ -297,8 +313,123 @@ impl From<&str> for Reply {
 
 impl From<DataValue> for Reply {
     fn from(d: DataValue) -> Self {
-        Reply::Data(d)
+        Reply::Data(d.into())
     }
+}
+
+impl From<Value> for Reply {
+    fn from(v: Value) -> Self {
+        Reply::Data(v)
+    }
+}
+
+/// A handler's structured return tree: [`DataValue`] plus live-instance leaves. `Instance` holds a
+/// *new* object of a registered class — at dispatch it enters the object table and crosses as a
+/// live-instance reference (MessagePack ext type 3), so a method can return e.g. a `List` of
+/// instances or a `Map` containing them (the Python SDK's `isinstance` auto-packing, made explicit
+/// for Rust). `Resource` passes an existing reference through verbatim (e.g. a leaf echoed back
+/// out of [`Host::data`]). Lowering is atomic: the whole tree is validated before any instance is
+/// inserted, so an unregistered type is a recoverable error that leaks nothing.
+pub enum Value {
+    Null,
+    Bool(bool),
+    Int(i64),
+    BigInt(String),
+    Float(f64),
+    Decimal(String),
+    Str(String),
+    Bytes(Vec<u8>),
+    List(Vec<Value>),
+    Map(Vec<(String, Value)>),
+    /// A new live instance of a registered class (see [`Value::instance`]).
+    Instance(Box<dyn Any>),
+    /// An existing live-instance reference, passed through verbatim.
+    Resource {
+        id: u64,
+        class_name: String,
+    },
+}
+
+impl Value {
+    /// Wrap a new instance of a registered class for embedding anywhere in a return tree.
+    pub fn instance<T: 'static>(obj: T) -> Value {
+        Value::Instance(Box::new(obj))
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Null => write!(f, "Null"),
+            Value::Bool(b) => write!(f, "Bool({b})"),
+            Value::Int(i) => write!(f, "Int({i})"),
+            Value::BigInt(s) => write!(f, "BigInt({s})"),
+            Value::Float(x) => write!(f, "Float({x})"),
+            Value::Decimal(s) => write!(f, "Decimal({s})"),
+            Value::Str(s) => write!(f, "Str({s:?})"),
+            Value::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
+            Value::List(xs) => f.debug_tuple("List").field(xs).finish(),
+            Value::Map(kvs) => f.debug_tuple("Map").field(kvs).finish(),
+            Value::Instance(_) => write!(f, "Instance(..)"),
+            Value::Resource { id, class_name } => {
+                write!(f, "Resource {{ id: {id}, class_name: {class_name:?} }}")
+            }
+        }
+    }
+}
+
+impl From<DataValue> for Value {
+    fn from(d: DataValue) -> Self {
+        match d {
+            DataValue::Null => Value::Null,
+            DataValue::Bool(b) => Value::Bool(b),
+            DataValue::Int(i) => Value::Int(i),
+            DataValue::BigInt(s) => Value::BigInt(s),
+            DataValue::Float(x) => Value::Float(x),
+            DataValue::Decimal(s) => Value::Decimal(s),
+            DataValue::Str(s) => Value::Str(s),
+            DataValue::Bytes(b) => Value::Bytes(b),
+            DataValue::List(xs) => Value::List(xs.into_iter().map(Into::into).collect()),
+            DataValue::Map(kvs) => {
+                Value::Map(kvs.into_iter().map(|(k, v)| (k, v.into())).collect())
+            }
+            DataValue::Resource { id, class_name } => Value::Resource { id, class_name },
+        }
+    }
+}
+
+/// Lower a rich [`Value`] tree with NO object table (the generic `serve` path): pure data passes
+/// through, but an `Instance` leaf is an author error — only a class-providing [`Extension`] owns
+/// a table to insert into (generic extensions manage their own registries via [`Reply::Resource`]).
+fn value_to_data_plain(v: Value) -> Result<DataValue, String> {
+    Ok(match v {
+        Value::Null => DataValue::Null,
+        Value::Bool(b) => DataValue::Bool(b),
+        Value::Int(i) => DataValue::Int(i),
+        Value::BigInt(s) => DataValue::BigInt(s),
+        Value::Float(x) => DataValue::Float(x),
+        Value::Decimal(s) => DataValue::Decimal(s),
+        Value::Str(s) => DataValue::Str(s),
+        Value::Bytes(b) => DataValue::Bytes(b),
+        Value::List(xs) => DataValue::List(
+            xs.into_iter()
+                .map(value_to_data_plain)
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Map(kvs) => DataValue::Map(
+            kvs.into_iter()
+                .map(|(k, v)| value_to_data_plain(v).map(|v| (k, v)))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Instance(_) => {
+            return Err(
+                "Value::Instance requires a class-providing Extension (the generic serve has \
+                 no object table); return Reply::Resource with a self-managed id instead"
+                    .to_string(),
+            );
+        }
+        Value::Resource { id, class_name } => DataValue::Resource { id, class_name },
+    })
 }
 
 /// Bind a unix socket at `path`, accept one host connection, and serve requests until the host
@@ -359,10 +490,11 @@ pub fn serve<R: Into<Reply>>(
                         releases,
                         arrays,
                         data,
+                        objects: None,
                     };
                     handler(&mut host, &op, &arg).into()
                 };
-                write_frame(&mut stream, &quoin_ext_proto::encode(&reply_to_msg(reply)))?;
+                write_frame(&mut stream, &quoin_ext_proto::encode(&reply_to_msg(reply)?))?;
             }
             other => {
                 return Err(invalid_data(format!(
@@ -374,18 +506,22 @@ pub fn serve<R: Into<Reply>>(
     Ok(())
 }
 
-/// Encode a handler's [`Reply`] as the matching terminal `CallReturn*` frame.
-fn reply_to_msg(reply: Reply) -> Msg {
-    match reply {
+/// Encode a handler's [`Reply`] as the matching terminal `CallReturn*` frame — the generic-`serve`
+/// path, with no object table: a `Value::Instance` leaf is an author error (see
+/// [`value_to_data_plain`]), surfaced as an `io::Error` like any other protocol bug.
+fn reply_to_msg(reply: Reply) -> io::Result<Msg> {
+    Ok(match reply {
         Reply::Scalar(result) => Msg::CallReturn { result },
         Reply::Resource(resource) => Msg::CallReturnResource {
             resource,
             class_name: String::new(),
         },
         Reply::Array(array) => Msg::CallReturnArray { array },
-        Reply::Data(value) => Msg::CallReturnData { value },
+        Reply::Data(value) => Msg::CallReturnData {
+            value: value_to_data_plain(value).map_err(invalid_data)?,
+        },
         Reply::Handle(handle) => Msg::CallReturnHandle { handle },
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +592,7 @@ pub type HandlerResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync + 
 type CtorFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Box<dyn Any>, String>>;
 type MethodFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Reply, String>>;
 type MakesFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Box<dyn Any>, String>>;
+type ClassMethodFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Reply, String>>;
 
 /// One registered class's erased handler tables, keyed by selector.
 struct ClassReg {
@@ -463,6 +600,7 @@ struct ClassReg {
     constructors: HashMap<String, CtorFn>,
     methods: HashMap<String, MethodFn>,
     makes: HashMap<String, MakesFn>,
+    class_methods: HashMap<String, ClassMethodFn>,
 }
 
 /// Downcast a table entry to the concrete type the handler was registered with. A mismatch can only
@@ -481,6 +619,7 @@ pub struct ClassBuilder<T> {
     constructors: HashMap<String, CtorFn>,
     methods: HashMap<String, MethodFn>,
     makes: HashMap<String, MakesFn>,
+    class_methods: HashMap<String, ClassMethodFn>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -539,12 +678,29 @@ impl<T: 'static> ClassBuilder<T> {
         self
     }
 
+    /// A class-side selector returning a value rather than a new instance (`Class sel: …` -> data,
+    /// a scalar, or a [`Value`] tree — which may itself carry new instances, e.g. a class-side
+    /// factory returning a `List` of them). The Python SDK gets this implicitly: a "constructor"
+    /// returning a non-instance replies as data.
+    pub fn class_method<R: Into<Reply>>(
+        &mut self,
+        selector: &str,
+        f: impl Fn(&mut Host, &[Arg]) -> HandlerResult<R> + 'static,
+    ) -> &mut Self {
+        self.class_methods.insert(
+            selector.to_string(),
+            Box::new(move |host, args| f(host, args).map(Into::into).map_err(|e| e.to_string())),
+        );
+        self
+    }
+
     fn into_reg(self) -> ClassReg {
         ClassReg {
             name: self.name,
             constructors: self.constructors,
             methods: self.methods,
             makes: self.makes,
+            class_methods: self.class_methods,
         }
     }
 }
@@ -581,6 +737,7 @@ impl Extension {
             constructors: HashMap::new(),
             methods: HashMap::new(),
             makes: HashMap::new(),
+            class_methods: HashMap::new(),
             _marker: PhantomData,
         };
         build(&mut cb);
@@ -652,7 +809,12 @@ impl Extension {
             .map(|c| ClassDecl {
                 name: c.name.clone(),
                 instance_selectors: c.methods.keys().chain(c.makes.keys()).cloned().collect(),
-                class_selectors: c.constructors.keys().cloned().collect(),
+                class_selectors: c
+                    .constructors
+                    .keys()
+                    .chain(c.class_methods.keys())
+                    .cloned()
+                    .collect(),
             })
             .collect();
         Msg::ManifestReturn {
@@ -676,31 +838,41 @@ impl Extension {
             .iter()
             .find(|c| c.name == class_name)
             .ok_or_else(|| invalid_data(format!("no extension-backed class '{class_name}'")))?;
-        let mut host = Host {
-            stream,
-            handles: Vec::new(),
-            resources: Vec::new(),
-            releases: Vec::new(),
-            arrays: Vec::new(),
-            data: None,
-        };
+        // Each branch builds its `Host` after the receiver (if any) is taken out of the table:
+        // `Host` holds a shared table borrow (`Host::instance` resolves live-instance references
+        // nested in data args), which must not overlap the `take`'s mutable one.
         if recv == 0 {
-            // Class-side: a constructor builds a new instance.
-            let ctor = class.constructors.get(op).ok_or_else(|| {
-                invalid_data(format!("no constructor '{op}' on class '{class_name}'"))
-            })?;
-            let obj = {
-                let args = resolve_args(method_args, table)?;
-                match ctor(&mut host, &args) {
-                    Ok(o) => o,
-                    Err(message) => return Ok(Msg::CallReturnError { message }),
+            if let Some(ctor) = class.constructors.get(op) {
+                // Class-side: a constructor builds a new instance.
+                let obj = {
+                    let args = resolve_args(method_args, table)?;
+                    let mut host = host_for_call(stream, table);
+                    match ctor(&mut host, &args) {
+                        Ok(o) => o,
+                        Err(message) => return Ok(Msg::CallReturnError { message }),
+                    }
+                };
+                let class_name = self.class_name_of(&*obj);
+                Ok(Msg::CallReturnResource {
+                    resource: table.insert(obj),
+                    class_name,
+                })
+            } else if let Some(class_method) = class.class_methods.get(op) {
+                // Class-side selector returning a value (possibly a tree carrying new instances).
+                let result = {
+                    let args = resolve_args(method_args, table)?;
+                    let mut host = host_for_call(stream, table);
+                    class_method(&mut host, &args)
+                };
+                match result {
+                    Ok(reply) => Ok(self.finish_reply(reply, table)),
+                    Err(message) => Ok(Msg::CallReturnError { message }),
                 }
-            };
-            let class_name = self.class_name_of(&*obj);
-            Ok(Msg::CallReturnResource {
-                resource: table.insert(obj),
-                class_name,
-            })
+            } else {
+                Err(invalid_data(format!(
+                    "no constructor '{op}' on class '{class_name}'"
+                )))
+            }
         } else if let Some(method) = class.methods.get(op) {
             // Take the receiver out of the table so its `&mut` can't alias an ext-instance argument
             // resolved from the same table, then put it back under its id — even if the handler
@@ -710,11 +882,12 @@ impl Extension {
                 .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
             let result = {
                 let args = resolve_args(method_args, table)?;
+                let mut host = host_for_call(stream, table);
                 method(recv_box.as_mut(), &mut host, &args)
             };
             table.reinsert(recv, recv_box);
             match result {
-                Ok(reply) => Ok(reply_to_msg(reply)),
+                Ok(reply) => Ok(self.finish_reply(reply, table)),
                 Err(message) => Ok(Msg::CallReturnError { message }),
             }
         } else if let Some(makes) = class.makes.get(op) {
@@ -723,6 +896,7 @@ impl Extension {
                 .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
             let result = {
                 let args = resolve_args(method_args, table)?;
+                let mut host = host_for_call(stream, table);
                 makes(recv_box.as_mut(), &mut host, &args)
             };
             table.reinsert(recv, recv_box);
@@ -740,6 +914,93 @@ impl Extension {
                 "no method '{op}' on class '{class_name}'"
             )))
         }
+    }
+
+    /// Encode a class handler's [`Reply`], lowering a rich [`Value`] tree through the object table:
+    /// every `Instance` leaf's type is validated against the registry *first*, then each is
+    /// inserted and becomes a live-instance reference — atomic, so an unregistered type is a
+    /// recoverable `CallReturnError` that inserts nothing.
+    fn finish_reply(&self, reply: Reply, table: &mut ObjectTable) -> Msg {
+        match reply {
+            Reply::Scalar(result) => Msg::CallReturn { result },
+            Reply::Resource(resource) => Msg::CallReturnResource {
+                resource,
+                class_name: String::new(),
+            },
+            Reply::Array(array) => Msg::CallReturnArray { array },
+            Reply::Data(value) => match self.check_instances(&value) {
+                Ok(()) => Msg::CallReturnData {
+                    value: self.lower_value(value, table),
+                },
+                Err(message) => Msg::CallReturnError { message },
+            },
+            Reply::Handle(handle) => Msg::CallReturnHandle { handle },
+        }
+    }
+
+    /// Pass 1 of the atomic lowering: every `Instance` leaf must be of a registered class.
+    fn check_instances(&self, v: &Value) -> Result<(), String> {
+        match v {
+            Value::Instance(obj) => {
+                if self.type_names.contains_key(&(**obj).type_id()) {
+                    Ok(())
+                } else {
+                    Err(
+                        "returned Value::Instance of a type not registered with any class"
+                            .to_string(),
+                    )
+                }
+            }
+            Value::List(xs) => xs.iter().try_for_each(|x| self.check_instances(x)),
+            Value::Map(kvs) => kvs.iter().try_for_each(|(_, x)| self.check_instances(x)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Pass 2: insert each `Instance` into the table and lower it to a live-instance reference
+    /// (infallible after [`Extension::check_instances`]).
+    fn lower_value(&self, v: Value, table: &mut ObjectTable) -> DataValue {
+        match v {
+            Value::Null => DataValue::Null,
+            Value::Bool(b) => DataValue::Bool(b),
+            Value::Int(i) => DataValue::Int(i),
+            Value::BigInt(s) => DataValue::BigInt(s),
+            Value::Float(x) => DataValue::Float(x),
+            Value::Decimal(s) => DataValue::Decimal(s),
+            Value::Str(s) => DataValue::Str(s),
+            Value::Bytes(b) => DataValue::Bytes(b),
+            Value::List(xs) => {
+                DataValue::List(xs.into_iter().map(|x| self.lower_value(x, table)).collect())
+            }
+            Value::Map(kvs) => DataValue::Map(
+                kvs.into_iter()
+                    .map(|(k, x)| (k, self.lower_value(x, table)))
+                    .collect(),
+            ),
+            Value::Instance(obj) => {
+                let class_name = self.class_name_of(&*obj);
+                DataValue::Resource {
+                    id: table.insert(obj),
+                    class_name,
+                }
+            }
+            Value::Resource { id, class_name } => DataValue::Resource { id, class_name },
+        }
+    }
+}
+
+/// Build the per-call [`Host`] for a class dispatch: the class path carries everything in
+/// `method_args`, so the legacy arg vectors are empty, and the shared table borrow backs
+/// [`Host::instance`].
+fn host_for_call<'a>(stream: &'a mut UnixStream, table: &'a ObjectTable) -> Host<'a> {
+    Host {
+        stream,
+        handles: Vec::new(),
+        resources: Vec::new(),
+        releases: Vec::new(),
+        arrays: Vec::new(),
+        data: None,
+        objects: Some(table),
     }
 }
 

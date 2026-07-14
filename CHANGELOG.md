@@ -8,6 +8,15 @@ under **Changed**, with the migration.
 
 ## [Unreleased]
 
+### Added
+
+- Extensions (experimental): the Rust SDK reaches resources-in-data parity with the Python
+  SDK. A handler can return a structured `Value` tree carrying new live instances
+  (`Value::instance`, e.g. a List of instances), register class-side selectors that return
+  values rather than instances (`ClassBuilder::class_method`), and resolve live-instance
+  references nested inside data arguments (`Host::instance`). No wire change — trees lower
+  to the existing live-instance references (protocol v2, ext type 3) before encoding.
+
 ### Changed
 
 - A `%'…'` interpolation literal is now lowered to string concatenation at compile time, so

@@ -18,12 +18,13 @@ fn main() {
         .expect("usage: ext_data <socket-path>");
     quoin_ext::serve(&path, |host, op, _arg| -> Reply {
         match op {
-            "echoData" => Reply::Data(host.data().cloned().unwrap_or(DataValue::Null)),
-            "mkList" => Reply::Data(DataValue::List(vec![
+            "echoData" => host.data().cloned().unwrap_or(DataValue::Null).into(),
+            "mkList" => DataValue::List(vec![
                 DataValue::Int(1),
                 DataValue::Int(2),
                 DataValue::Int(3),
-            ])),
+            ])
+            .into(),
             // A `DataValue` nested past the host's decode-depth cap — the host must
             // reject it with a catchable error, not overflow its stack (crash isolation).
             "deepData" => {
@@ -33,7 +34,7 @@ fn main() {
                 for _ in 0..300 {
                     dv = DataValue::List(vec![dv]);
                 }
-                Reply::Data(dv)
+                dv.into()
             }
             "buildArray" => {
                 let array_class = host.get_global("Array").expect("get_global Array");
@@ -51,7 +52,7 @@ fn main() {
             }
             "inspect" => {
                 let h = host.handles()[0];
-                Reply::Data(host.read_handle(h).expect("read_handle"))
+                host.read_handle(h).expect("read_handle").into()
             }
             other => Reply::Scalar(format!("unknown op: {other}")),
         }
