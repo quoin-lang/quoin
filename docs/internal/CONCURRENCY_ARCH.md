@@ -6,6 +6,12 @@ are `src/worker.rs` + `src/runtime/worker*.rs`, both surfacing counters in `VM.s
 (shared heap) was rejected on gc_arena grounds. Remaining shared-buffer and cost items are still
 design. The framing below was written before C1/C2 landed.*
 
+*Update (2026-07-13): the long-term direction is now written down — the model's guarantees
+in `CONCURRENCY_MODEL.md` (the stance: no coloring, sends park, the boundary law, one
+protocol / pluggable transports, recordable scheduling), and the worker↔extension
+convergence this doc's §13 flagged is designed in `ACTOR_OBJECTS.md` (hosted objects,
+cross-isolate channels, replay hooks). This doc remains the mechanism survey.*
+
 Design survey for multicore Quoin, in the style of `FUTURE_EXT_ARCH.md`: what is
 decided, why, and what stays open. Companion to `ASYNC_ARCH.md` (the
 single-threaded cooperative scheduler this builds on) and `AOT_ARCH.md` (whose
