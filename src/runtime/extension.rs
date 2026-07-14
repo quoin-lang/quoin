@@ -532,6 +532,7 @@ fn service_host_op<'gc>(
                 handle,
                 str: None,
                 error: None,
+                remote_stack: String::new(),
             }
         }
         Msg::HandleToString { handle } => match vm.handle_table.get(handle) {
@@ -540,6 +541,7 @@ fn service_host_op<'gc>(
                     handle: 0,
                     str: Some(s),
                     error: None,
+                    remote_stack: String::new(),
                 },
                 None => host_op_error(format!("handle {handle} does not refer to a String")),
             },
@@ -568,9 +570,10 @@ fn service_host_op<'gc>(
                         handle,
                         str: None,
                         error: None,
+                        remote_stack: String::new(),
                     }
                 }
-                Err(e) => host_op_error(format!("call '{selector}' on handle: {e}")),
+                Err(e) => host_op_failure(&format!("call '{selector}' on handle: "), &e),
             },
             Err(e) => host_op_error(e),
         },
@@ -579,10 +582,12 @@ fn service_host_op<'gc>(
                 Ok(results) => Msg::InvokeBlockReturn {
                     results,
                     error: None,
+                    remote_stack: String::new(),
                 },
-                Err(e) => Msg::InvokeBlockReturn {
+                Err((message, segment)) => Msg::InvokeBlockReturn {
                     results: Vec::new(),
-                    error: Some(e),
+                    error: Some(message),
+                    remote_stack: segment,
                 },
             }
         }
@@ -594,6 +599,7 @@ fn service_host_op<'gc>(
                     handle,
                     str: None,
                     error: None,
+                    remote_stack: String::new(),
                 }
             }
             None => host_op_error(format!("get_global: no global named '{name}'")),
@@ -607,6 +613,7 @@ fn service_host_op<'gc>(
                     handle,
                     str: None,
                     error: None,
+                    remote_stack: String::new(),
                 }
             }
             Err(e) => host_op_error(format!("make_value: {e}")),
@@ -616,15 +623,18 @@ fn service_host_op<'gc>(
                 Ok(wire) => Msg::ReadHandleReturn {
                     value: wire,
                     error: None,
+                    remote_stack: String::new(),
                 },
                 Err(e) => Msg::ReadHandleReturn {
                     value: WireData::Null,
                     error: Some(format!("read_handle: {e}")),
+                    remote_stack: String::new(),
                 },
             },
             Err(e) => Msg::ReadHandleReturn {
                 value: WireData::Null,
                 error: Some(e),
+                remote_stack: String::new(),
             },
         },
         other => {
@@ -646,28 +656,91 @@ fn invoke_block_batches<'gc>(
     ext_id: u64,
     block_handle: u64,
     batches: &[Vec<u64>],
-) -> Result<Vec<u64>, String> {
+) -> Result<Vec<u64>, (String, String)> {
     // Resolve the handle to a block value (rooted in the handle table, so safe to hold).
-    let block = match vm.handle_table.get(block_handle)? {
+    let block = match vm
+        .handle_table
+        .get(block_handle)
+        .map_err(|e| (e, String::new()))?
+    {
         Value::Object(obj) => match &obj.borrow().payload {
             ObjectPayload::Block(b) => *b,
-            _ => return Err(format!("handle {block_handle} does not refer to a block")),
+            _ => {
+                return Err((
+                    format!("handle {block_handle} does not refer to a block"),
+                    String::new(),
+                ));
+            }
         },
-        _ => return Err(format!("handle {block_handle} does not refer to a block")),
+        _ => {
+            return Err((
+                format!("handle {block_handle} does not refer to a block"),
+                String::new(),
+            ));
+        }
     };
 
     let mut results = Vec::with_capacity(batches.len());
     for tuple in batches {
         let mut arg_vals = Vec::with_capacity(tuple.len());
         for &handle in tuple {
-            arg_vals.push(vm.handle_table.get(handle)?);
+            arg_vals.push(
+                vm.handle_table
+                    .get(handle)
+                    .map_err(|e| (e, String::new()))?,
+            );
         }
-        let result = vm
-            .execute_block(mc, block, arg_vals, None)
-            .map_err(|e| format!("block invocation: {e}"))?;
+        // A raise inside the block travels to the peer as (short message, this host's
+        // rendered stack segment) — the segment keeps the cross-process interleave.
+        let result = vm.execute_block(mc, block, arg_vals, None).map_err(|e| {
+            (
+                format!("block invocation: {}", e.innermost()),
+                quoin_stack_segment(&e),
+            )
+        })?;
         results.push(vm.handle_table.mint_local(result, epoch, ext_id));
     }
     Ok(results)
+}
+
+/// Cap an inbound cross-process stack blob: it is untrusted foreign text on an error
+/// path — plenty for any real traceback, boring for a hostile peer. Truncation is noted
+/// in-band so a clipped blob is never mistaken for a complete one.
+const MAX_REMOTE_STACK: usize = 64 * 1024;
+
+fn truncate_blob(mut blob: String) -> String {
+    if blob.len() > MAX_REMOTE_STACK {
+        let mut cut = MAX_REMOTE_STACK;
+        while !blob.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        blob.truncate(cut);
+        blob.push_str("\n[remote stack truncated]\n");
+    }
+    blob
+}
+
+/// Render a Quoin error as this host's segment of the cross-process stack blob: the
+/// message, the frame lines the error carried, and — when the failure was itself a deeper
+/// extension error — that error's own blob appended, preserving the interleave through
+/// arbitrarily deep host<->extension nesting. Opaque to the peer (PROTOCOL.md §Errors).
+fn quoin_stack_segment(e: &QuoinError) -> String {
+    let mut seg = format!("--- Quoin (host) ---\n{}\n", e.innermost());
+    if let QuoinError::WithSourceInfo { trace, .. } = e {
+        for frame in trace {
+            seg.push_str(frame);
+            seg.push('\n');
+        }
+    }
+    if let QuoinError::ExtensionError { remote_stack, .. } = e.innermost()
+        && !remote_stack.is_empty()
+    {
+        seg.push_str(remote_stack);
+        if !seg.ends_with('\n') {
+            seg.push('\n');
+        }
+    }
+    seg
 }
 
 fn ack() -> Msg {
@@ -675,6 +748,7 @@ fn ack() -> Msg {
         handle: 0,
         str: None,
         error: None,
+        remote_stack: String::new(),
     }
 }
 
@@ -683,6 +757,18 @@ fn host_op_error(message: String) -> Msg {
         handle: 0,
         str: None,
         error: Some(message),
+        remote_stack: String::new(),
+    }
+}
+
+/// A host-op that failed with a full Quoin error (a raise inside `call_method` or a block):
+/// the short message plus this host's stack segment for the peer's blob.
+fn host_op_failure(context: &str, e: &QuoinError) -> Msg {
+    Msg::HostOpReturn {
+        handle: 0,
+        str: None,
+        error: Some(format!("{context}{}", e.innermost())),
+        remote_stack: quoin_stack_segment(e),
     }
 }
 
@@ -823,9 +909,17 @@ fn extension_call<'gc>(
                 // ext -> host: the call failed recoverably. Raise a catchable Quoin error; the
                 // extension stays alive (a normal terminal frame, not a crash) — `finish_outcome`'s
                 // error path runs `note_if_exited`, which finds the child still running and so
-                // propagates the error without marking the extension dead.
-                Msg::CallReturnError { message } => {
-                    return Err(QuoinError::ExtensionError(message));
+                // propagates the error without marking the extension dead. The opaque stack blob
+                // rides along (capped — untrusted foreign text): the printer shows it fenced,
+                // Quoin code reads it as `ex.remoteStack`.
+                Msg::CallReturnError {
+                    message,
+                    remote_stack,
+                } => {
+                    return Err(QuoinError::ExtensionError {
+                        message,
+                        remote_stack: truncate_blob(remote_stack),
+                    });
                 }
                 host_op => service_host_op(vm, mc, id, epoch, ext_id, host_op)?,
             }

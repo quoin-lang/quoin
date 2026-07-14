@@ -8,6 +8,16 @@ under **Changed**, with the migration.
 
 ## [Unreleased]
 
+### Added
+
+- Extensions (experimental): **cross-process stack traces**. A failed extension call now
+  carries an opaque stack blob — a Python extension sends its real traceback, a Rust one
+  its error chain under a dispatch-frame line, and failures that cross the boundary
+  several times interleave each side's segment in unwind order. The default traceback
+  printer shows the blob fenced (`--- in extension ---`) at the failing call, and Quoin
+  code reads it as `ex.remoteStack` (nil on ordinary errors). Old SDKs interoperate
+  unchanged (message-only errors).
+
 ### Changed
 
 - Extensions (experimental): concurrent calls to one extension connection now **queue

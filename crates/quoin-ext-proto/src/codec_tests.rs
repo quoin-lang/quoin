@@ -66,6 +66,11 @@ fn every_message_round_trips() {
         Msg::CallReturn { result: "r".into() },
         Msg::CallReturnError {
             message: "boom".into(),
+            remote_stack: String::new(),
+        },
+        Msg::CallReturnError {
+            message: "boom".into(),
+            remote_stack: "in Vector#at: (instance 3): boom\n".into(),
         },
         Msg::CallReturnResource {
             resource: 42,
@@ -105,10 +110,12 @@ fn every_message_round_trips() {
         Msg::InvokeBlockReturn {
             results: vec![10, 11, 12],
             error: None,
+            remote_stack: String::new(),
         },
         Msg::InvokeBlockReturn {
             results: vec![],
             error: Some("bad".into()),
+            remote_stack: "--- Quoin (host) ---\nbad\n".into(),
         },
         Msg::GetGlobal {
             name: "Timer".into(),
@@ -120,20 +127,24 @@ fn every_message_round_trips() {
         Msg::ReadHandleReturn {
             value: Dv::Decimal("-1.500".into()),
             error: None,
+            remote_stack: String::new(),
         },
         Msg::ReadHandleReturn {
             value: Dv::Null,
             error: Some("no such handle".into()),
+            remote_stack: String::new(),
         },
         Msg::HostOpReturn {
             handle: 13,
             str: Some("s".into()),
             error: None,
+            remote_stack: String::new(),
         },
         Msg::HostOpReturn {
             handle: 0,
             str: None,
             error: Some("nope".into()),
+            remote_stack: "--- Quoin (host) ---\nnope\n".into(),
         },
     ];
     for msg in msgs {

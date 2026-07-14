@@ -684,10 +684,10 @@ pub type HandlerResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync + 
 /// Erased per-selector handlers (the concrete `T` is captured at registration and downcast here).
 /// `Err(String)` is the recoverable error message → `CallReturnError`; transport/protocol failures
 /// (bad frame, dead instance id) stay `io::Error` at the dispatch/serve level.
-type CtorFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Box<dyn Any>, String>>;
-type MethodFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Reply, String>>;
-type MakesFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Box<dyn Any>, String>>;
-type ClassMethodFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Reply, String>>;
+type CtorFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Box<dyn Any>, HandlerFailure>>;
+type MethodFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Reply, HandlerFailure>>;
+type MakesFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Box<dyn Any>, HandlerFailure>>;
+type ClassMethodFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Reply, HandlerFailure>>;
 
 /// One registered class's erased handler tables, keyed by selector.
 struct ClassReg {
@@ -698,11 +698,46 @@ struct ClassReg {
     class_methods: HashMap<String, ClassMethodFn>,
 }
 
+/// A failed handler, split for the wire: the short `message` (the Quoin error's `.message`)
+/// and this extension's contribution to the opaque cross-process stack blob (the error's
+/// `source()` chain — Rust's traceback — with the dispatch frame prepended at dispatch).
+struct HandlerFailure {
+    message: String,
+    remote_stack: String,
+}
+
+impl From<String> for HandlerFailure {
+    fn from(message: String) -> Self {
+        HandlerFailure {
+            message,
+            remote_stack: String::new(),
+        }
+    }
+}
+
+/// Split a boxed handler error: `to_string()` is the message; the `source()` chain becomes
+/// stack-blob lines (one `caused by:` per link).
+fn failure_from(e: Box<dyn std::error::Error + Send + Sync>) -> HandlerFailure {
+    let mut remote_stack = String::new();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        remote_stack.push_str("caused by: ");
+        remote_stack.push_str(&cause.to_string());
+        remote_stack.push('\n');
+        source = cause.source();
+    }
+    HandlerFailure {
+        message: e.to_string(),
+        remote_stack,
+    }
+}
+
 /// Downcast a table entry to the concrete type the handler was registered with. A mismatch can only
 /// be a host/protocol bug; surfaced as a recoverable handler error rather than crashing the loop.
-fn downcast<T: 'static>(obj: &mut dyn Any) -> Result<&mut T, String> {
-    obj.downcast_mut::<T>()
-        .ok_or_else(|| "extension instance is not of the expected type".to_string())
+fn downcast<T: 'static>(obj: &mut dyn Any) -> Result<&mut T, HandlerFailure> {
+    obj.downcast_mut::<T>().ok_or_else(|| {
+        HandlerFailure::from("extension instance is not of the expected type".to_string())
+    })
 }
 
 /// Configures one extension-backed class, backed by the Rust type `T`. Class-side `constructor`s
@@ -731,7 +766,7 @@ impl<T: 'static> ClassBuilder<T> {
             Box::new(move |host, args| {
                 f(host, args)
                     .map(|t| Box::new(t) as Box<dyn Any>)
-                    .map_err(|e| e.to_string())
+                    .map_err(failure_from)
             }),
         );
         self
@@ -748,7 +783,7 @@ impl<T: 'static> ClassBuilder<T> {
             Box::new(move |obj, host, args| {
                 f(downcast::<T>(obj)?, host, args)
                     .map(Into::into)
-                    .map_err(|e| e.to_string())
+                    .map_err(failure_from)
             }),
         );
         self
@@ -767,7 +802,7 @@ impl<T: 'static> ClassBuilder<T> {
             Box::new(move |obj, host, args| {
                 f(downcast::<T>(obj)?, host, args)
                     .map(|u| Box::new(u) as Box<dyn Any>)
-                    .map_err(|e| e.to_string())
+                    .map_err(failure_from)
             }),
         );
         self
@@ -784,7 +819,7 @@ impl<T: 'static> ClassBuilder<T> {
     ) -> &mut Self {
         self.class_methods.insert(
             selector.to_string(),
-            Box::new(move |host, args| f(host, args).map(Into::into).map_err(|e| e.to_string())),
+            Box::new(move |host, args| f(host, args).map(Into::into).map_err(failure_from)),
         );
         self
     }
@@ -1053,7 +1088,10 @@ impl Extension {
                 Ok(()) => Msg::CallReturnData {
                     value: self.lower_value(value, table),
                 },
-                Err(message) => Msg::CallReturnError { message },
+                Err(message) => Msg::CallReturnError {
+                    message,
+                    remote_stack: String::new(),
+                },
             },
             Reply::Handle(handle) => Msg::CallReturnHandle { handle },
         }

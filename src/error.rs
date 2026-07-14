@@ -154,7 +154,14 @@ pub enum QuoinError {
     /// the `adbc` driver) — the extension stays alive. Mapped to a catchable Quoin `Error` object
     /// at the `catch:` boundary. Distinct from the extension *crashing*, which is an `Io` of kind
     /// `#closed`. Message-only (a typed/extension-named error class is a later refinement).
-    ExtensionError(String),
+    /// A recoverable error reported by an out-of-process extension. `remote_stack` is the
+    /// OPAQUE cross-process stack blob (possibly multi-segment, unwind order; empty = none):
+    /// displayed fenced by the printer and surfaced to Quoin as `ex.remoteStack` — never
+    /// parsed (`quoin-ext-proto/PROTOCOL.md`).
+    ExtensionError {
+        message: String,
+        remote_stack: String,
+    },
     /// Marker that a Quoin-level exception value has been parked in
     /// `VmState.active_exception` (set by `throw`). Carries no payload — the
     /// thrown value travels in the GC-rooted `active_exception` slot, not here.
@@ -183,6 +190,24 @@ pub enum QuoinError {
         trace: Vec<String>,
         supports_color: bool,
     },
+}
+
+impl QuoinError {
+    /// Peel `WithSourceInfo` wrappers to the underlying error (identity when unwrapped).
+    pub fn innermost(&self) -> &QuoinError {
+        match self {
+            QuoinError::WithSourceInfo { error, .. } => error.innermost(),
+            other => other,
+        }
+    }
+}
+
+/// Strip control characters (except newline/tab) from an untrusted cross-process stack
+/// blob before terminal display — foreign text must not smuggle ANSI/cursor sequences.
+fn sanitize_blob(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
 }
 
 fn get_highlighted_range(
@@ -288,7 +313,7 @@ impl fmt::Display for QuoinError {
             QuoinError::ParseError(msg) => write!(f, "{}", msg),
             QuoinError::ClassError(msg) => write!(f, "{}", msg),
             QuoinError::NameError(msg) => write!(f, "{}", msg),
-            QuoinError::ExtensionError(msg) => write!(f, "{}", msg),
+            QuoinError::ExtensionError { message, .. } => write!(f, "{}", message),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
             QuoinError::Cancelled => write!(f, "task cancelled"),
@@ -352,6 +377,20 @@ impl fmt::Display for QuoinError {
                         writeln!(f, "  {} {}", pipe, line)?;
                     }
                     write!(f, "  {}", pipe)?;
+                }
+                // A cross-process blob sits between the failing line and the Quoin trace:
+                // everything REMOTE is deeper than the raise point, so it prints first,
+                // fenced and sanitized (untrusted foreign text must not inject control
+                // sequences into the terminal).
+                if let QuoinError::ExtensionError { remote_stack, .. } = error.innermost()
+                    && !remote_stack.is_empty()
+                {
+                    writeln!(f)?;
+                    writeln!(f, "  --- in extension ---")?;
+                    for line in sanitize_blob(remote_stack).lines() {
+                        writeln!(f, "  {}", line)?;
+                    }
+                    write!(f, "  ---")?;
                 }
                 if !trace.is_empty() {
                     for frame_str in trace {

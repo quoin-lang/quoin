@@ -92,10 +92,14 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             write_uint(&mut out, T_CALL_RETURN);
             write_str(&mut out, result);
         }
-        Msg::CallReturnError { message } => {
-            write_array_header(&mut out, 2);
+        Msg::CallReturnError {
+            message,
+            remote_stack,
+        } => {
+            write_array_header(&mut out, 3);
             write_uint(&mut out, T_CALL_RETURN_ERROR);
             write_str(&mut out, message);
+            write_str(&mut out, remote_stack);
         }
         Msg::CallReturnResource {
             resource,
@@ -175,11 +179,16 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
                 write_u64_vec(&mut out, tuple);
             }
         }
-        Msg::InvokeBlockReturn { results, error } => {
-            write_array_header(&mut out, 3);
+        Msg::InvokeBlockReturn {
+            results,
+            error,
+            remote_stack,
+        } => {
+            write_array_header(&mut out, 4);
             write_uint(&mut out, T_INVOKE_BLOCK_RETURN);
             write_u64_vec(&mut out, results);
             write_opt_str(&mut out, error);
+            write_str(&mut out, remote_stack);
         }
         Msg::GetGlobal { name } => {
             write_array_header(&mut out, 2);
@@ -196,18 +205,29 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             write_uint(&mut out, T_READ_HANDLE);
             write_uint(&mut out, *handle);
         }
-        Msg::ReadHandleReturn { value, error } => {
-            write_array_header(&mut out, 3);
+        Msg::ReadHandleReturn {
+            value,
+            error,
+            remote_stack,
+        } => {
+            write_array_header(&mut out, 4);
             write_uint(&mut out, T_READ_HANDLE_RETURN);
             write_dv(&mut out, value);
             write_opt_str(&mut out, error);
+            write_str(&mut out, remote_stack);
         }
-        Msg::HostOpReturn { handle, str, error } => {
-            write_array_header(&mut out, 4);
+        Msg::HostOpReturn {
+            handle,
+            str,
+            error,
+            remote_stack,
+        } => {
+            write_array_header(&mut out, 5);
             write_uint(&mut out, T_HOST_OP_RETURN);
             write_uint(&mut out, *handle);
             write_opt_str(&mut out, str);
             write_opt_str(&mut out, error);
+            write_str(&mut out, remote_stack);
         }
     }
     out
@@ -508,9 +528,10 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Msg, String> {
             msg
         }
         T_CALL_RETURN_ERROR => {
-            let extra = need(fields, 1, "CallReturnError")?;
+            let mut extra = need(fields, 1, "CallReturnError")?;
             let msg = Msg::CallReturnError {
                 message: read_str(rd)?,
+                remote_stack: read_appended_str(rd, &mut extra)?,
             };
             skip_extra(rd, extra)?;
             msg
@@ -631,10 +652,11 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Msg, String> {
             msg
         }
         T_INVOKE_BLOCK_RETURN => {
-            let extra = need(fields, 2, "InvokeBlockReturn")?;
+            let mut extra = need(fields, 2, "InvokeBlockReturn")?;
             let msg = Msg::InvokeBlockReturn {
                 results: read_u64_vec(rd)?,
                 error: read_opt_str(rd)?,
+                remote_stack: read_appended_str(rd, &mut extra)?,
             };
             skip_extra(rd, extra)?;
             msg
@@ -664,20 +686,22 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Msg, String> {
             msg
         }
         T_READ_HANDLE_RETURN => {
-            let extra = need(fields, 2, "ReadHandleReturn")?;
+            let mut extra = need(fields, 2, "ReadHandleReturn")?;
             let msg = Msg::ReadHandleReturn {
                 value: read_dv(rd, 0)?,
                 error: read_opt_str(rd)?,
+                remote_stack: read_appended_str(rd, &mut extra)?,
             };
             skip_extra(rd, extra)?;
             msg
         }
         T_HOST_OP_RETURN => {
-            let extra = need(fields, 3, "HostOpReturn")?;
+            let mut extra = need(fields, 3, "HostOpReturn")?;
             let msg = Msg::HostOpReturn {
                 handle: read_uint(rd)?,
                 str: read_opt_str(rd)?,
                 error: read_opt_str(rd)?,
+                remote_stack: read_appended_str(rd, &mut extra)?,
             };
             skip_extra(rd, extra)?;
             msg
@@ -719,6 +743,16 @@ fn need(fields: usize, expected: usize, what: &str) -> Result<usize, String> {
     fields.checked_sub(expected).ok_or_else(|| {
         format!("extension protocol: {what} frame has {fields} field(s), needs {expected}")
     })
+}
+
+/// Read an APPENDED optional String field: present when the peer is new enough to send
+/// it, an empty default when it isn't (PROTOCOL.md §Evolution — append-only fields).
+fn read_appended_str(rd: &mut &[u8], extra: &mut usize) -> Result<String, String> {
+    if *extra == 0 {
+        return Ok(String::new());
+    }
+    *extra -= 1;
+    read_str(rd)
 }
 
 fn skip_extra(rd: &mut &[u8], extra: usize) -> Result<(), String> {

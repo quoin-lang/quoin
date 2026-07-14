@@ -3312,7 +3312,19 @@ impl<'gc> VmState<'gc> {
             QuoinError::ClassError(msg) => self.make_error(mc, "ClassError", msg, None),
             QuoinError::NameError(msg) => self.make_error(mc, "NameError", msg, None),
             QuoinError::StackExhausted(msg) => self.make_error(mc, "StackError", msg, None),
-            QuoinError::ExtensionError(msg) => self.make_error(mc, "Error", msg, None),
+            QuoinError::ExtensionError {
+                message,
+                remote_stack,
+            } => {
+                if remote_stack.is_empty() {
+                    self.make_error(mc, "Error", message, None)
+                } else {
+                    // The opaque cross-process blob rides on the error object for
+                    // programmatic access (`ex.remoteStack`); the printer shows it fenced.
+                    let blob = self.new_string(mc, remote_stack.clone());
+                    self.build_error_object(mc, "Error", message, &[("remoteStack", blob)])
+                }
+            }
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             QuoinError::NotCallable(_)
             | QuoinError::StackUnderflow(_)

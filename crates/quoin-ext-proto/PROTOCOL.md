@@ -30,7 +30,7 @@ unsigned ints; `str`/`bin`/`bool`/arrays/maps are their native MessagePack forms
 |---|---|---|---|
 | 0 | Call | host → ext | `op:str, arg:str, handles:[u64], resources:[u64], releases:[u64], arrays:[ArrowArray], data:Value|nil, class_name:str, recv:u64, method_args:[Arg]` |
 | 1 | CallReturn | ext → host | `result:str` |
-| 2 | CallReturnError | ext → host | `message:str` |
+| 2 | CallReturnError | ext → host | `message:str, remote_stack:str` |
 | 3 | CallReturnResource | ext → host | `resource:u64, class_name:str` |
 | 4 | CallReturnArray | ext → host | `array:ArrowArray` |
 | 5 | CallReturnData | ext → host | `value:Value` |
@@ -43,12 +43,12 @@ unsigned ints; `str`/`bin`/`bool`/arrays/maps are their native MessagePack forms
 | 12 | Release | ext → host | `handles:[u64]` |
 | 13 | CallMethodOnHandle | ext → host | `receiver:u64, selector:str, args:[u64]` |
 | 14 | InvokeBlock | ext → host | `block:u64, batches:[[u64]]` |
-| 15 | InvokeBlockReturn | host → ext | `results:[u64], error:str|nil` |
+| 15 | InvokeBlockReturn | host → ext | `results:[u64], error:str|nil, remote_stack:str` |
 | 16 | GetGlobal | ext → host | `name:str` |
 | 17 | MakeValue | ext → host | `value:Value` |
 | 18 | ReadHandle | ext → host | `handle:u64` |
-| 19 | ReadHandleReturn | host → ext | `value:Value, error:str|nil` |
-| 20 | HostOpReturn | host → ext | `handle:u64, str:str|nil, error:str|nil` |
+| 19 | ReadHandleReturn | host → ext | `value:Value, error:str|nil, remote_stack:str` |
+| 20 | HostOpReturn | host → ext | `handle:u64, str:str|nil, error:str|nil, remote_stack:str` |
 
 Composite fields (also MessagePack arrays):
 

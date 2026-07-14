@@ -22,6 +22,7 @@ import decimal
 import os
 import socket
 import struct
+import traceback
 
 try:
     import msgpack
@@ -245,10 +246,12 @@ def _encode_manifest_return(classes):
     )
 
 
-def _encode_call_return_error(message, pack=_pack):
+def _encode_call_return_error(message, remote_stack="", pack=_pack):
     """A call failed recoverably: the host raises a catchable Quoin error and the extension keeps
-    running. A terminal frame, like the other ``CallReturn*`` replies."""
-    return pack([_T_CALL_RETURN_ERROR, message])
+    running. A terminal frame, like the other ``CallReturn*`` replies. ``remote_stack`` is this
+    extension's OPAQUE stack blob — its traceback, plus any host segments from failed host-ops,
+    in unwind order (PROTOCOL.md); the host displays it fenced, never parses it."""
+    return pack([_T_CALL_RETURN_ERROR, message, remote_stack])
 
 
 def _encode_call_return_resource(resource_id, class_name="", pack=_pack):
@@ -381,6 +384,7 @@ class Host:
         reply = self._round_trip([_T_INVOKE_BLOCK, block, [list(t) for t in batches]])
         results, error = _fields(reply, _T_INVOKE_BLOCK_RETURN, 2, "InvokeBlockReturn")
         if error is not None:
+            self._note_remote_stack(reply, 3)
             raise RuntimeError(error)
         return results
 
@@ -488,11 +492,16 @@ def serve(path, handler):
                     continue
                 op, arg, handles, resources, releases, arrays, data = _decode_call(msg)
                 host = Host(conn, handles, resources, releases, arrays, data)
-                # A handler exception becomes a catchable Quoin error; the extension keeps serving.
+                # A handler exception becomes a catchable Quoin error; the extension keeps
+                # serving. Its traceback (plus any host segments from failed host-ops)
+                # becomes the opaque cross-process stack blob.
                 try:
                     reply = _encode_reply(handler(host, op, arg))
                 except Exception as exc:  # noqa: BLE001 — any handler error maps to a catchable error
-                    reply = _encode_call_return_error(str(exc))
+                    remote = (
+                        f"in {op}\n" + traceback.format_exc() + "".join(host.error_stacks)
+                    )
+                    reply = _encode_call_return_error(str(exc), remote)
                 write_frame(conn, reply)
         finally:
             conn.close()
@@ -709,11 +718,13 @@ class Extension:
                 raise ValueError(f"no constructor '{op}' on class '{class_name}'")
             # A handler exception is a *recoverable* error: send it as a `CallReturnError` so the
             # host raises a catchable Quoin error and this extension keeps serving (unlike the
-            # routing failures above, which are protocol bugs and propagate).
+            # routing failures above, which are protocol bugs and propagate). Its traceback —
+            # the real thing, Python has it for free — plus any host segments become the
+            # opaque cross-process stack blob.
             try:
                 obj = ctor(*args)
             except Exception as exc:  # noqa: BLE001 — any handler error maps to a catchable error
-                return _encode_call_return_error(str(exc))
+                return failure(exc)
             # A class-side selector returning a non-instance replies as data, same as the
             # instance-method rule below — so a "constructor" can return a List of instances
             # (numpy's `meshgrid:with:`) or nothing at all (`seed:`).
@@ -729,7 +740,7 @@ class Extension:
         try:
             result = method(instance, *args)
         except Exception as exc:  # noqa: BLE001 — any handler error maps to a catchable error
-            return _encode_call_return_error(str(exc))
+            return failure(exc)
         # A returned registered instance becomes a new ext-side object; anything else is data
         # (registered instances nested inside it cross as live references — `_pack_frame`).
         if isinstance(result, registered_types):
