@@ -650,7 +650,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 }
                 "process" => {
                     let reg = path.clone();
-                    let (ch, pid, grip) = crate::worker::spawn_worker_process(path, None)
+                    let (ch, pid, grip) = crate::worker::spawn_worker_process(path, None, 1)
                         .map_err(QuoinError::Other)?;
                     wrap_handle(vm, mc, receiver, &reg, "process", Some(pid), Some(grip), ch)
                 }

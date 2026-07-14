@@ -64,15 +64,21 @@ under **Changed**, with the migration.
   mailbox, fairly queued). The acquisition discipline is deadlock-free by
   construction for everything except calls that genuinely wait on each other —
   and those now raise a **catchable deadlock error naming the cycle** at call
-  time instead of hanging, verified end to end.
+  time instead of hanging, verified end to end. Lanes work on **both backings**
+  (`host:class:backing:lanes:`): a thread service runs one cooperative fiber per
+  lane, a process service opens one conversation socket per lane (never frame
+  multiplexing — each socket speaks the protocol unchanged), with identical
+  semantics. Process services also now report their real servicing time
+  (`ReplyMeta` crosses the socket pumps), so their `VM.boundaryStats` rows
+  decompose into handler/transport/queue like everything else's.
 - **`VM.claims` / `VM.claimsReport`**: live lock-shape observability for hosted
   services — per object: holder, re-entry depth, queued waiters and their wait so
   far; per service: lane occupancy and contention counters (acquisitions,
   contended, wait totals, queue high-water, deadlocks detected); plus the
   waits-for edges themselves, with the report calling out the longest live wait
   chain — the pre-deadlock warning. Hosted-service calls also now feed
-  `VM.boundaryStats` rows beside extensions (thread services report real
-  `handler_micros`; process services report 0 for now).
+  `VM.boundaryStats` rows beside extensions, with real `handler_micros` on both
+  backings.
 - Workers (experimental): **conversations, not round trips** — the peer protocol's
   re-entrancy now works for worker services, both backings. While a call is in
   flight the worker can invoke parent-held block handles (serviced on the caller's

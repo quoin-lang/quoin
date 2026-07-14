@@ -424,6 +424,76 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
     assert_service_script_passes("nested_lane", script, &[("runner.qn", RUNNER_UNIT)]);
 }
 
+/// §5.1 over real sockets (5b): a PROCESS service with N lanes — overlap,
+/// exact per-object serialization, nested calls riding their conversation,
+/// and the child's handler time crossing as `ReplyMeta` into
+/// `VM.boundaryStats`.
+#[test]
+fn service_lanes_process() {
+    let script = r#"
+var ok = true;
+var r = WorkerService.host:'@runner.qn@' class:'Runner' backing:'process' lanes:3;
+var m = r.mate;
+
+"* two lanes genuinely overlap over the socket pair
+var order = List.new;
+var slow = Task.spawn:{ r.slowDouble:5; order.add:'slow' };
+Async.sleep:60;
+m.double:3;
+order.add:'fast';
+slow.join;
+((order.at:0) == 'fast').else:{ ok = false; ('FAIL order: ' + order.s).print };
+
+"* one object's mailbox stays exact under concurrent callers on 3 lanes
+Async.gather:#(
+    { m.tally:1 } { m.tally:1 } { m.tally:1 }
+    { m.tally:1 } { m.tally:1 } { m.tally:1 }
+);
+((m.tally:0) == 6).else:{ ok = false; 'FAIL: tally'.print };
+
+"* nested: a parent block the worker invokes calls back into another object
+"* of the same worker, riding its own conversation over the socket
+((r.apply:{ |n| m.double:n } to:9) == 18)
+    .else:{ ok = false; 'FAIL: nested'.print };
+
+"* the child's handler time crosses the socket as ReplyMeta: this service's
+"* boundary rows decompose (handler > 0), no longer 0-until-5b
+var svc = VM.boundaryStats.select:{ |row|
+    ((row.at:'peer').contains?:'svc:') && ((row.at:'handlerMicros') > 0)
+};
+(svc.count >= 1).else:{ ok = false; 'FAIL: no handler timing'.print };
+
+r.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("lanes_proc", script, &[("runner.qn", RUNNER_UNIT)]);
+}
+
+/// The mutual-call cycle over process backing: detection is parent-side
+/// claim state, so the backing changes nothing — verified anyway.
+#[test]
+fn service_mutual_call_deadlock_detected_process() {
+    let script = r#"
+var ok = true;
+var r = WorkerService.host:'@runner.qn@' class:'Runner' backing:'process' lanes:2;
+var a = r.mate;
+var b = r.mate;
+var ta = Task.spawn:{ { (a.apply:{ |n| Async.sleep:80; b.double:n } to:1).s }.catch:{ |e| e.s } };
+var tb = Task.spawn:{ { (b.apply:{ |n| Async.sleep:80; a.double:n } to:1).s }.catch:{ |e| e.s } };
+var oa = ta.join;
+var ob = tb.join;
+var died = 0;
+(oa.contains?:'deadlock').if:{ died = died + 1 };
+(ob.contains?:'deadlock').if:{ died = died + 1 };
+(died == 1).else:{ ok = false; ('FAIL died=' + died.s + ' oa=' + oa + ' ob=' + ob).print };
+((oa == '2') || (ob == '2')).else:{ ok = false; ('FAIL winner: ' + oa + ' / ' + ob).print };
+((a.double:4) == 8).else:{ ok = false; 'FAIL: unusable after deadlock'.print };
+r.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("deadlock_proc", script, &[("runner.qn", RUNNER_UNIT)]);
+}
+
 /// §5.1 rule 6, end to end: two tasks whose callbacks synchronously call
 /// each other's held objects — the cycle raises catchably at the task that
 /// closes it; the other call completes; the service survives.

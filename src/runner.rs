@@ -472,6 +472,7 @@ enum Cmd {
         sock: String,
         unit: String,
         service: Option<String>,
+        lanes: Option<u32>,
     },
 }
 
@@ -725,9 +726,13 @@ impl VmRunnerOptions {
                 sock,
                 unit,
                 service,
+                lanes,
             }) => {
                 target_path = Some(sock);
-                vm_args = std::iter::once(unit).chain(service).collect();
+                vm_args = std::iter::once(unit)
+                    .chain(service)
+                    .chain(lanes.map(|n| n.to_string()))
+                    .collect();
                 VmRunnerMode::WorkerServe
             }
             None => match (cli.eval, cli.file) {
@@ -918,16 +923,19 @@ impl VmRunner {
             }
             VmRunnerMode::WorkerServe => {
                 let Some(sock) = self.options.target_path.clone() else {
-                    eprintln!("usage: qn worker-serve <sock> <unit> [<serviceClass>]");
+                    eprintln!("usage: qn worker-serve <sock> <unit> [<serviceClass> [<lanes>]]");
                     exit(2);
                 };
                 let args = &self.options.vm_options.arguments;
                 let Some(unit) = args.first() else {
-                    eprintln!("usage: qn worker-serve <sock> <unit> [<serviceClass>]");
+                    eprintln!("usage: qn worker-serve <sock> <unit> [<serviceClass> [<lanes>]]");
                     exit(2);
                 };
                 let service = args.get(1).map(|s| s.as_str());
-                exit(crate::worker::worker_serve_main(&sock, unit, service));
+                let lanes = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+                exit(crate::worker::worker_serve_main(
+                    &sock, unit, service, lanes,
+                ));
             }
             VmRunnerMode::Test => {
                 // `qn test [DIR]` runs the CALLER's suites: the entry unit is synthesized

@@ -700,16 +700,8 @@ fn host<'gc>(
     };
     let (ch, pid) = match backing {
         "process" => {
-            // Process lanes are the §5.1 5b slice (N conversation sockets).
-            if lanes > 1 {
-                return Err(QuoinError::Other(
-                    "WorkerService: process backing serves one lane for now — \
-                     lanes: applies to thread backing"
-                        .into(),
-                ));
-            }
             let (ch, pid, _grip) =
-                crate::worker::spawn_worker_process(path.clone(), Some(class_name.clone()))
+                crate::worker::spawn_worker_process(path.clone(), Some(class_name.clone()), lanes)
                     .map_err(QuoinError::Other)?;
             (ch, Some(pid))
         }
@@ -832,6 +824,16 @@ fn drain_lanes<'gc>(
     Ok(())
 }
 
+fn backing_arg<'gc>(v: Value<'gc>) -> Result<&'static str, QuoinError> {
+    match string_arg(v, "the backing")?.as_str() {
+        "thread" => Ok("thread"),
+        "process" => Ok("process"),
+        other => Err(QuoinError::Other(format!(
+            "WorkerService: unknown backing '{other}' (thread|process)"
+        ))),
+    }
+}
+
 fn lanes_arg<'gc>(v: Value<'gc>) -> Result<u32, QuoinError> {
     match v.as_i64() {
         Some(n) if (1..=1024).contains(&n) => Ok(n as u32),
@@ -907,19 +909,26 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
         .class_method("host:class:backing:", |vm, mc, receiver, args| {
             let path = string_arg(args[0], "the unit path")?;
             let class_name = string_arg(args[1], "the class name")?;
-            let backing = string_arg(args[2], "the backing")?;
-            match backing.as_str() {
-                "thread" => host(vm, mc, receiver, path, class_name, "thread", 1),
-                "process" => host(vm, mc, receiver, path, class_name, "process", 1),
-                other => Err(QuoinError::Other(format!(
-                    "WorkerService: unknown backing '{other}' (thread|process)"
-                ))),
-            }
+            let backing = backing_arg(args[2])?;
+            host(vm, mc, receiver, path, class_name, backing, 1)
         })
         .doc(
             "As `host:class:`, choosing the backing at spawn time: 'thread' (the default) \
              or 'process' (a child qn process -- the escape from the in-process thread \
              ceiling for compute-heavy services).",
+        )
+        .class_method("host:class:backing:lanes:", |vm, mc, receiver, args| {
+            let path = string_arg(args[0], "the unit path")?;
+            let class_name = string_arg(args[1], "the class name")?;
+            let backing = backing_arg(args[2])?;
+            let lanes = lanes_arg(args[3])?;
+            host(vm, mc, receiver, path, class_name, backing, lanes)
+        })
+        .doc(
+            "Backing and lanes together: N concurrent lanes on either backing. A \
+             process-backed service opens one conversation socket per lane; a \
+             thread-backed one runs one serve fiber per lane. Semantics are identical \
+             -- calls to one object serialize, calls to different objects overlap.",
         )
         // Stop the service: flag + drain (refuse new calls, wait for every
         // in-flight conversation), then one stop op per lane, then join.

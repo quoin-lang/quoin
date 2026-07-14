@@ -364,6 +364,24 @@ a live wait chain across two services, a re-entrant hold, a lane-starved
 reservation, then a real deadlock and its post-mortem —
 is `qn qnlib/stress/claims_tour/main.qn` (from the repo root).
 
+**5b AS BUILT (2026-07-14): process lanes.** A process worker now opens `lanes`
+conversation sockets (+ the mailbox) — lanes, never frame multiplexing: each
+socket runs one LIFO conversation at a time through its own pump pair. The 5a
+architecture made this near-mechanical: parent-side pumps (one per socket) and
+child-side serve fibers both consume their SHARED MPMC queues, so lanes stay
+fungible counting tokens with no routing anywhere — a granted call goes to
+whichever pump is free, a stop op kills whichever fiber takes it. The version
+handshake runs once, on the first socket; the child learns its lane count as a
+`worker-serve` argument and connects `lanes + 1` times in accept order. The claim
+machinery, nesting, cycle detection, drain: byte-for-byte the same code as thread
+backing — verified by process twins of the lanes/deadlock tests. `ReplyMeta` now
+crosses the pumps: the child relay stamps the serve fiber's `handler_micros` on
+the frame that closes conversation level 0 (the extension protocol's out-of-band
+pattern), the parent pump reads it back — so process services report a real
+chatty-vs-slow decomposition in `VM.boundaryStats` instead of handler 0. Surface:
+`host:class:backing:lanes:`. Remaining for 5c: extensions (manifest `lanes`
+field, SDK threading, claim key from connection → resource id).
+
 ## 6. Cross-isolate channels (CSP across the boundary)
 
 A channel endpoint becomes portable to a Quoin peer. Design, per the seam analysis:
@@ -521,8 +539,9 @@ injection wrapper, which feeds recorded results instead of re-performing.
    5a = shared claim module + unit-tested discipline + thread workers
    (`host:class:lanes:`) + claim observability (`VM.claims`/`VM.claimsReport`),
    5b = process workers (N sockets), 5c = extensions (manifest `lanes`, SDK
-   threading, per-resource claims). **5a DONE (2026-07-14)** — see §5.1's as-built
-   note; the one-token serializer is gone.
+   threading, per-resource claims). **5a + 5b DONE (2026-07-14)** — see §5.1's
+   as-built notes; the one-token serializer is gone, and process services carry
+   `ReplyMeta` handler timing over the pumps.
 6. **Portable-block arguments** for Quoin peers (thread first; process blocked on
    source-shipping and falls back to handles). v1 DONE (2026-07-14): the ship path
    for thread backing — snapshot at the encode seam, `DispatchReq.blocks` sidecar,
