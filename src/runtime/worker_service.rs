@@ -33,6 +33,18 @@
 //! The per-object claim machinery (ACTOR_OBJECTS.md §5) replaces this token in
 //! the mailboxes+lanes slice.
 //!
+//! CONVERSATIONS (host-ops, §3a): a call is a strictly LIFO conversation, not a
+//! single round trip. While the caller pumps toward its terminal, the worker
+//! may send host-op `Call`s on parent-held handles — block arguments that
+//! crossed as `Arg::Handle` — which are serviced HERE, on the caller's own
+//! fiber. A send that servicing code makes back into the same worker is a
+//! NESTED call riding the open conversation (§5.1 rule 3 with one lane; the
+//! `active` record is that rule's N=1 form, absorbed by the claim machinery in
+//! the mailboxes+lanes slice). Cancellation mid-conversation ABANDONS it: the
+//! channels drop, the worker (or the process pump) answers its own pending
+//! host-ops with errors and unwinds to the terminal, and the service stays
+//! usable — unlike extensions, whose framed socket desyncs and kills the peer.
+//!
 //! Errors in the hosted method — including MessageNotUnderstood — come back as
 //! `CallReturnError` and raise catchably at the call site, carrying the
 //! worker's rendered stack as `ex.remoteStack` (the extension error shape).
@@ -53,8 +65,8 @@ use crate::symbol::Symbol;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
 use crate::worker::{
-    DispatchReq, OP_STOP, PortableBlock, WorkerMsg, note_message, snapshot_block,
-    spawn_worker_service,
+    DispatchReq, OP_STOP, PortableBlock, WorkerMsg, note_message, rebuild_portable_value,
+    snapshot_block, spawn_worker_service,
 };
 
 /// Proxy-side state: the worker's dispatch lane plus this proxy's hosted-object
@@ -76,11 +88,36 @@ pub struct NativeServiceState {
     object_id: u64,
     /// The hosted object's class name — routes the dispatch worker-side.
     class_name: String,
-    /// True for process backing: block arguments refuse at the encode seam
-    /// (templates are in-process references; no source-shipping yet —
-    /// ACTOR_OBJECTS.md §3a).
+    /// True for process backing: block arguments take the handle path (no
+    /// shipping — templates are in-process references; ACTOR_OBJECTS.md §3a).
     process: bool,
+    /// The conversation currently open on this worker, if any (worker-wide,
+    /// like the token): a send from the SAME task while it is servicing a
+    /// host-op rides this conversation as a NESTED call (§5.1 rule 3 with one
+    /// lane) instead of deadlocking on the token.
+    active: Rc<RefCell<Option<ActiveConv>>>,
+    /// Parent-side hosted-table ids minted for block arguments that crossed
+    /// as handles; released when the service stops (a stored `HostBlock` in
+    /// the worker may be invoked by any later call, so per-call release would
+    /// be wrong — the reap pattern doesn't reach worker-held handles yet).
+    block_handles: Rc<RefCell<Vec<u64>>>,
 }
+
+/// The channels of the conversation a task currently has open on a worker:
+/// nested sends push their `Call` down `hostop_tx` and read frames (their
+/// terminal, and any deeper host-ops) from `reply_rx` — strictly LIFO, all on
+/// the one fiber that owns the conversation.
+#[derive(Clone, Debug)]
+struct ActiveConv {
+    task: usize,
+    depth: u32,
+    hostop_tx: async_channel::Sender<Msg>,
+    reply_rx: async_channel::Receiver<Msg>,
+}
+
+/// The most deeply one task may nest calls on a worker conversation (mirrors
+/// the extension cap; each level is live frames on both sides).
+const MAX_CONV_DEPTH: u32 = 16;
 
 impl Drop for NativeServiceState {
     fn drop(&mut self) {
@@ -114,6 +151,8 @@ struct CallCtx {
     object_id: u64,
     class_name: String,
     process: bool,
+    active: Rc<RefCell<Option<ActiveConv>>>,
+    block_handles: Rc<RefCell<Vec<u64>>>,
 }
 
 fn snapshot(s: &NativeServiceState) -> CallCtx {
@@ -127,6 +166,8 @@ fn snapshot(s: &NativeServiceState) -> CallCtx {
         object_id: s.object_id,
         class_name: s.class_name.clone(),
         process: s.process,
+        active: s.active.clone(),
+        block_handles: s.block_handles.clone(),
     }
 }
 
@@ -169,7 +210,18 @@ fn service_call<'gc>(
     selector: Symbol,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, QuoinError> {
-    if ctx.stopped.get() {
+    // A send from the task that owns the OPEN conversation on this worker is
+    // a NESTED call: it rides that conversation (§5.1 rule 3 with one lane)
+    // rather than parking on the token it itself holds. Checked before the
+    // stopped flag — stop is flag + drain, and a nested call is part of an
+    // in-flight conversation, which drain lets finish.
+    let me = vm.sched.current_task.0;
+    let nested = ctx
+        .active
+        .borrow()
+        .as_ref()
+        .is_some_and(|conv| conv.task == me);
+    if !nested && ctx.stopped.get() {
         return Err(QuoinError::Other(format!(
             "service call '{}': the service is stopped",
             selector.as_str()
@@ -178,9 +230,10 @@ fn service_call<'gc>(
     // Encode BEFORE taking the token: a refused argument shouldn't occupy the
     // service. A proxy of the SAME worker travels as a live reference; a
     // portable BLOCK ships to a thread peer as a capture snapshot riding the
-    // dispatch request out-of-band (§3a — the in-memory lane's
-    // richer-than-wire allowance), with a Null placeholder holding its
-    // position in the frame.
+    // dispatch request out-of-band (§3a); any other block crosses as a HANDLE
+    // the worker drives via host-op round trips (§3a fallback — never an
+    // error). Nested frames have no sidecar, so nested sends use handles for
+    // every block.
     let mut method_args = Vec::with_capacity(args.len());
     let mut blocks: Vec<(usize, PortableBlock)> = Vec::new();
     for (i, a) in args.iter().enumerate() {
@@ -195,24 +248,33 @@ fn service_call<'gc>(
             continue;
         }
         if let Some((template, parent_env)) = block_parts(*a) {
-            if ctx.process {
-                return Err(QuoinError::Other(format!(
-                    "service call '{}': argument {} is a block — blocks cannot cross \
-                     a process boundary (templates are in-process references); use \
-                     thread backing",
-                    selector.as_str(),
-                    i + 1
-                )));
+            if !ctx.process
+                && !nested
+                && let Ok(pb) = snapshot_block(template.clone(), parent_env, 0)
+            {
+                blocks.push((i, pb));
+                method_args.push(Arg::Data(WireData::Null));
+                continue;
             }
-            let pb = snapshot_block(template, parent_env, 0).map_err(|e| {
-                QuoinError::Other(format!(
-                    "service call '{}': argument {}: {e}",
-                    selector.as_str(),
-                    i + 1
-                ))
-            })?;
-            blocks.push((i, pb));
-            method_args.push(Arg::Data(WireData::Null));
+            // Handle path. A PORTABLE block headed here (process backing, or a
+            // nested frame) is snapshot-rebuilt locally first, so its captures
+            // freeze at send time exactly as shipping would — the ship/handle
+            // choice must not change semantics for blocks that have a choice.
+            // An unportable block is handled live (write-captures exist to see
+            // live state; that is why it could not ship).
+            let handled: Value<'gc> = match snapshot_block(template, parent_env, 0) {
+                Ok(pb) => rebuild_portable_value(vm, mc, &pb).map_err(|e| {
+                    QuoinError::Other(format!(
+                        "service call '{}': argument {}: {e}",
+                        selector.as_str(),
+                        i + 1
+                    ))
+                })?,
+                Err(_) => *a,
+            };
+            let id = vm.hosted_insert(handled);
+            ctx.block_handles.borrow_mut().push(id);
+            method_args.push(Arg::Handle(id));
             continue;
         }
         method_args.push(Arg::Data(value_to_wire(*a, None).map_err(|e| {
@@ -222,6 +284,12 @@ fn service_call<'gc>(
                 i + 1
             ))
         })?));
+    }
+    let releases: Vec<u64> = ctx.reap.borrow_mut().drain(..).collect();
+    let frame = hosted_call(&ctx, selector.as_str().to_string(), method_args, releases);
+
+    if nested {
+        return nested_call(vm, mc, receiver, &ctx, selector, frame);
     }
 
     // Serialize: take the token (parks fairly behind other callers).
@@ -235,15 +303,15 @@ fn service_call<'gc>(
         }
     }
     note_message();
-    let releases: Vec<u64> = ctx.reap.borrow_mut().drain(..).collect();
-    let (reply_tx, reply_rx) = async_channel::bounded::<Msg>(1);
-    let frame = hosted_call(&ctx, selector.as_str().to_string(), method_args, releases);
+    let (reply_tx, reply_rx) = async_channel::unbounded::<Msg>();
+    let (hostop_tx, hostop_rx) = async_channel::unbounded::<Msg>();
     if ctx
         .dispatch_tx
         .try_send(DispatchReq {
             frame,
             blocks,
             reply: reply_tx,
+            hostops: hostop_rx,
         })
         .is_err()
     {
@@ -253,18 +321,155 @@ fn service_call<'gc>(
             selector.as_str()
         )));
     }
-    let reply = vm.await_io(IoRequest::FrameRecv(reply_rx))?;
+    // Open the conversation (nested sends from host-op callbacks ride it),
+    // pump it to the terminal, then close it and hand the token on — on the
+    // error path too (cancellation mid-conversation): dropping our channel
+    // ends tells the worker the conversation was abandoned, and it unwinds
+    // catchably rather than wedging.
+    ctx.active.replace(Some(ActiveConv {
+        task: me,
+        depth: 1,
+        hostop_tx: hostop_tx.clone(),
+        reply_rx: reply_rx.clone(),
+    }));
+    let outcome = conversation(vm, mc, selector, &reply_rx, &hostop_tx);
+    ctx.active.replace(None);
     let _ = ctx.token_tx.try_send(WorkerMsg::Data(WireData::Null));
-    match reply {
-        IoResult::FrameMsg(Some(msg)) => interpret_terminal(vm, mc, receiver, &ctx, selector, *msg),
-        IoResult::FrameMsg(None) => Err(QuoinError::Other(format!(
+    interpret_terminal(vm, mc, receiver, &ctx, selector, outcome?)
+}
+
+/// A nested call riding the task's open conversation: LIFO — the frame goes
+/// down the parent→worker lane, and the reply pump below reads worker→parent
+/// frames until this call's terminal (servicing any deeper host-ops on the
+/// way), all within the outer conversation's stack.
+fn nested_call<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    ctx: &CallCtx,
+    selector: Symbol,
+    frame: Msg,
+) -> Result<Value<'gc>, QuoinError> {
+    let conv = {
+        let mut active = ctx.active.borrow_mut();
+        let conv = active.as_mut().expect("nested call without a conversation");
+        if conv.depth >= MAX_CONV_DEPTH {
+            return Err(QuoinError::Other(format!(
+                "service call '{}': calls nested {MAX_CONV_DEPTH} levels deep on one \
+                 conversation — mutual parent<->worker recursion?",
+                selector.as_str()
+            )));
+        }
+        conv.depth += 1;
+        conv.clone()
+    };
+    note_message();
+    let outcome = if conv.hostop_tx.try_send(frame).is_err() {
+        Err(QuoinError::Other(format!(
             "service call '{}': the service exited mid-call",
             selector.as_str()
-        ))),
-        other => Err(QuoinError::Other(format!(
-            "service call '{}': unexpected result {other:?}",
-            selector.as_str()
-        ))),
+        )))
+    } else {
+        conversation(vm, mc, selector, &conv.reply_rx, &conv.hostop_tx)
+    };
+    if let Some(c) = ctx.active.borrow_mut().as_mut() {
+        c.depth = c.depth.saturating_sub(1);
+    }
+    interpret_terminal(vm, mc, receiver, ctx, selector, outcome?)
+}
+
+/// Pump one conversation level to its terminal: worker→parent frames are
+/// either host-op `Call`s on a parent-held handle — serviced HERE, on the
+/// calling task's own fiber (so claims and stacks compose; §5.1) — or the
+/// `CallReturn*` terminal this level is waiting for.
+fn conversation<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    selector: Symbol,
+    reply_rx: &async_channel::Receiver<Msg>,
+    hostop_tx: &async_channel::Sender<Msg>,
+) -> Result<Msg, QuoinError> {
+    loop {
+        let msg = match vm.await_io(IoRequest::FrameRecv(reply_rx.clone()))? {
+            IoResult::FrameMsg(Some(msg)) => *msg,
+            IoResult::FrameMsg(None) => {
+                return Err(QuoinError::Other(format!(
+                    "service call '{}': the service exited mid-call",
+                    selector.as_str()
+                )));
+            }
+            other => {
+                return Err(QuoinError::Other(format!(
+                    "service call '{}': unexpected result {other:?}",
+                    selector.as_str()
+                )));
+            }
+        };
+        match msg {
+            Msg::Call {
+                op,
+                recv,
+                method_args,
+                ..
+            } => {
+                let reply = service_parent_hostop(vm, mc, &op, recv, &method_args)?;
+                if hostop_tx.try_send(reply).is_err() {
+                    return Err(QuoinError::Other(format!(
+                        "service call '{}': the service exited mid-call",
+                        selector.as_str()
+                    )));
+                }
+            }
+            terminal => return Ok(terminal),
+        }
+    }
+}
+
+/// Service one host-op the worker issued mid-call: a `Call` on a parent-held
+/// handle (a block that crossed as `Arg::Handle`). The block runs on THIS
+/// task's fiber — a send it makes back into the service is a nested call on
+/// the open conversation. Errors become error frames for the worker, EXCEPT a
+/// cancellation (`Async.timeout:do:`, task cancel), which re-raises unchanged
+/// — abandoning the conversation, exactly as the extension path treats it —
+/// so the timeout combinator still sees its `Cancelled`.
+fn service_parent_hostop<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    op: &str,
+    recv: u64,
+    method_args: &[Arg],
+) -> Result<Msg, QuoinError> {
+    let err = |message: String| Msg::CallReturnError {
+        message,
+        remote_stack: String::new(),
+    };
+    let Some(target) = vm.hosted_get(recv) else {
+        return Ok(err(format!("host block '{op}': no live handle {recv}")));
+    };
+    let mut argv = Vec::with_capacity(method_args.len());
+    for (i, a) in method_args.iter().enumerate() {
+        match a {
+            Arg::Data(dv) => match wire_to_value(vm, mc, dv, None) {
+                Ok(v) => argv.push(v),
+                Err(e) => return Ok(err(format!("host block '{op}': argument {}: {e}", i + 1))),
+            },
+            _ => {
+                return Ok(err(format!(
+                    "host block '{op}': argument {} has an unsupported kind",
+                    i + 1
+                )));
+            }
+        }
+    }
+    match vm.call_method_mnu(mc, target, op, argv) {
+        Ok(v) => match value_to_wire(v, None) {
+            Ok(dv) => Ok(Msg::CallReturnData { value: dv }),
+            Err(e) => Ok(err(format!(
+                "host block '{op}': the block's result cannot cross to the worker: {e}"
+            ))),
+        },
+        Err(QuoinError::Cancelled) => Err(QuoinError::Cancelled),
+        Err(e) => Ok(crate::runtime::worker::error_terminal(vm, &e, "parent")),
     }
 }
 
@@ -305,6 +510,8 @@ fn interpret_terminal<'gc>(
                     object_id: resource,
                     class_name,
                     process: ctx.process,
+                    active: ctx.active.clone(),
+                    block_handles: ctx.block_handles.clone(),
                 },
             ))
         }
@@ -384,6 +591,8 @@ fn host<'gc>(
             object_id: 1,
             class_name,
             process: backing == "process",
+            active: Rc::new(RefCell::new(None)),
+            block_handles: Rc::new(RefCell::new(Vec::new())),
         },
     ))
 }
@@ -411,10 +620,13 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
              access -- an actor, effectively. Portable arguments and returns deep-copy; \
              a method that returns a NON-portable object HOSTS it -- the answer is a \
              sub-proxy addressing it, usable like any receiver (including as an argument \
-             to further calls on the same service). A portable BLOCK argument ships to a \
-             thread-backed service and runs worker-side -- one crossing however many \
-             times the method invokes it (unportable blocks, and any block to a \
-             process-backed service, refuse with a clear error). Errors in the hosted method raise \
+             to further calls on the same service). A BLOCK argument always crosses: a \
+             portable block ships to a thread-backed service and runs worker-side on a \
+             snapshot of its captures (one crossing however many invocations); any other \
+             block -- unportable, or bound for a process -- crosses as a HANDLE the worker \
+             invokes back in the parent, where write-captures see live state. Code the \
+             worker runs this way may call back into the service; the nested call rides \
+             the open conversation. Errors in the hosted method raise \
              catchably at the call site, with the worker's stack as `ex.remoteStack`; \
              one call runs at a time (concurrent callers queue fairly).\n\n\
              ```\n\
@@ -468,6 +680,7 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
             // The reserved stop op ends the serve loop; a dead worker skips
             // straight to the join, which reports why.
             let (reply_tx, reply_rx) = async_channel::bounded::<Msg>(1);
+            let (_hostop_tx, hostop_rx) = async_channel::bounded::<Msg>(1);
             let frame = hosted_call(&ctx, OP_STOP.to_string(), Vec::new(), Vec::new());
             if ctx
                 .dispatch_tx
@@ -475,12 +688,20 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
                     frame,
                     blocks: Vec::new(),
                     reply: reply_tx,
+                    hostops: hostop_rx,
                 })
                 .is_ok()
             {
                 let _ = vm.await_io(IoRequest::FrameRecv(reply_rx))?;
             }
-            match vm.await_io(IoRequest::WorkerJoin(ctx.done_rx.clone()))? {
+            let joined = vm.await_io(IoRequest::WorkerJoin(ctx.done_rx.clone()))?;
+            // The worker is gone: release the block handles its stored
+            // HostBlocks addressed (minted for block arguments that crossed
+            // as handles).
+            for id in ctx.block_handles.borrow_mut().drain(..) {
+                vm.hosted_release(id);
+            }
+            match joined {
                 IoResult::WorkerDone(Ok(_)) => Ok(vm.new_nil(mc)),
                 IoResult::WorkerDone(Err(msg)) => Err(QuoinError::Other(msg)),
                 other => Err(QuoinError::Other(format!(

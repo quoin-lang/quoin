@@ -47,14 +47,24 @@ under **Changed**, with the migration.
   proxy's object is released on the next call). Hosted errors now surface with the
   worker's rendered stack as `ex.remoteStack`, and an unknown selector raises
   MessageNotUnderstood naming it. `serviceStop` is now explicitly worker-wide.
-- `WorkerService` (experimental): **portable-block arguments** to a thread-backed
-  service. A block that passes the portability scan ships as a capture snapshot and
-  runs *inside* the worker — one boundary crossing however many times the hosted
-  method invokes it, and the method may keep it for later calls (the batch-API
-  answer to chatty proxies; `docs/internal/ACTOR_OBJECTS.md` §3a). An unportable
-  block refuses naming the argument and why, without occupying the service; blocks
-  to a process-backed service refuse pointing at thread backing (no source-shipping
-  yet).
+- `WorkerService` (experimental): **block arguments always cross now**. A portable
+  block ships to a thread-backed service as a capture snapshot and runs *inside*
+  the worker — one boundary crossing however many times the hosted method invokes
+  it, and the method may keep it for later calls (the batch-API answer to chatty
+  proxies; `docs/internal/ACTOR_OBJECTS.md` §3a). Every other block — one that
+  captures live state, or any block to a process-backed service — crosses as a
+  **handle** the worker invokes back in the parent (one round trip per invocation,
+  write-captures see live parent state; portable blocks freeze their captures at
+  send time on either path, so the backing never changes meaning).
+- Workers (experimental): **conversations, not round trips** — the peer protocol's
+  re-entrancy now works for worker services, both backings. While a call is in
+  flight the worker can invoke parent-held block handles (serviced on the caller's
+  fiber), and code running that way can call back into the same service — the
+  nested call rides the open conversation (strictly LIFO, depth-capped, mutual
+  recursion errors catchably). A timeout or cancellation mid-conversation abandons
+  it cleanly: the worker unwinds catchably and the service stays usable —
+  cancelled *extension* calls still kill their peer (framed-socket desync), but
+  worker services survive.
 - Workers (experimental): the process-worker wire now speaks the **extension
   protocol's frames** instead of a bespoke envelope — one remote-peer protocol
   (`docs/internal/ACTOR_OBJECTS.md`). Two sockets per process worker: a conversation

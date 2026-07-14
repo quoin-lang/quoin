@@ -69,10 +69,16 @@ pub enum ControlKind {
 
 /// One hosted-object dispatch request crossing to a worker
 /// (docs/internal/ACTOR_OBJECTS.md §2): a peer-protocol `Call` frame plus the
-/// reply lane its `CallReturn*` terminal comes back on. For thread backing the
-/// request IS the transport (owned `Msg` values over an in-memory lane — the
-/// §1 "same protocol, cheaper carrier" row); for process backing the
-/// conversation pumps carry the same frames over the socket.
+/// CONVERSATION's two lanes. For thread backing the request IS the transport
+/// (owned `Msg` values over in-memory lanes — the §1 "same protocol, cheaper
+/// carrier" row); for process backing the conversation pumps relay the same
+/// frames over the socket.
+///
+/// A conversation is strictly LIFO (the extension protocol's shape): frames
+/// worker→parent ride `reply` — zero or more host-op `Call`s (a parent-held
+/// handle driven from worker code), then the terminal `CallReturn*` — and
+/// frames parent→worker ride `hostops` — each host-op's reply, or a NESTED
+/// parent→worker `Call` riding the bound conversation (§5.1 rule 3).
 #[derive(Clone, Debug)]
 pub struct DispatchReq {
     pub frame: quoin_ext_proto::Msg,
@@ -80,10 +86,27 @@ pub struct DispatchReq {
     /// (ACTOR_OBJECTS.md §3a): `(argument position, snapshot)` pairs; the
     /// frame's `method_args` holds a Null placeholder at each position. Only
     /// the in-memory thread lane may carry these — the same
-    /// richer-than-wire-taxonomy allowance as `WorkerMsg::Block`; the
-    /// process path refuses blocks before a request is ever built.
+    /// richer-than-wire-taxonomy allowance as `WorkerMsg::Block`; unportable
+    /// blocks and process peers take the handle path instead.
     pub blocks: Vec<(usize, PortableBlock)>,
     pub reply: async_channel::Sender<quoin_ext_proto::Msg>,
+    /// Parent→worker frames for this conversation (host-op replies and
+    /// nested calls). A closed lane means the caller abandoned the
+    /// conversation (cancellation) — the worker surfaces that as a catchable
+    /// error in the invoking code.
+    pub hostops: async_channel::Receiver<quoin_ext_proto::Msg>,
+}
+
+/// The worker-side handles of the conversation a serve task is currently
+/// inside, keyed by task in `VmState::worker_convs`: host-op `Call`s go up
+/// `reply_tx`, their answers (and nested parent→worker calls) arrive on
+/// `hostops_rx`. `depth` counts open host-op conversations (capped as
+/// extensions cap theirs).
+#[derive(Clone, Debug)]
+pub struct ConvHandles {
+    pub reply_tx: async_channel::Sender<quoin_ext_proto::Msg>,
+    pub hostops_rx: async_channel::Receiver<quoin_ext_proto::Msg>,
+    pub depth: u32,
 }
 
 /// The worker link's reserved ops on the `Call` frame (`class_name` routes a

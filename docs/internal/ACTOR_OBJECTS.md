@@ -101,26 +101,55 @@ allowance the plain lane already uses for `WorkerMsg::Block`. Worker-side,
 references verified against the worker — a missing user global is a clear catchable
 error) into a live closure the hosted method invokes locally, N runs per one
 crossing, storable across dispatches (rooted via the hosted table while reachable).
-**The v1 decision rule is *portable + thread peer → ship; otherwise → clear error*:**
-unportable blocks name the argument and the scanner's why; process backing refuses at
-the seam pointing at thread backing (and the conversation pump defensively refuses a
-non-empty sidecar rather than ever silently dropping blocks at the socket).
+**Completed by worker host-ops (slice 4.5, 2026-07-14) — the decision rule is now the
+doc's "never an error":** *portable + thread peer → ship; otherwise → handle.* The
+handle fallback needs no `InvokeBlock` frame: a conversation is symmetric `Call` /
+`CallReturn*` — a worker→parent `Call` whose `recv` is a parent-held handle IS the
+host-op (one protocol, both directions; extensions keep their bespoke host-op frames).
+As built:
 
-*To continue slice 6 → the doc-rule "never an error" (recorded, not started):*
-1. **The handle fallback** (unportable blocks + process peers degrade to
-   `Arg::Handle` + `InvokeBlock` round-trips) is blocked on gap-list item 1 — worker
-   peers have no host-op loop to drive a parent-held block. No collision with the
-   sidecar when it lands: handles ride `method_args` proper, the sidecar stays the
-   thread ship-path carrier.
-2. **Process shipping** is blocked on source/bytecode shipping (its wire form
+- **Transport**: `DispatchReq` carries the conversation's two lanes (`reply`
+  worker→parent, `hostops` parent→worker). A conversation is strictly LIFO; `Call`
+  opens a level, `CallReturn*` closes one. Thread backing holds the lanes directly;
+  the process pumps run a depth-counting relay of the same frames over the socket
+  (both sides in `worker_spawn.rs`).
+- **Parent side**: `service_call` pumps a conversation loop — worker host-ops are
+  serviced ON THE CALLER'S FIBER (`service_parent_hostop` runs the handle's block via
+  ordinary dispatch), which is what makes claims and cycle detection composable
+  (§5.1). A send the serviced code makes back into the same worker is a NESTED call
+  riding the open conversation — the worker-wide `active` record is §5.1 rule 3 at
+  N=1, absorbed by the claim machinery in slice 5. Depth-capped at 16 both sides.
+- **Worker side**: `Arg::Handle` wraps as a `HostBlock` instance
+  (`value`/`value:`/`valueWithArgs:` forward as host-ops); `invoke_parent_block`
+  pumps the mirror loop, servicing nested parent→worker calls while it waits.
+- **Handle table**: the parent's own `vm.hosted` table roots handed-out blocks (the
+  same table a worker uses for hosted objects — one id space, symmetric roles);
+  handles minted for a service release at `serviceStop` (a worker-stored `HostBlock`
+  may be invoked by any later call, so per-call release would be wrong).
+- **Semantics, honest version**: a PORTABLE block freezes its captures at send time
+  regardless of path — shipping snapshots by construction, and the handle path for a
+  portable block (process backing, nested frames) wraps a local snapshot-rebuild so
+  backing never changes meaning. An UNPORTABLE block runs in the parent against LIVE
+  state — that is what write-captures are for, and why it could not ship.
+- **Cancellation ABANDONS a conversation cleanly**: a `Cancelled` raised in serviced
+  code re-raises unchanged (never becomes a wire error — the extension precedent);
+  the dropped lanes tell the worker/pump to answer pending host-ops with errors and
+  unwind to the terminal. The service SURVIVES — unlike a cancelled extension call,
+  which desyncs the framed socket and kills the peer.
+
+*Still open after 4.5:*
+1. **Process shipping** is blocked on source/bytecode shipping (its wire form
    replaces the sidecar for that backing).
-3. **Blocks nested inside data-structure arguments** still refuse (the wire walkers
+2. **Blocks nested inside data-structure arguments** still refuse (the wire walkers
    own that taxonomy — same rule as plain lane messages).
-4. **Block RETURNS** from hosted methods currently fall into the non-portable-object
+3. **Block RETURNS** from hosted methods currently fall into the non-portable-object
    path and come back as sub-proxies (semantics untested — `value:` on such a proxy
    dispatches remotely); the symmetric ship-back needs a reply-side sidecar.
-5. **`Worker.host:{...}` block form** still waits — remote evaluation, not just
+4. **`Worker.host:{...}` block form** still waits — remote evaluation, not just
    transport.
+5. **Sends to arbitrary parent OBJECTS** (the `CallMethodOnHandle` analogue) — the
+   frame shape already supports it (`Call` on a handle); minting object handles and
+   deciding their lifetime does not exist yet.
 
 **b. Structured stacks.** Quoin-to-Quoin errors need not be opaque: the `remote_stack`
 blob carries the worker's real rendered trace initially (day one, free via PR #11's
@@ -143,6 +172,13 @@ What convergence must build, in rough order of weight:
    one variant, `PsTree`). The child-side serve loop must become the SDK-style
    conversation loop (service nested requests while awaiting replies). For thread peers
    this is lane discipline, not sockets.
+   **DONE (slice 4.5, as built — see §3a):** conversations are symmetric
+   `Call`/`CallReturn*` both directions (no new frames): worker→parent `Call` on a
+   parent-held handle = host-op, serviced on the caller's fiber; parent→worker `Call`
+   mid-conversation = nested call, serviced by the parked worker fiber. Strict LIFO,
+   depth-capped 16, relayed over the process socket by depth-counting pumps.
+   Deliberately minimal: block handles only — no object handles, no
+   `MakeString`-style host reach.
 2. **Manifest + object table in the hosted-worker serve loop** — replaces
    `SERVICE_LOOP_QN`'s single-instance `perform:` loop.
 3. **Retiring the `{t,v}` envelope** — process-worker pump speaks `Msg` frames;
@@ -270,10 +306,22 @@ never answers hangs exactly as it can today with one lane; not a slice-5 regress
 - Re-entry to the depth cap and past it.
 - FIFO fairness per object under contention; reserved head not barged.
 - Per-object totals stay exact with lanes > 1 (the serialization test, generalized).
-Scoping note: end-to-end mutual-call cycles need peer→host callbacks, which worker
-peers don't have yet (gap item 1) — extension peers have them today (`InvokeBlock`).
-The cycle/nesting rules are therefore unit-tested against the claim module directly
-in 5a, and integration-tested via extensions when they adopt the machinery (5c).
+Scoping note (superseded 2026-07-14): worker peers now HAVE callbacks — slice 4.5
+landed host-ops before the claim slice, by decision (building claims onto the
+one-park-for-terminal loop and then swapping in the conversation loop would have
+built the trickiest integration twice, and left cycle detection with no trigger
+path until 5c). The full deadlock list is therefore end-to-end testable against
+thread workers in 5a itself, on top of the claim module's own unit tests.
+
+**Observability (decided 2026-07-14, lands with 5a):** the claim system exports its
+shapes — `VM.claims` (live structured snapshot: per peer/object owner + depth +
+queue + each waiter's park time, lane pools, and the waits-for edges themselves) and
+`VM.claimsReport` (rendered, contention-sorted, longest live wait-chain called out —
+the pre-deadlock warning), plus accumulated counters in the `ext_stats`-style
+registry (acquisitions, contended, total/max wait, queue high-water, max nesting,
+deadlocks detected). Hosted services also start feeding `VM.boundaryStats` rows
+(claim-wait in the existing column — one diagnosis surface), and the driver's
+global-deadlock report dumps the claim graph beside the wake-log ring.
 
 **Sequencing:** 5a = generalize the claim machinery (shared module + exhaustive unit
 tests) and adopt it for thread workers (per-object claims + in-memory lanes; the
@@ -431,18 +479,22 @@ injection wrapper, which feeds recorded results instead of re-performing.
    message lives in `vm.exceptions.active`, not the error value. The one-token
    serializer remains until per-object claims (slice 5); the MNU-seam proxy hook
    remains until hosted manifests (§10).
+4b. **Worker host-ops** (slice 4.5, inserted 2026-07-14 ahead of slice 5 by
+   decision — claims land on their final substrate, and cycle detection gets a real
+   trigger path): the conversation loop both directions + block handles, completing
+   slice 6's "never an error" rule. DONE — as-built in §3a and gap-list item 1.
 5. **Per-object mailboxes + lanes** (§5) — after hosted objects, when the claim
    machinery is already generalized; the lock-ordering discipline gets settled and
    tested here. Discipline SETTLED as §5.1 (2026-07-14) before any code; sub-slices:
    5a = shared claim module + unit-tested discipline + thread workers
-   (`host:class:lanes:`), 5b = process workers (N sockets), 5c = extensions
-   (manifest `lanes`, SDK threading, per-resource claims).
+   (`host:class:lanes:`) + claim observability (`VM.claims`/`VM.claimsReport`),
+   5b = process workers (N sockets), 5c = extensions (manifest `lanes`, SDK
+   threading, per-resource claims).
 6. **Portable-block arguments** for Quoin peers (thread first; process blocked on
    source-shipping and falls back to handles). v1 DONE (2026-07-14): the ship path
    for thread backing — snapshot at the encode seam, `DispatchReq.blocks` sidecar,
-   worker-side rebuild; unportable blocks and process backing get clear errors
-   rather than the handle fallback (blocked on gap-item-1 host-ops). The full
-   continuation list is in §3a's as-built note.
+   worker-side rebuild. COMPLETED by slice 4.5 (same day): the handle fallback
+   landed, so blocks never refuse — see §3a's as-built note for the full rule.
 7. **Cross-isolate channels** (thread peers first — pure lane relay; process peers via
    the socket).
 8. `WorkerService` reimplemented as sugar over `Worker.host:` (or deprecated into it).

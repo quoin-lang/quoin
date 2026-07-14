@@ -210,7 +210,13 @@ fn dispatch_hosted<'gc>(
                     ));
                 }
             },
-            Arg::Handle(_) | Arg::Array(_) => {
+            // A parent-held block (the §3a handle fallback): wrap it so
+            // invocations round-trip on the conversation.
+            Arg::Handle(h) => match host_block_value(vm, mc, *h) {
+                Ok(v) => v,
+                Err(e) => return err(format!("hosted call '{op}': argument {}: {e}", i + 1)),
+            },
+            Arg::Array(_) => {
                 return err(format!(
                     "hosted call '{op}': argument {} has an unsupported kind for a hosted call",
                     i + 1
@@ -238,24 +244,229 @@ fn dispatch_hosted<'gc>(
                 }
             }
         },
-        Err(e) => {
-            // A Quoin-level throw parks its value in `exceptions.active`; the wire
-            // can't carry the value, so render IT as the message (the `Thrown`
-            // marker itself just says "thrown exception").
-            let message = if matches!(e.innermost(), crate::error::QuoinError::Thrown) {
-                match vm.exceptions.active {
-                    Some(v) => format!("{v}"),
-                    None => e.to_string(),
-                }
-            } else {
-                e.to_string()
-            };
+        Err(e) => error_terminal(vm, &e, "worker"),
+    }
+}
+
+/// Render an error as a `CallReturnError` terminal: a Quoin-level throw parks
+/// its value in `exceptions.active` (the `Thrown` marker itself just says
+/// "thrown exception"), so render THAT as the message; the stack segment is
+/// labeled with the side it unwound on ("worker" / "parent").
+pub(crate) fn error_terminal<'gc>(
+    vm: &crate::vm::VmState<'gc>,
+    e: &QuoinError,
+    side: &str,
+) -> quoin_ext_proto::Msg {
+    let message = if matches!(e.innermost(), QuoinError::Thrown) {
+        match vm.exceptions.active {
+            Some(v) => format!("{v}"),
+            None => e.to_string(),
+        }
+    } else {
+        e.to_string()
+    };
+    quoin_ext_proto::Msg::CallReturnError {
+        message,
+        remote_stack: crate::runtime::extension::quoin_stack_segment_labeled(e, side),
+    }
+}
+
+/// Worker-side wrapper for a parent-held block that crossed as `Arg::Handle`
+/// (the §3a handle fallback): invocations round-trip to the parent as host-op
+/// `Call`s on the block's handle, riding the current conversation.
+#[derive(Debug)]
+pub struct NativeHostBlock {
+    handle: u64,
+}
+
+impl AnyCollect for NativeHostBlock {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+unsafe impl<'gc> Collect<'gc> for NativeHostBlock {
+    const NEEDS_TRACE: bool = false;
+}
+
+/// Wrap a received block handle as a live `HostBlock` instance.
+fn host_block_value<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    handle: u64,
+) -> Result<Value<'gc>, String> {
+    let class = crate::runtime::extension::resolve_global(vm, "HostBlock")
+        .ok_or_else(|| "the HostBlock class is not installed".to_string())?;
+    let Value::Class(class) = class else {
+        return Err("HostBlock is not a class".to_string());
+    };
+    Ok(vm.new_native_state(mc, class, NativeHostBlock { handle }))
+}
+
+/// The most deeply worker code may nest host-op conversations back into the
+/// parent (a parent block calling a hosted method that invokes a parent block,
+/// recursively). Mirrors the extension cap: each level is a live call frame on
+/// both sides.
+const MAX_CONV_DEPTH: u32 = 16;
+
+/// Invoke a parent-held block from worker code: send a host-op `Call` up the
+/// current conversation and pump frames until its `CallReturn*` — servicing
+/// any NESTED parent→worker call that arrives in between (the LIFO
+/// conversation shape, §5.1 rule 3).
+fn invoke_parent_block<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    op: &str,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, QuoinError> {
+    let handle = receiver
+        .with_native_state::<NativeHostBlock, _, _>(|s| s.handle)
+        .map_err(QuoinError::Other)?;
+    let task = vm.sched.current_task.0;
+    let conv = match vm.worker_convs.get_mut(&task) {
+        Some(c) => {
+            if c.depth >= MAX_CONV_DEPTH {
+                return Err(QuoinError::Other(format!(
+                    "host block '{op}': conversations nested {MAX_CONV_DEPTH} levels deep — \
+                     mutual parent<->worker recursion? (each level is a live call frame on \
+                     both sides)"
+                )));
+            }
+            c.depth += 1;
+            c.clone()
+        }
+        None => {
+            return Err(QuoinError::Other(format!(
+                "host block '{op}': a parent block can only be invoked while serving a \
+                 hosted call (there is no open conversation to the parent)"
+            )));
+        }
+    };
+    let result = invoke_parent_block_inner(vm, mc, &conv, handle, op, args);
+    if let Some(c) = vm.worker_convs.get_mut(&task) {
+        c.depth = c.depth.saturating_sub(1);
+    }
+    result
+}
+
+fn invoke_parent_block_inner<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    conv: &crate::worker::ConvHandles,
+    handle: u64,
+    op: &str,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, QuoinError> {
+    use quoin_ext_proto::{Arg, Msg};
+    let mut method_args = Vec::with_capacity(args.len());
+    for (i, a) in args.iter().enumerate() {
+        method_args.push(Arg::Data(value_to_wire(*a, None).map_err(|e| {
+            QuoinError::Other(format!(
+                "host block '{op}': argument {} cannot cross back to the parent: {e}",
+                i + 1
+            ))
+        })?));
+    }
+    let frame = Msg::Call {
+        op: op.to_string(),
+        arg: String::new(),
+        handles: Vec::new(),
+        resources: Vec::new(),
+        releases: Vec::new(),
+        arrays: Vec::new(),
+        data: None,
+        class_name: String::new(),
+        recv: handle,
+        method_args,
+    };
+    if conv.reply_tx.try_send(frame).is_err() {
+        return Err(QuoinError::Other(format!(
+            "host block '{op}': the caller abandoned the conversation"
+        )));
+    }
+    loop {
+        let msg = match vm.await_io(IoRequest::FrameRecv(conv.hostops_rx.clone()))? {
+            IoResult::FrameMsg(Some(msg)) => *msg,
+            IoResult::FrameMsg(None) => {
+                return Err(QuoinError::Other(format!(
+                    "host block '{op}': the caller abandoned the conversation"
+                )));
+            }
+            other => {
+                return Err(QuoinError::Other(format!(
+                    "host block '{op}': unexpected result {other:?}"
+                )));
+            }
+        };
+        match msg {
+            Msg::CallReturnData { value } => return wire_to_value(vm, mc, &value, None),
             Msg::CallReturnError {
                 message,
-                remote_stack: crate::runtime::extension::quoin_stack_segment_labeled(&e, "worker"),
+                remote_stack,
+            } => {
+                return Err(QuoinError::ExtensionError {
+                    message,
+                    remote_stack: crate::runtime::extension::truncate_blob(remote_stack),
+                });
+            }
+            // A nested parent→worker call riding the bound conversation while
+            // the parent block runs: serve it and keep waiting (LIFO).
+            Msg::Call {
+                op: nested_op,
+                recv,
+                method_args,
+                releases,
+                ..
+            } => {
+                for rid in &releases {
+                    vm.hosted_release(*rid);
+                }
+                let reply = dispatch_hosted(vm, mc, &nested_op, recv, &method_args, &[]);
+                if conv.reply_tx.try_send(reply).is_err() {
+                    return Err(QuoinError::Other(format!(
+                        "host block '{op}': the caller abandoned the conversation"
+                    )));
+                }
+            }
+            other => {
+                return Err(QuoinError::Other(format!(
+                    "host block '{op}': unexpected frame {other:?} in the conversation"
+                )));
             }
         }
     }
+}
+
+/// The worker-side class for parent-held blocks (§3a handle fallback). Not
+/// user-constructible; instances arrive as block arguments to hosted methods.
+pub fn build_host_block_class() -> NativeClassBuilder {
+    NativeClassBuilder::new("HostBlock", Some("Object"))
+        .construct_with("passed as a block argument to a hosted method")
+        .class_doc(
+            "A block that lives in the PARENT VM, received by a hosted method whose \
+             caller passed a block that could not ship (it captures live state, or the \
+             service is process-backed). Invoking it round-trips to the parent -- the \
+             block runs THERE, seeing its captures live -- one boundary crossing per \
+             invocation. A shipped (portable) block runs worker-side on a capture \
+             snapshot instead; see the WorkerService docs.",
+        )
+        .instance_method("value", |vm, mc, receiver, _args| {
+            invoke_parent_block(vm, mc, receiver, "value", &[])
+        })
+        .doc("Invoke the parent block with no arguments (one round trip).")
+        .instance_method("value:", |vm, mc, receiver, args| {
+            invoke_parent_block(vm, mc, receiver, "value:", &args)
+        })
+        .doc("Invoke the parent block with one argument (one round trip).")
+        .instance_method("valueWithArgs:", |vm, mc, receiver, args| {
+            invoke_parent_block(vm, mc, receiver, "valueWithArgs:", &args)
+        })
+        .doc("Invoke the parent block with a List of arguments (one round trip).")
 }
 
 pub fn build_worker_class() -> NativeClassBuilder {
@@ -326,7 +537,19 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     break;
                 }
                 note_message();
+                // Open the conversation for this dispatch: hosted code that
+                // invokes a `HostBlock` finds its way back to the parent here.
+                let task = vm.sched.current_task.0;
+                vm.worker_convs.insert(
+                    task,
+                    crate::worker::ConvHandles {
+                        reply_tx: req.reply.clone(),
+                        hostops_rx: req.hostops.clone(),
+                        depth: 0,
+                    },
+                );
                 let reply = dispatch_hosted(vm, mc, &op, recv, &method_args, &blocks);
+                vm.worker_convs.remove(&task);
                 let _ = req.reply.try_send(reply);
             }
             vm.hosted.clear();

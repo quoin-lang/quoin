@@ -462,9 +462,10 @@ pub fn spawn_worker_process(
                         }
                     }
                     ConvReq::Dispatch(req) => {
-                        // The encode seam refuses blocks for process backing, so a
-                        // shipped-block sidecar can never reach the socket — but the
-                        // wire must never silently drop one either.
+                        // The encode seam routes blocks to the handle path for
+                        // process backing, so a shipped-block sidecar can never
+                        // reach the socket — but the wire must never silently
+                        // drop one either.
                         if !req.blocks.is_empty() {
                             let _ = req.reply.send_blocking(Msg::CallReturnError {
                                 message: "blocks cannot cross a process boundary".to_string(),
@@ -475,13 +476,58 @@ pub fn spawn_worker_process(
                         if write_msg_frame(&mut sock, &req.frame).is_err() {
                             break;
                         }
-                        match read_msg_frame(&mut sock) {
-                            // Any terminal answers the dispatch; a dropped reply
-                            // lane (cancelled caller) is the sender's problem.
-                            Ok(msg) => {
-                                let _ = req.reply.send_blocking(msg);
+                        // Relay the conversation to its outer terminal (strict
+                        // LIFO alternation): worker→parent frames forward up the
+                        // reply lane; between them a parent→worker frame (host-op
+                        // reply or nested call) comes down `hostops` and goes to
+                        // the socket. `depth` counts open conversation levels — a
+                        // `Call` in either direction opens one, a `CallReturn*`
+                        // closes one; the worker frame that closes level 0 ends
+                        // the relay. A closed `hostops` lane means the caller
+                        // abandoned the conversation (cancellation): pending
+                        // worker requests are answered with an error so the child
+                        // unwinds, and the relay still runs to the terminal so
+                        // the socket stays in sync for the next dispatch.
+                        let mut depth: u32 = 1;
+                        let mut broken = false;
+                        loop {
+                            let up = match read_msg_frame(&mut sock) {
+                                Ok(f) => f,
+                                Err(_) => {
+                                    broken = true;
+                                    break;
+                                }
+                            };
+                            if matches!(up, Msg::Call { .. }) {
+                                depth += 1;
+                            } else {
+                                depth = depth.saturating_sub(1);
                             }
-                            Err(_) => break,
+                            // A dropped reply lane (cancelled caller) must not
+                            // stop the relay — the wire has to reach its terminal.
+                            let _ = req.reply.send_blocking(up);
+                            if depth == 0 {
+                                break;
+                            }
+                            let down = match req.hostops.recv_blocking() {
+                                Ok(f) => f,
+                                Err(_) => Msg::CallReturnError {
+                                    message: "the caller abandoned the conversation".to_string(),
+                                    remote_stack: String::new(),
+                                },
+                            };
+                            if matches!(down, Msg::Call { .. }) {
+                                depth += 1;
+                            } else {
+                                depth = depth.saturating_sub(1);
+                            }
+                            if write_msg_frame(&mut sock, &down).is_err() {
+                                broken = true;
+                                break;
+                            }
+                        }
+                        if broken {
+                            break;
                         }
                     }
                 }
@@ -630,7 +676,7 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
                 else {
                     continue;
                 };
-                let terminal = if op == OP_PS_TREE && class_name.is_empty() {
+                if op == OP_PS_TREE && class_name.is_empty() {
                     // One conversation at a time: a fresh reply lane per request,
                     // the terminal written before the next Call is read.
                     let (reply_tx, reply_rx) = async_channel::bounded::<WorkerMsg>(1);
@@ -646,35 +692,84 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
                     let Ok(WorkerMsg::Data(value)) = reply_rx.recv_blocking() else {
                         return;
                     };
-                    Msg::CallReturnData { value }
-                } else {
-                    let (reply_tx, reply_rx) = async_channel::bounded::<Msg>(1);
-                    if dispatch_tx
-                        .send_blocking(DispatchReq {
-                            frame,
-                            blocks: Vec::new(),
-                            reply: reply_tx,
-                        })
-                        .is_err()
-                    {
-                        // No serve loop (a plain worker, or one that already
-                        // stopped): answer recoverably, stay in sync.
-                        Msg::CallReturnError {
-                            message: "this worker hosts no objects".to_string(),
-                            remote_stack: String::new(),
-                        }
-                    } else {
-                        match reply_rx.recv_blocking() {
-                            Ok(msg) => msg,
-                            Err(_) => Msg::CallReturnError {
+                    if write_msg_frame(&mut sock, &Msg::CallReturnData { value }).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                let (reply_tx, reply_rx) = async_channel::unbounded::<Msg>();
+                let (hostop_tx, hostop_rx) = async_channel::unbounded::<Msg>();
+                if dispatch_tx
+                    .send_blocking(DispatchReq {
+                        frame,
+                        blocks: Vec::new(),
+                        reply: reply_tx,
+                        hostops: hostop_rx,
+                    })
+                    .is_err()
+                {
+                    // No serve loop (a plain worker, or one that already
+                    // stopped): answer recoverably, stay in sync.
+                    let refuse = Msg::CallReturnError {
+                        message: "this worker hosts no objects".to_string(),
+                        remote_stack: String::new(),
+                    };
+                    if write_msg_frame(&mut sock, &refuse).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                // Relay this conversation (mirror of the parent pump): serve-
+                // fiber frames — host-ops, then the terminal — go up the
+                // socket; parent frames (host-op replies, nested calls) come
+                // back down to the fiber. Call opens a level, CallReturn*
+                // closes one; the fiber frame that closes level 0 ends the
+                // relay. A dead serve loop mid-conversation closes every open
+                // level with an error so the parent stays in sync.
+                let mut depth: u32 = 1;
+                while depth > 0 {
+                    let up = match reply_rx.recv_blocking() {
+                        Ok(f) => f,
+                        Err(_) => {
+                            let e = Msg::CallReturnError {
                                 message: "the hosted serve loop exited mid-call".to_string(),
                                 remote_stack: String::new(),
-                            },
+                            };
+                            while depth > 0 {
+                                if write_msg_frame(&mut sock, &e).is_err() {
+                                    return;
+                                }
+                                depth -= 1;
+                            }
+                            break;
                         }
+                    };
+                    if matches!(up, Msg::Call { .. }) {
+                        depth += 1;
+                    } else {
+                        depth = depth.saturating_sub(1);
                     }
-                };
-                if write_msg_frame(&mut sock, &terminal).is_err() {
-                    return;
+                    if write_msg_frame(&mut sock, &up).is_err() {
+                        return;
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    let down = match read_msg_frame(&mut sock) {
+                        Ok(f) => f,
+                        Err(_) => return,
+                    };
+                    if matches!(down, Msg::Call { .. }) {
+                        depth += 1;
+                    } else {
+                        depth = depth.saturating_sub(1);
+                    }
+                    if hostop_tx.send_blocking(down).is_err() {
+                        // The serve fiber vanished with parent frames owed;
+                        // the next reply_rx recv reports it and closes the
+                        // open levels.
+                        continue;
+                    }
                 }
             }
         });

@@ -693,6 +693,12 @@ pub struct VmState<'gc> {
     /// channel ends back to the parent. `None` on the main VM.
     #[collect(require_static)]
     pub worker_link: Option<crate::worker::WorkerLink>,
+    /// WORKER-side: the conversation each serve task is currently inside
+    /// (ACTOR_OBJECTS.md §3a) — how a `HostBlock` invocation finds its way
+    /// back to the parent. Keyed by task so the per-object-lane world (§5.1)
+    /// works unchanged; entries live only for the span of a dispatch.
+    #[collect(require_static)]
+    pub worker_convs: std::collections::HashMap<usize, crate::worker::ConvHandles>,
     /// The ENTRY unit this VM was booted to run (canonicalized), `None` for
     /// REPL/eval. "What program is this?" — `Worker.spawn:(VM.unit)` runs
     /// another copy of the current program (the same-unit provisioning
@@ -855,6 +861,7 @@ impl<'gc> VmState<'gc> {
             // Epoch starts at 1 so the epoch-0 empty slots never spuriously match.
             dispatch_epoch: 1,
             worker_link: None,
+            worker_convs: std::collections::HashMap::new(),
             unit_path: None,
             worker_registry: Vec::new(),
             io: Io {

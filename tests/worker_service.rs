@@ -56,6 +56,7 @@ Counter <- { |@total|
 #[test]
 fn service_state_errors_and_stop() {
     let script = r#"
+Marker <- { x -> { 1 } };
 var ok = true;
 var c = WorkerService.host:'@counter.qn@' class:'Counter';
 
@@ -72,10 +73,9 @@ var thrown = { c.boom; 'no-error' }.catch:{ |e| e.s };
 var mnu = { c.frobnicate; 'no-error' }.catch:{ |e| e.s };
 (mnu.contains?:'frobnicate').else:{ ok = false };
 
-"* a non-portable argument (a block writing a capture) refuses without
-"* occupying the service
-var w = 0;
-var badArg = { c.add:{ w = 1 }; 'sent' }.catch:{ |e| 'refused' };
+"* a non-portable argument (a plain instance) refuses without occupying
+"* the service (blocks don't refuse anymore — they ship or cross as handles)
+var badArg = { c.add:(Marker.new); 'sent' }.catch:{ |e| 'refused' };
 (badArg == 'refused').else:{ ok = false };
 ((c.total) == 12).else:{ ok = false };
 
@@ -243,16 +243,53 @@ var outer = { |n| inner.value:(n * 2) };
 ((r.sumOver:#( 1 2 3 4 ) with:{ |i| i * i }) == 30)
     .else:{ ok = false; 'FAIL: sumOver'.print };
 
-"* a stored block stays live for later dispatches
-r.stash:{ |n| n + 1 };
-((r.runStash:9) == 10).else:{ ok = false; 'FAIL: stash'.print };
-
-"* an unportable block (writes a capture) refuses at the seam, naming the
-"* argument; the service stays usable
+"* an UNPORTABLE block (writes a capture) crosses as a HANDLE: it runs in
+"* the PARENT and sees its captures live — the §3a fallback, not an error
 var w = 0;
-var bad = { r.apply:{ |n| w = n } to:1; 'sent' }.catch:{ |e| e.s };
-(bad.contains?:'argument 1').else:{ ok = false; ('FAIL bad: ' + bad).print };
-((r.runStash:1) == 2).else:{ ok = false; 'FAIL: usable after refusal'.print };
+((r.apply:{ |n| w = n; n + 1 } to:41) == 42).else:{ ok = false; 'FAIL: handle'.print };
+(w == 41).else:{ ok = false; 'FAIL: live capture'.print };
+
+"* a PORTABLE block freezes its captures at send time (ship = snapshot)
+var x = 1;
+r.stash:{ |n| x + n };
+x = 2;
+((r.runStash:0) == 1).else:{ ok = false; 'FAIL: snapshot'.print };
+
+"* a stored HANDLE stays live across calls, still seeing the parent live
+var y = 10;
+r.stash:{ |n| y = y + n; y };
+y = 100;
+((r.runStash:5) == 105).else:{ ok = false; 'FAIL: stored handle'.print };
+(y == 105).else:{ ok = false; 'FAIL: handle mutation'.print };
+
+"* a block the worker invokes may call back into the SAME service — the
+"* nested call rides the open conversation instead of deadlocking
+((r.apply:{ |n| (r.double:n) + 1 } to:10) == 21)
+    .else:{ ok = false; 'FAIL: nested'.print };
+
+"* ...and into a DIFFERENT service
+var other = WorkerService.host:'@runner.qn@' class:'Runner';
+((r.apply:{ |n| other.double:n } to:7) == 14)
+    .else:{ ok = false; 'FAIL: other service'.print };
+other.serviceStop;
+
+"* a parent block's throw surfaces catchably at the call site
+var msg = { r.apply:{ |n| 'parent boom'.throw } to:1; 'no-error' }.catch:{ |e| e.s };
+(msg.contains?:'parent boom').else:{ ok = false; ('FAIL msg: ' + msg).print };
+
+"* a timeout mid-conversation ABANDONS it cleanly: the caller sees the
+"* timeout and the service keeps working
+var t = { Async.timeout:30 do:{ r.apply:{ |n| Async.sleep:400; n } to:1 }; 'no-timeout' }
+    .catch:{ |e| 'timed-out' };
+(t == 'timed-out').else:{ ok = false; ('FAIL t: ' + t).print };
+((r.double:4) == 8).else:{ ok = false; 'FAIL: unusable after timeout'.print };
+
+"* unbounded mutual parent<->worker recursion errors catchably; the
+"* service survives the full unwind
+r.stash:{ |n| r.runStash:n };
+var deep = { r.runStash:1; 'no-error' }.catch:{ |e| 'capped' };
+(deep == 'capped').else:{ ok = false; 'FAIL: no depth cap'.print };
+((r.double:3) == 6).else:{ ok = false; 'FAIL: unusable after cap'.print };
 
 "* a capture chain reaching a global the worker lacks errors at rebuild,
 "* catchably, naming the worker
@@ -268,18 +305,38 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 }
 
 #[test]
-fn service_block_args_process_refuse() {
+fn service_block_args_process() {
     let script = r#"
 var ok = true;
 var r = WorkerService.host:'@runner.qn@' class:'Runner' backing:'process';
 
-"* blocks refuse at the encode seam for process backing, pointing at thread
-var msg = { r.apply:{ |n| n } to:1; 'sent' }.catch:{ |e| e.s };
-((msg.contains?:'process boundary') && (msg.contains?:'thread backing'))
-    .else:{ ok = false; ('FAIL msg: ' + msg).print };
+"* blocks cross a PROCESS boundary as handles: the block runs in the
+"* PARENT, driven over the socket, seeing its captures live
+var w = 0;
+((r.apply:{ |n| w = n; n * 2 } to:21) == 42).else:{ ok = false; 'FAIL: apply'.print };
+(w == 21).else:{ ok = false; 'FAIL: live capture'.print };
 
-"* data arguments still cross fine afterwards
-((r.double:21) == 42).else:{ ok = false; 'FAIL: double'.print };
+"* portable blocks freeze their captures at send time here too (the handle
+"* wraps a local snapshot — the backing does not change semantics)
+var x = 1;
+r.stash:{ |n| x + n };
+x = 2;
+((r.runStash:0) == 1).else:{ ok = false; 'FAIL: snapshot'.print };
+
+"* nested: a block the worker invokes calls back into the same service,
+"* riding the conversation over the socket
+((r.apply:{ |n| (r.double:n) + 1 } to:10) == 21)
+    .else:{ ok = false; 'FAIL: nested'.print };
+
+"* a parent block's throw surfaces catchably
+var msg = { r.apply:{ |n| 'parent boom'.throw } to:1; 'no-error' }.catch:{ |e| e.s };
+(msg.contains?:'parent boom').else:{ ok = false; ('FAIL msg: ' + msg).print };
+
+"* a timeout mid-conversation abandons it cleanly over the socket too
+var t = { Async.timeout:30 do:{ r.apply:{ |n| Async.sleep:400; n } to:1 }; 'no-timeout' }
+    .catch:{ |e| 'timed-out' };
+(t == 'timed-out').else:{ ok = false; ('FAIL t: ' + t).print };
+((r.double:4) == 8).else:{ ok = false; 'FAIL: unusable after timeout'.print };
 
 r.serviceStop;
 ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
