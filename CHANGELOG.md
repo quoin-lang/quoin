@@ -10,6 +10,14 @@ under **Changed**, with the migration.
 
 ### Added
 
+- **Boundary profiling** (`VM.boundaryStats` / `VM.boundaryReport`): every extension
+  call is counted per (peer, class, selector) — calls, errors, bytes both ways, and a
+  cost decomposition in microseconds: in-call wall time, time parked waiting for the
+  peer's connection (contention), and the peer's own servicing time (`handler_micros`,
+  a new append-only protocol field both SDKs now report; 0 from older SDKs). The
+  rendered report sorts by total cost and flags transport-dominated hot rows — the
+  chatty-vs-slow placement diagnosis (`docs/internal/ACTOR_OBJECTS.md` §7). Always on;
+  rows survive a dead extension.
 - Scheduler (experimental): **wake-log record/replay hooks**. `QN_WAKE_RECORD=<path>`
   records the scheduler's decision stream (ready-picks, yield preemptions, I/O delivery
   order); `QN_WAKE_REPLAY=<path>` re-runs the program forcing those decisions,

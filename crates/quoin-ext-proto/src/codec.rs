@@ -16,7 +16,7 @@
 //! Hand-rolled rather than pulling a MessagePack crate: the subset is small, the format is
 //! frozen by the spec, and this keeps the protocol crate dependency-free.
 
-use crate::{Arg, ArrowArray, ArrowDType, ClassDecl, DataValue, MAX_DV_DEPTH, Msg};
+use crate::{Arg, ArrowArray, ArrowDType, ClassDecl, DataValue, MAX_DV_DEPTH, Msg, ReplyMeta};
 
 // Frame type tags (`[tag, ...]`), grouped: the call, its terminal returns, the manifest
 // handshake, then re-entrant host-ops and their replies. Append new types; never renumber.
@@ -49,6 +49,23 @@ const T_HOST_OP_RETURN: u64 = 20;
 /// Encode one [`Msg`] as a complete MessagePack frame (no length prefix — the transport
 /// frames it).
 pub fn encode(msg: &Msg) -> Vec<u8> {
+    encode_with_meta(msg, None)
+}
+
+/// [`encode`], plus appended [`ReplyMeta`] on the `CallReturn*` terminals (the field is
+/// simply not written when `meta` is `None` or the message is not a Call terminal —
+/// append-only evolution, older decoders skip it).
+pub fn encode_with_meta(msg: &Msg, meta: Option<&ReplyMeta>) -> Vec<u8> {
+    // The meta field count this frame will carry: 1 on a Call terminal with meta given.
+    let meta_n = match msg {
+        Msg::CallReturn { .. }
+        | Msg::CallReturnError { .. }
+        | Msg::CallReturnResource { .. }
+        | Msg::CallReturnArray { .. }
+        | Msg::CallReturnData { .. }
+        | Msg::CallReturnHandle { .. } => usize::from(meta.is_some()),
+        _ => 0,
+    };
     let mut out = Vec::with_capacity(64);
     match msg {
         Msg::Call {
@@ -88,7 +105,7 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             }
         }
         Msg::CallReturn { result } => {
-            write_array_header(&mut out, 2);
+            write_array_header(&mut out, 2 + meta_n);
             write_uint(&mut out, T_CALL_RETURN);
             write_str(&mut out, result);
         }
@@ -96,7 +113,7 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             message,
             remote_stack,
         } => {
-            write_array_header(&mut out, 3);
+            write_array_header(&mut out, 3 + meta_n);
             write_uint(&mut out, T_CALL_RETURN_ERROR);
             write_str(&mut out, message);
             write_str(&mut out, remote_stack);
@@ -105,23 +122,23 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             resource,
             class_name,
         } => {
-            write_array_header(&mut out, 3);
+            write_array_header(&mut out, 3 + meta_n);
             write_uint(&mut out, T_CALL_RETURN_RESOURCE);
             write_uint(&mut out, *resource);
             write_str(&mut out, class_name);
         }
         Msg::CallReturnArray { array } => {
-            write_array_header(&mut out, 2);
+            write_array_header(&mut out, 2 + meta_n);
             write_uint(&mut out, T_CALL_RETURN_ARRAY);
             write_arrow(&mut out, array);
         }
         Msg::CallReturnData { value } => {
-            write_array_header(&mut out, 2);
+            write_array_header(&mut out, 2 + meta_n);
             write_uint(&mut out, T_CALL_RETURN_DATA);
             write_dv(&mut out, value);
         }
         Msg::CallReturnHandle { handle } => {
-            write_array_header(&mut out, 2);
+            write_array_header(&mut out, 2 + meta_n);
             write_uint(&mut out, T_CALL_RETURN_HANDLE);
             write_uint(&mut out, *handle);
         }
@@ -229,6 +246,13 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             write_opt_str(&mut out, error);
             write_str(&mut out, remote_stack);
         }
+    }
+    // The appended meta field, counted into the terminal arms' headers above.
+    if meta_n == 1 {
+        write_uint(
+            &mut out,
+            meta.expect("meta_n == 1 implies meta").handler_micros,
+        );
     }
     out
 }
@@ -478,6 +502,13 @@ fn write_class_decl(out: &mut Vec<u8>, c: &ClassDecl) {
 /// (a malformed buffer, an unknown frame type, or a structural limit); both the host and
 /// the extension SDK wrap it in their own error type.
 pub fn decode_frame(bytes: &[u8]) -> Result<Msg, String> {
+    decode_frame_with_meta(bytes).map(|(msg, _)| msg)
+}
+
+/// [`decode_frame`], plus the appended [`ReplyMeta`] from `CallReturn*` terminals
+/// (default — `handler_micros: 0` — for other frames and for older peers that don't
+/// send the field).
+pub fn decode_frame_with_meta(bytes: &[u8]) -> Result<(Msg, ReplyMeta), String> {
     let mut rd = bytes;
     let rd = &mut rd;
     let n = read_array_header(rd)?;
@@ -487,6 +518,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Msg, String> {
     let tag = read_uint(rd)?;
     // Fields beyond the ones this decoder knows are skipped (append-only evolution).
     let fields = n - 1;
+    let mut meta = ReplyMeta::default();
     let msg = match tag {
         T_CALL => {
             let extra = need(fields, 10, "Call")?;
@@ -520,10 +552,11 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Msg, String> {
             msg
         }
         T_CALL_RETURN => {
-            let extra = need(fields, 1, "CallReturn")?;
+            let mut extra = need(fields, 1, "CallReturn")?;
             let msg = Msg::CallReturn {
                 result: read_str(rd)?,
             };
+            meta.handler_micros = read_appended_u64(rd, &mut extra)?;
             skip_extra(rd, extra)?;
             msg
         }
@@ -533,39 +566,44 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Msg, String> {
                 message: read_str(rd)?,
                 remote_stack: read_appended_str(rd, &mut extra)?,
             };
+            meta.handler_micros = read_appended_u64(rd, &mut extra)?;
             skip_extra(rd, extra)?;
             msg
         }
         T_CALL_RETURN_RESOURCE => {
-            let extra = need(fields, 2, "CallReturnResource")?;
+            let mut extra = need(fields, 2, "CallReturnResource")?;
             let msg = Msg::CallReturnResource {
                 resource: read_uint(rd)?,
                 class_name: read_str(rd)?,
             };
+            meta.handler_micros = read_appended_u64(rd, &mut extra)?;
             skip_extra(rd, extra)?;
             msg
         }
         T_CALL_RETURN_ARRAY => {
-            let extra = need(fields, 1, "CallReturnArray")?;
+            let mut extra = need(fields, 1, "CallReturnArray")?;
             let msg = Msg::CallReturnArray {
                 array: read_arrow(rd)?,
             };
+            meta.handler_micros = read_appended_u64(rd, &mut extra)?;
             skip_extra(rd, extra)?;
             msg
         }
         T_CALL_RETURN_DATA => {
-            let extra = need(fields, 1, "CallReturnData")?;
+            let mut extra = need(fields, 1, "CallReturnData")?;
             let msg = Msg::CallReturnData {
                 value: read_dv(rd, 0)?,
             };
+            meta.handler_micros = read_appended_u64(rd, &mut extra)?;
             skip_extra(rd, extra)?;
             msg
         }
         T_CALL_RETURN_HANDLE => {
-            let extra = need(fields, 1, "CallReturnHandle")?;
+            let mut extra = need(fields, 1, "CallReturnHandle")?;
             let msg = Msg::CallReturnHandle {
                 handle: read_uint(rd)?,
             };
+            meta.handler_micros = read_appended_u64(rd, &mut extra)?;
             skip_extra(rd, extra)?;
             msg
         }
@@ -719,7 +757,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Msg, String> {
             rd.len()
         ));
     }
-    Ok(msg)
+    Ok((msg, meta))
 }
 
 /// Deserialize one bare MessagePack blob back into a [`DataValue`]. Enforces the nesting-
@@ -753,6 +791,16 @@ fn read_appended_str(rd: &mut &[u8], extra: &mut usize) -> Result<String, String
     }
     *extra -= 1;
     read_str(rd)
+}
+
+/// Read an APPENDED optional u64 field: present when the peer is new enough to send
+/// it, 0 when it isn't (PROTOCOL.md §Evolution — append-only fields).
+fn read_appended_u64(rd: &mut &[u8], extra: &mut usize) -> Result<u64, String> {
+    if *extra == 0 {
+        return Ok(0);
+    }
+    *extra -= 1;
+    read_uint(rd)
 }
 
 fn skip_extra(rd: &mut &[u8], extra: usize) -> Result<(), String> {

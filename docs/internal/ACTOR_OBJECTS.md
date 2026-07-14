@@ -211,6 +211,20 @@ is nearly free to collect:
   with Quoin peers eventually contributing full span trees. Arc-4 adjacency; the
   counters come now.
 
+**As built (slice 2):** `BoundaryStats`/`BoundaryRow` on each `NativeExtension`,
+registered in `vm.io.ext_stats` (rows survive a dead/dropped peer — the post-mortem);
+recording at the two call sites in `extension.rs`, with claim-wait measured in
+`ext_prelude`'s queued path and nested host-op traffic metered through
+`service_host_op`. `handler_micros` rides every `CallReturn*` terminal as an
+append-only field, carried out-of-band of `Msg` as `ReplyMeta`
+(`encode_with_meta`/`decode_frame_with_meta`) so the 50-odd `Msg` construction sites
+stayed untouched; both SDKs stamp it at their serve/nested-dispatch write sites.
+Surface: `VM.boundaryStats` (sorted rows) + `VM.boundaryReport` (rendered, sorted by
+total cost, chattiness callout at calls ≥ 100 and transport ≥ 60%). One decomposition
+caveat, documented on the field: a handler that calls back into the host (apply_block)
+counts that nested time as *handler* — from the host's view it is still time the peer
+held the call.
+
 ## 8. Replay hooks (ride along with this arc — decided 2026-07-13)
 
 The archaeology reduced deterministic replay to a startlingly small surface. Everything
@@ -264,9 +278,10 @@ injection wrapper, which feeds recorded results instead of re-performing.
 
 ## 9. Slicing (proposed)
 
-1. **Replay hooks + divergence test** (small, first — everything after must stay logged).
+1. **Replay hooks + divergence test** (small, first — everything after must stay
+   logged). DONE.
 2. **Boundary profiling** (§7): host-side counters + `VM.boundaryStats` +
-   `handler_micros` — early because it is valuable against extensions *today*.
+   `handler_micros` — early because it is valuable against extensions *today*. DONE.
 3. **Peer-protocol convergence for process workers**: `worker-serve` speaks `Msg`
    (manifest, Call, host-ops, nesting); the pump/envelope retire; plain
    `send:`/`receive` ride `Call`-shaped frames.

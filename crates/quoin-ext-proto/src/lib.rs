@@ -17,7 +17,22 @@
 
 pub mod codec;
 
-pub use codec::{decode_frame, encode, pack_dv, unpack_dv};
+pub use codec::{
+    decode_frame, decode_frame_with_meta, encode, encode_with_meta, pack_dv, unpack_dv,
+};
+
+/// Appended per-frame metadata riding the `CallReturn*` terminals (append-only
+/// evolution; absent on frames from older peers). Kept OUT of [`Msg`] so the message
+/// shapes — and every construction site — stay meta-free: producers pass it to
+/// [`codec::encode_with_meta`], consumers get it from [`codec::decode_frame_with_meta`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplyMeta {
+    /// Wall time the peer spent servicing the call, in microseconds, from receiving the
+    /// `Call` to writing its terminal — INCLUDING any nested host round-trips it made.
+    /// 0 = not reported (older SDK). Boundary profiling uses it to split a call's cost
+    /// into queue-wait / transport / remote-handler shares.
+    pub handler_micros: u64,
+}
 
 /// The protocol version spoken by this crate, exchanged in [`Msg::GetManifest`] /
 /// [`Msg::ManifestReturn`] (the first frames on a fresh connection, so a mismatch is

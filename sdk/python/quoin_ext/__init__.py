@@ -22,6 +22,7 @@ import decimal
 import os
 import socket
 import struct
+import time
 import traceback
 
 try:
@@ -113,6 +114,19 @@ def _ext_hook(code, data):
 def _pack(fields):
     """Encode one frame: the message array, in one codec pass."""
     return msgpack.packb(fields, use_bin_type=True, default=_pack_default)
+
+
+def _stamp_handler_micros(frame, started):
+    """Append the ``handler_micros`` field (append-only evolution, PROTOCOL.md) to a packed
+    ``CallReturn*`` terminal: how long this side held the call, in microseconds, from decoding
+    the ``Call`` to writing its terminal — nested host round-trips included. The host's
+    boundary profiling (``VM.boundaryStats``) splits call cost with it. Every terminal is a
+    msgpack fixarray (2-4 fields), so appending is a one-byte header bump."""
+    head = frame[0]
+    if not 0x90 <= head < 0x9F:
+        return frame  # defensive: never touch an unexpected shape
+    micros = int((time.perf_counter() - started) * 1_000_000)
+    return bytes([head + 1]) + bytes(frame[1:]) + msgpack.packb(micros)
 
 
 def _unpack(frame):
@@ -430,16 +444,22 @@ class Host:
                 return msg
             # A nested Call: service it (or refuse it recoverably) and keep waiting for
             # our own reply — it always follows the nested call's completion (LIFO).
+            started = time.perf_counter()
             if self._nested is None:
                 write_frame(
                     self._conn,
-                    _encode_call_return_error(
-                        "nested extension call: this extension's generic handler "
-                        "cannot service a re-entrant call"
+                    _stamp_handler_micros(
+                        _encode_call_return_error(
+                            "nested extension call: this extension's generic handler "
+                            "cannot service a re-entrant call"
+                        ),
+                        started,
                     ),
                 )
             else:
-                write_frame(self._conn, self._nested(reply))
+                write_frame(
+                    self._conn, _stamp_handler_micros(self._nested(reply), started)
+                )
 
     def _host_op(self, fields):
         reply = self._round_trip(fields)
@@ -490,6 +510,7 @@ def serve(path, handler):
                 if msg[0] == _T_GET_MANIFEST:
                     write_frame(conn, _encode_manifest_return([]))
                     continue
+                started = time.perf_counter()
                 op, arg, handles, resources, releases, arrays, data = _decode_call(msg)
                 host = Host(conn, handles, resources, releases, arrays, data)
                 # A handler exception becomes a catchable Quoin error; the extension keeps
@@ -502,7 +523,7 @@ def serve(path, handler):
                         f"in {op}\n" + traceback.format_exc() + "".join(host.error_stacks)
                     )
                     reply = _encode_call_return_error(str(exc), remote)
-                write_frame(conn, reply)
+                write_frame(conn, _stamp_handler_micros(reply, started))
         finally:
             conn.close()
     finally:
@@ -604,7 +625,13 @@ class Extension:
                     if msg[0] == _T_GET_MANIFEST:
                         write_frame(conn, _encode_manifest_return(self._manifest()))
                         continue
-                    write_frame(conn, self._dispatch(conn, msg, table, registered_types))
+                    started = time.perf_counter()
+                    write_frame(
+                        conn,
+                        _stamp_handler_micros(
+                            self._dispatch(conn, msg, table, registered_types), started
+                        ),
+                    )
             finally:
                 conn.close()
         finally:

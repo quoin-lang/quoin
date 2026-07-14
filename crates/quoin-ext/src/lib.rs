@@ -337,6 +337,7 @@ impl<'a> Host<'a> {
             else {
                 return Ok(msg);
             };
+            let started = std::time::Instant::now();
             // Borrow the fields disjointly: the nested dispatch needs the stream AND the
             // dispatch context at once.
             let Host { stream, ctx, .. } = self;
@@ -371,13 +372,26 @@ impl<'a> Host<'a> {
                     remote_stack: String::new(),
                 },
             };
-            write_frame(stream, &quoin_ext_proto::encode(&reply))?;
+            write_frame(
+                stream,
+                &quoin_ext_proto::encode_with_meta(&reply, Some(&reply_meta(started))),
+            )?;
         }
     }
 }
 
 fn invalid_data(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e)
+}
+
+/// The meta stamped on every `CallReturn*` terminal: how long this side held the call
+/// (from decoding the `Call` to writing its terminal, nested host round-trips included).
+/// The host's boundary profiling (`VM.boundaryStats`) splits a call's wall time into
+/// queue-wait / transport / remote-handler shares with it.
+fn reply_meta(started: std::time::Instant) -> quoin_ext_proto::ReplyMeta {
+    quoin_ext_proto::ReplyMeta {
+        handler_micros: started.elapsed().as_micros() as u64,
+    }
 }
 
 /// What a call handler returns: a scalar string, an ext-side resource id, a bulk `Array` (the data
@@ -574,6 +588,7 @@ pub fn serve<R: Into<Reply>>(
                 recv: _,
                 method_args: _,
             } => {
+                let started = std::time::Instant::now();
                 // `host` borrows the stream for the call's re-entrant host-ops; the borrow ends
                 // before we write the terminal reply on the same stream.
                 let reply: Reply = {
@@ -589,7 +604,13 @@ pub fn serve<R: Into<Reply>>(
                     };
                     handler(&mut host, &op, &arg).into()
                 };
-                write_frame(&mut stream, &quoin_ext_proto::encode(&reply_to_msg(reply)?))?;
+                write_frame(
+                    &mut stream,
+                    &quoin_ext_proto::encode_with_meta(
+                        &reply_to_msg(reply)?,
+                        Some(&reply_meta(started)),
+                    ),
+                )?;
             }
             other => {
                 return Err(invalid_data(format!(
@@ -897,6 +918,7 @@ impl Extension {
                     releases,
                     ..
                 } => {
+                    let started = std::time::Instant::now();
                     // The host batches dropped instances onto `releases`; free them from the table.
                     for rid in &releases {
                         table.take(*rid);
@@ -909,7 +931,10 @@ impl Extension {
                         recv,
                         &method_args,
                     )?;
-                    write_frame(&mut stream, &quoin_ext_proto::encode(&reply))?;
+                    write_frame(
+                        &mut stream,
+                        &quoin_ext_proto::encode_with_meta(&reply, Some(&reply_meta(started))),
+                    )?;
                 }
                 other => {
                     return Err(invalid_data(format!(

@@ -484,6 +484,14 @@ pub struct Io {
     /// teardown), awaiting a synchronous `IoBackend::reap_child` (kill if running + deregister).
     /// A non-GC queue mirroring `socket_reap`; a shared `Rc` clone lives in each Process handle.
     pub child_reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+    /// Boundary-profiling tables, one per spawned extension peer (`ACTOR_OBJECTS.md` §7),
+    /// registered at spawn and read by `VM.boundaryStats`. Entries deliberately outlive
+    /// their extension — a dead peer's numbers are the post-mortem.
+    pub ext_stats: std::rc::Rc<
+        std::cell::RefCell<
+            Vec<std::rc::Rc<std::cell::RefCell<crate::runtime::extension::BoundaryStats>>>,
+        >,
+    >,
 }
 
 /// Per-instruction instrumentation hooks, grouped out of `VmState`. Both `None` on a normal run, so
@@ -846,6 +854,7 @@ impl<'gc> VmState<'gc> {
                 socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 ext_handle_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 child_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                ext_stats: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             },
             instrumentation: Instrumentation {
                 debug: None,

@@ -51,11 +51,12 @@
 
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use gc_arena::collect::Trace;
 use gc_arena::{Gc, lock::RefLock};
@@ -263,6 +264,74 @@ fn from_wire_dtype(d: ArrowDType) -> ArrayDType {
     }
 }
 
+/// Boundary profiling (`ACTOR_OBJECTS.md` §7): per-`(class, selector)` counters for
+/// every call that crosses this peer's boundary. Always on — a few `Instant` reads and
+/// one map update against a ≥10µs round-trip floor. One table per extension, registered
+/// in `vm.io.ext_stats` at spawn so `VM.boundaryStats` can enumerate peers; the entry
+/// outlives a dead or dropped extension — post-mortem numbers are exactly when you want
+/// the report.
+#[derive(Debug)]
+pub struct BoundaryStats {
+    /// Peer label for reporting: the package namespace, or the raw spawn command.
+    pub peer: String,
+    /// Rows keyed `(class, selector)`; class is `""` for the generic `call:with:` path.
+    pub rows: HashMap<(String, String), BoundaryRow>,
+}
+
+/// One row of [`BoundaryStats`]. All time totals are in microseconds; a mean is
+/// `total / calls`. The decomposition the report leans on:
+/// `wall = transport/encode + handler`, with `claim_wait` (mailbox contention) tracked
+/// separately — a call's full cost as its caller felt it is `claim_wait + wall`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BoundaryRow {
+    pub calls: u64,
+    /// Calls that ended in an error terminal (or transport failure).
+    pub errors: u64,
+    pub bytes_out: u64,
+    pub bytes_in: u64,
+    /// In-call wall time: from opening the conversation to its terminal, nested
+    /// host-op servicing included, claim-queue wait excluded.
+    pub wall_micros: u64,
+    /// Time parked waiting for the connection claim (another task's call in flight).
+    pub claim_wait_micros: u64,
+    /// The peer-reported servicing time (`ReplyMeta.handler_micros`; 0 = the peer's
+    /// SDK predates the field). `wall - handler` is the transport/encode share.
+    pub handler_micros: u64,
+}
+
+/// Per-call traffic/timing accumulator threaded through one [`extension_call`]
+/// conversation (nested host-op frames included).
+#[derive(Default)]
+struct CallMeter {
+    bytes_out: u64,
+    bytes_in: u64,
+    handler_micros: u64,
+}
+
+/// Fold one finished call into the peer's stats table.
+fn record_boundary(
+    stats: &RefCell<BoundaryStats>,
+    class: &str,
+    op: &str,
+    meter: &CallMeter,
+    wall_micros: u64,
+    claim_wait_micros: u64,
+    errored: bool,
+) {
+    let mut s = stats.borrow_mut();
+    let row = s
+        .rows
+        .entry((class.to_string(), op.to_string()))
+        .or_default();
+    row.calls += 1;
+    row.errors += u64::from(errored);
+    row.bytes_out += meter.bytes_out;
+    row.bytes_in += meter.bytes_in;
+    row.wall_micros += wall_micros;
+    row.claim_wait_micros += claim_wait_micros;
+    row.handler_micros += meter.handler_micros;
+}
+
 /// Native state behind an `Extension` value: the registered stream id for the UDS, the child
 /// process, its socket path (for cleanup), the shared fd-reap queue, whether the extension has
 /// been observed dead, and the queue of ext-side resource ids dropped by the host (flushed to
@@ -312,6 +381,8 @@ pub struct NativeExtension {
     /// namespace on outbound dispatch and re-applying it to resolve a returned instance's class
     /// (cross-class returns).
     namespace: Option<String>,
+    /// Boundary-profiling counters (shared with `vm.io.ext_stats`, which outlives us).
+    stats: Rc<RefCell<BoundaryStats>>,
 }
 
 /// Native state behind an `ExtResource` value: an opaque token for a resource that lives in the
@@ -474,13 +545,15 @@ fn read_reply_frame<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<u8>,
     Ok(buf[4..4 + len].to_vec())
 }
 
-/// Encode `msg` and write it as one length-prefixed frame, parking the fiber on the socket.
-fn write_msg<'gc>(vm: &mut VmState<'gc>, id: StreamId, msg: &Msg) -> Result<(), QuoinError> {
+/// Encode `msg` and write it as one length-prefixed frame, parking the fiber on the
+/// socket. Answers the frame's full wire size (prefix included) for boundary profiling.
+fn write_msg<'gc>(vm: &mut VmState<'gc>, id: StreamId, msg: &Msg) -> Result<u64, QuoinError> {
     let payload = quoin_ext_proto::encode(msg);
     let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&payload);
+    let wire_len = frame.len() as u64;
     match vm.await_io(IoRequest::Write { id, bytes: frame })? {
-        IoResult::Wrote(_) => Ok(()),
+        IoResult::Wrote(_) => Ok(wire_len),
         IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
         other => Err(QuoinError::Other(format!(
             "Extension: unexpected write result {other:?}"
@@ -516,6 +589,8 @@ fn read_string_value(value: Value<'_>) -> Option<String> {
 
 /// Service one re-entrant host-op the extension issued mid-call, writing back its
 /// `HostOpReturn`. Returns `Ok(())` for every host-op; the caller's loop handles `CallReturn`.
+/// Answers the reply frame's wire size, so the enclosing call's meter counts the
+/// nested conversation's outbound traffic too.
 fn service_host_op<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -523,7 +598,7 @@ fn service_host_op<'gc>(
     epoch: u32,
     ext_id: u64,
     msg: Msg,
-) -> Result<(), QuoinError> {
+) -> Result<u64, QuoinError> {
     let reply = match msg {
         Msg::MakeString { value } => {
             let v = vm.new_string(mc, value);
@@ -825,6 +900,7 @@ fn extension_call<'gc>(
     class_name: String,
     recv: u64,
     releases: Vec<u64>,
+    meter: &mut CallMeter,
 ) -> Result<CallOutcome<'gc>, QuoinError> {
     let epoch = vm.handle_table.begin_call();
 
@@ -867,7 +943,7 @@ fn extension_call<'gc>(
     }
 
     let outcome: Result<CallOutcome<'gc>, QuoinError> = (|| {
-        write_msg(
+        meter.bytes_out += write_msg(
             vm,
             id,
             &Msg::Call {
@@ -885,8 +961,11 @@ fn extension_call<'gc>(
         )?;
         loop {
             let frame = read_reply_frame(vm, id)?;
-            let msg = quoin_ext_proto::decode_frame(&frame)
+            meter.bytes_in += 4 + frame.len() as u64;
+            let (msg, reply_meta) = quoin_ext_proto::decode_frame_with_meta(&frame)
                 .map_err(|e| QuoinError::Other(format!("Extension call: malformed frame: {e}")))?;
+            // Host-op frames carry no meta (0); the terminal's — decoded last — wins.
+            meter.handler_micros = reply_meta.handler_micros;
             match msg {
                 Msg::CallReturn { result } => return Ok(CallOutcome::Scalar(result)),
                 Msg::CallReturnResource {
@@ -921,7 +1000,9 @@ fn extension_call<'gc>(
                         remote_stack: truncate_blob(remote_stack),
                     });
                 }
-                host_op => service_host_op(vm, mc, id, epoch, ext_id, host_op)?,
+                host_op => {
+                    meter.bytes_out += service_host_op(vm, mc, id, epoch, ext_id, host_op)?;
+                }
             }
         }
     })();
@@ -1077,6 +1158,10 @@ struct ExtCall {
     /// The dropped-resource ids drained from the reap queue, flushed to the extension as this
     /// call's `releases`.
     releases: Vec<u64>,
+    /// The peer's boundary-profiling table (shared; the call folds itself in when it ends).
+    stats: Rc<RefCell<BoundaryStats>>,
+    /// How long this call parked waiting for the connection claim (0 on the uncontended path).
+    claim_wait_micros: u64,
 }
 
 /// One attempt to claim the connection for the current task.
@@ -1097,6 +1182,8 @@ fn ext_call_ctx(e: &mut NativeExtension) -> ExtCall {
         dead: e.dead,
         resource_reap: e.resource_reap.clone(),
         releases: e.resource_reap.borrow_mut().drain(..).collect(),
+        stats: e.stats.clone(),
+        claim_wait_micros: 0,
     }
 }
 
@@ -1152,7 +1239,10 @@ fn ext_prelude<'gc>(
         ))),
         Claim::Queued => {
             // Park until the in-flight call HANDS us the claim (fair FIFO, no re-race
-            // with running tasks) — the channel park model verbatim.
+            // with running tasks) — the channel park model verbatim. The wait is
+            // boundary-profiled separately from the call itself: mailbox contention
+            // is its own diagnosis (`ACTOR_OBJECTS.md` §7).
+            let queued_at = Instant::now();
             if let Some(t) = vm.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
                 t.parked_on_channel = true;
             }
@@ -1182,7 +1272,9 @@ fn ext_prelude<'gc>(
             receiver
                 .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
                     debug_assert_eq!(e.owner, Some(me));
-                    ext_call_ctx(e)
+                    let mut ctx = ext_call_ctx(e);
+                    ctx.claim_wait_micros = queued_at.elapsed().as_micros() as u64;
+                    ctx
                 })
                 .map_err(QuoinError::Other)
         }
@@ -1262,6 +1354,9 @@ fn run_extension_method<'gc>(
         },
         None => None,
     };
+    let op_name = op.clone();
+    let mut meter = CallMeter::default();
+    let started = Instant::now();
     let outcome = extension_call(
         vm,
         mc,
@@ -1275,6 +1370,16 @@ fn run_extension_method<'gc>(
         String::new(),
         0,
         ctx.releases,
+        &mut meter,
+    );
+    record_boundary(
+        &ctx.stats,
+        "",
+        &op_name,
+        &meter,
+        started.elapsed().as_micros() as u64,
+        ctx.claim_wait_micros,
+        outcome.is_err(),
     );
     ext_end_call(vm, mc, receiver);
     finish_outcome(vm, mc, receiver, ctx.ext_id, ctx.resource_reap, outcome)
@@ -1328,6 +1433,8 @@ pub fn dispatch_ext_method<'gc>(
     }
     // The method arguments are routed by `extension_call` (ext-class mode) into the ordered
     // `method_args` — data, ext-instances, and host blocks each by their kind.
+    let mut meter = CallMeter::default();
+    let started = Instant::now();
     let outcome = extension_call(
         vm,
         mc,
@@ -1338,9 +1445,19 @@ pub fn dispatch_ext_method<'gc>(
         String::new(),
         args,
         None,
-        class_name,
+        class_name.clone(),
         recv,
         ctx.releases,
+        &mut meter,
+    );
+    record_boundary(
+        &ctx.stats,
+        &class_name,
+        selector.as_str(),
+        &meter,
+        started.elapsed().as_micros() as u64,
+        ctx.claim_wait_micros,
+        outcome.is_err(),
     );
     ext_end_call(vm, mc, ext);
     finish_outcome(vm, mc, ext, ctx.ext_id, ctx.resource_reap, outcome)
@@ -1513,6 +1630,20 @@ fn spawn_and_connect<'gc>(
         }
     };
 
+    // Boundary profiling: one table per peer, registered globally so `VM.boundaryStats`
+    // can enumerate it — and keep it after the extension dies or is dropped.
+    let peer = namespace.clone().unwrap_or_else(|| {
+        Path::new(command)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| command.to_string())
+    });
+    let stats = Rc::new(RefCell::new(BoundaryStats {
+        peer,
+        rows: HashMap::new(),
+    }));
+    vm.io.ext_stats.borrow_mut().push(stats.clone());
+
     let class = vm.get_or_create_builtin_class(mc, "Extension");
     let ext_val = vm.new_native_state(
         mc,
@@ -1530,6 +1661,7 @@ fn spawn_and_connect<'gc>(
             call_waiters: VecDeque::new(),
             resource_reap: Rc::new(RefCell::new(Vec::new())),
             namespace,
+            stats,
         },
     );
     Ok((ext_val, manifest))

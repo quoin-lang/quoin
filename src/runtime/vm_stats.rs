@@ -18,8 +18,45 @@
 use indexmap::IndexMap;
 
 use crate::codegen;
+use crate::runtime::extension::BoundaryRow;
 use crate::value::{NativeClassBuilder, Value};
 use crate::vm::VmState;
+
+/// Snapshot every extension peer's boundary-profiling rows as plain data
+/// (`(peer, class, selector, row)`), sorted for deterministic output.
+fn boundary_rows(vm: &VmState<'_>) -> Vec<(String, String, String, BoundaryRow)> {
+    let tables = vm.io.ext_stats.clone();
+    let mut rows: Vec<(String, String, String, BoundaryRow)> = Vec::new();
+    for stats in tables.borrow().iter() {
+        let s = stats.borrow();
+        for ((class, selector), row) in &s.rows {
+            rows.push((s.peer.clone(), class.clone(), selector.clone(), *row));
+        }
+    }
+    rows.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    rows
+}
+
+/// `12.3µs` / `4.5ms` / `1.2s` — µs totals rendered at a human scale.
+fn fmt_micros(us: u64) -> String {
+    if us >= 1_000_000 {
+        format!("{:.1}s", us as f64 / 1_000_000.0)
+    } else if us >= 1_000 {
+        format!("{:.1}ms", us as f64 / 1_000.0)
+    } else {
+        format!("{us}µs")
+    }
+}
+
+fn fmt_bytes(b: u64) -> String {
+    if b >= 1_048_576 {
+        format!("{:.1}MB", b as f64 / 1_048_576.0)
+    } else if b >= 1_024 {
+        format!("{:.1}KB", b as f64 / 1_024.0)
+    } else {
+        format!("{b}B")
+    }
+}
 
 /// The `'aot'` section of `VM.stats`.
 fn aot_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
@@ -586,5 +623,105 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
              entry that was compiled and later tombstoned (a mispredicting speculation) \
              drops back out. Empty when AOT is disabled; `VM.stats.at:'aot'` carries an \
              `enabled` flag.",
+        )
+        // `VM.boundaryStats` -> the boundary profiler's raw rows: every call that
+        // crossed an extension-peer boundary, per (peer, class, selector).
+        .class_method("boundaryStats", |vm, mc, _receiver, _args| {
+            let rows = boundary_rows(vm);
+            let mut out = Vec::with_capacity(rows.len());
+            for (peer, class, selector, r) in rows {
+                let m = vec![
+                    ("peer".to_string(), vm.new_string(mc, peer)),
+                    ("class".to_string(), vm.new_string(mc, class)),
+                    ("selector".to_string(), vm.new_string(mc, selector)),
+                    ("calls".to_string(), vm.new_int(mc, r.calls as i64)),
+                    ("errors".to_string(), vm.new_int(mc, r.errors as i64)),
+                    ("bytesOut".to_string(), vm.new_int(mc, r.bytes_out as i64)),
+                    ("bytesIn".to_string(), vm.new_int(mc, r.bytes_in as i64)),
+                    (
+                        "wallMicros".to_string(),
+                        vm.new_int(mc, r.wall_micros as i64),
+                    ),
+                    (
+                        "claimWaitMicros".to_string(),
+                        vm.new_int(mc, r.claim_wait_micros as i64),
+                    ),
+                    (
+                        "handlerMicros".to_string(),
+                        vm.new_int(mc, r.handler_micros as i64),
+                    ),
+                ];
+                out.push(vm.new_map(mc, m));
+            }
+            Ok(vm.new_list(mc, out))
+        })
+        .doc(
+            "The boundary profiler (docs/internal/ACTOR_OBJECTS.md section 7): one Map per \
+             (peer, class, selector) that has crossed an extension boundary — `calls`, \
+             `errors`, `bytesOut`/`bytesIn`, and the cost decomposition in microseconds: \
+             `wallMicros` (in-call: transport/encode + remote handler), `claimWaitMicros` \
+             (parked waiting for the peer's connection — contention), `handlerMicros` (the \
+             peer's own servicing time; 0 when its SDK predates the field). Always on; \
+             rows survive a dead or dropped extension. `VM.boundaryReport` renders this.",
+        )
+        // `VM.boundaryReport` -> the same rows rendered for humans, sorted by total
+        // cost, with the chatty-vs-slow decomposition spelled out per row.
+        .class_method("boundaryReport", |vm, mc, _receiver, _args| {
+            let mut rows = boundary_rows(vm);
+            if rows.is_empty() {
+                return Ok(vm.new_string(
+                    mc,
+                    "no boundary calls recorded (no extension peer has been called)".to_string(),
+                ));
+            }
+            rows.sort_by_key(|(_, _, _, r)| std::cmp::Reverse(r.wall_micros + r.claim_wait_micros));
+            let mut out = String::new();
+            for (peer, class, selector, r) in rows {
+                let name = if class.is_empty() {
+                    format!("[{peer}] call:{selector}")
+                } else {
+                    format!("[{peer}] {class}.{selector}")
+                };
+                let total = r.wall_micros + r.claim_wait_micros;
+                out.push_str(&format!(
+                    "{name}  {} call{}{}  {} total ({}/call)  ",
+                    r.calls,
+                    if r.calls == 1 { "" } else { "s" },
+                    if r.errors > 0 {
+                        format!(" ({} err)", r.errors)
+                    } else {
+                        String::new()
+                    },
+                    fmt_micros(total),
+                    fmt_micros(total / r.calls.max(1)),
+                ));
+                if r.handler_micros > 0 && total > 0 {
+                    // wall = transport + handler; claim wait is its own share of total.
+                    let handler = 100 * r.handler_micros / total;
+                    let queue = 100 * r.claim_wait_micros / total;
+                    let transport = 100u64.saturating_sub(handler + queue);
+                    out.push_str(&format!(
+                        "{handler}% handler, {transport}% transport, {queue}% queue"
+                    ));
+                    if r.calls >= 100 && transport >= 60 {
+                        out.push_str("  <- chatty: batch the API or move the object");
+                    }
+                } else {
+                    out.push_str("no handler timing (older SDK)");
+                }
+                out.push_str(&format!(
+                    "  {} out, {} in\n",
+                    fmt_bytes(r.bytes_out),
+                    fmt_bytes(r.bytes_in)
+                ));
+            }
+            Ok(vm.new_string(mc, out))
+        })
+        .doc(
+            "`VM.boundaryStats` rendered for humans: one line per (peer, class, selector), \
+             sorted by total cost, each split into handler / transport / queue shares -- \
+             the chatty-vs-slow diagnosis. A transport-dominated row with many calls is \
+             flagged: batch the API or move the object (the cost gradient is placement- \
+             controlled, CONCURRENCY_MODEL.md guarantee 5).",
         )
 }
