@@ -189,7 +189,6 @@ fn boot_worker_arena(link: WorkerLink) -> Result<ReplArena, String> {
             &mut vm,
             link.chan_tx.clone(),
             link.chan_rx.clone(),
-            link.process,
         );
         vm.parent_chan_link = Some(idx);
         vm.worker_link = Some(link);
@@ -553,6 +552,7 @@ pub fn spawn_worker_process(
         conv_socks.push(accept_one(&listener)?);
     }
     let mail_sock = accept_one(&listener)?;
+    let chan_sock = accept_one(&listener)?;
     let _ = std::fs::remove_file(&sock_path);
 
     // The manifest handshake — the version gate (mirrors the extension spawn:
@@ -603,11 +603,36 @@ pub fn spawn_worker_process(
     let (done_tx, done_rx) = async_channel::bounded::<Result<WireData, String>>(1);
     let (control_tx, control_rx) = async_channel::unbounded::<ControlReq>();
     let (dispatch_tx, dispatch_rx) = async_channel::unbounded::<DispatchReq>();
-    // Channel-relay lanes exist for shape uniformity but are INERT on process
-    // links until the relay frames gain a wire encoding (§6's process slice);
-    // channel crossings refuse on process links at the encode seams.
-    let (chan_to_worker_tx, _chan_to_worker_rx) = async_channel::unbounded::<ChanFrame>();
-    let (_chan_to_parent_tx, chan_to_parent_rx) = async_channel::unbounded::<ChanFrame>();
+    // Channel-relay lanes (§6): dumb frame pumps over their own socket — the
+    // relay protocol is event-shaped (correlation ids), so unlike the
+    // conversation pumps there is no state to track, just bytes both ways.
+    let (chan_to_worker_tx, chan_out_rx) = async_channel::unbounded::<ChanFrame>();
+    let (chan_in_tx, chan_to_parent_rx) = async_channel::unbounded::<ChanFrame>();
+    {
+        let mut wsock = chan_sock
+            .try_clone()
+            .map_err(|e| format!("chan socket clone: {e}"))?;
+        std::thread::spawn(move || {
+            while let Ok(f) = chan_out_rx.recv_blocking() {
+                if write_msg_frame(&mut wsock, &chan_frame_to_msg(f)).is_err() {
+                    break;
+                }
+            }
+            let _ = wsock.shutdown(std::net::Shutdown::Write);
+        });
+    }
+    {
+        let mut rsock = chan_sock;
+        std::thread::spawn(move || {
+            while let Ok(msg) = read_msg_frame(&mut rsock) {
+                if let Some(f) = msg_to_chan_frame(msg)
+                    && chan_in_tx.send_blocking(f).is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
 
     // Conversation pumps: one per lane socket, all consuming the SHARED
     // control/dispatch queues (MPMC — whichever pump is free takes the next
@@ -635,8 +660,16 @@ pub fn spawn_worker_process(
                     WorkerMsg::Block(_) => {
                         eprintln!("qn: dropped a block on a process-worker lane");
                     }
-                    WorkerMsg::Channel(_) => {
-                        eprintln!("qn: dropped a channel on a process-worker lane");
+                    // A shipped channel endpoint: the id rides the mailbox as
+                    // its own op; the relay traffic rides the chan socket.
+                    WorkerMsg::Channel(chan) => {
+                        let mut f = call_frame(OP_SEND_CHAN, None);
+                        if let Msg::Call { recv, .. } = &mut f {
+                            *recv = chan;
+                        }
+                        if write_msg_frame(&mut sock, &f).is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -655,6 +688,9 @@ pub fn spawn_worker_process(
                     Msg::Call { op, data, .. } if op == OP_SEND => {
                         let dv = data.unwrap_or(WireData::Null);
                         let _ = outbox_tx.send_blocking(WorkerMsg::Data(dv));
+                    }
+                    Msg::Call { op, recv, .. } if op == OP_SEND_CHAN => {
+                        let _ = outbox_tx.send_blocking(WorkerMsg::Channel(recv));
                     }
                     Msg::CallReturnData { value } => {
                         let _ = done_tx.send_blocking(Ok(value));
@@ -746,7 +782,6 @@ fn child_conv_loop(
             .send_blocking(DispatchReq {
                 frame,
                 blocks: Vec::new(),
-                chans: Vec::new(),
                 reply: reply_tx,
                 hostops: hostop_rx,
                 handler_micros: handler.clone(),
@@ -853,6 +888,9 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
     let Some(mail_sock) = connect("mailbox") else {
         return 1;
     };
+    let Some(chan_sock) = connect("channel relay") else {
+        return 1;
+    };
 
     // Answer the manifest handshake SYNCHRONOUSLY, before anything that can
     // fail (a missing unit, a compile error) exits the process — the parent's
@@ -904,11 +942,13 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
         };
         std::thread::spawn(move || {
             while let Ok(msg) = read_msg_frame(&mut sock) {
-                if let Msg::Call { op, data, .. } = msg
-                    && op == OP_SEND
-                {
-                    let dv = data.unwrap_or(WireData::Null);
-                    let _ = inbox_tx.send_blocking(WorkerMsg::Data(dv));
+                if let Msg::Call { op, data, recv, .. } = msg {
+                    if op == OP_SEND {
+                        let dv = data.unwrap_or(WireData::Null);
+                        let _ = inbox_tx.send_blocking(WorkerMsg::Data(dv));
+                    } else if op == OP_SEND_CHAN {
+                        let _ = inbox_tx.send_blocking(WorkerMsg::Channel(recv));
+                    }
                 }
             }
             // Parent gone: closing inbox_tx (drop) ends Worker.receive with nil.
@@ -934,19 +974,60 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
         let to_mail = to_mail_tx.clone();
         std::thread::spawn(move || {
             while let Ok(msg) = outbox_rx.recv_blocking() {
-                if let WorkerMsg::Data(dv) = msg
-                    && to_mail.send(Some(call_frame(OP_SEND, Some(dv)))).is_err()
-                {
+                let frame = match msg {
+                    WorkerMsg::Data(dv) => call_frame(OP_SEND, Some(dv)),
+                    WorkerMsg::Channel(chan) => {
+                        let mut f = call_frame(OP_SEND_CHAN, None);
+                        if let Msg::Call { recv, .. } = &mut f {
+                            *recv = chan;
+                        }
+                        f
+                    }
+                    // Refused at the send seams; unreachable in practice.
+                    WorkerMsg::Block(_) => {
+                        eprintln!("qn: dropped a block on a process-worker lane");
+                        continue;
+                    }
+                };
+                if to_mail.send(Some(frame)).is_err() {
                     break;
                 }
             }
         });
     }
 
-    // Inert relay lanes (see the parent side): crossings refuse on process
-    // links, so nothing ever flows here until the wire slice.
-    let (chan_tx, _chan_inert_rx) = async_channel::unbounded::<ChanFrame>();
-    let (_chan_inert_tx, chan_rx) = async_channel::unbounded::<ChanFrame>();
+    // Channel-relay pumps, the parent side's mirror.
+    let (chan_tx, chan_out_rx) = async_channel::unbounded::<ChanFrame>();
+    let (chan_in_tx, chan_rx) = async_channel::unbounded::<ChanFrame>();
+    {
+        let mut wsock = match chan_sock.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("qn worker-serve: chan socket clone: {e}");
+                return 1;
+            }
+        };
+        std::thread::spawn(move || {
+            while let Ok(f) = chan_out_rx.recv_blocking() {
+                if write_msg_frame(&mut wsock, &chan_frame_to_msg(f)).is_err() {
+                    break;
+                }
+            }
+            let _ = wsock.shutdown(std::net::Shutdown::Write);
+        });
+    }
+    {
+        let mut rsock = chan_sock;
+        std::thread::spawn(move || {
+            while let Ok(msg) = read_msg_frame(&mut rsock) {
+                if let Some(f) = msg_to_chan_frame(msg)
+                    && chan_in_tx.send_blocking(f).is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
     let link = WorkerLink {
         inbox_rx,
         outbox_tx,

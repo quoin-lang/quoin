@@ -436,17 +436,28 @@ form is ready for 7b). Owner-side rooting reuses `vm.hosted` (third symmetric
 role), refcounted per endpoint with reap-flushed `Release`. A shipped channel
 checks value portability AT THE SENDER (immediate, catchable); pre-ship buffered
 residue that cannot cross fails only the remote op (`RecvError`) and stays
-locally receivable. v1 refusals, all with clear errors: re-shipping a relay
-endpoint (route through the owner), channels on process links (7b), channels on
-nested calls (no sidecar on the host-op lane), and `closed?`/`count`/`capacity`
-on endpoints (the state lives with the owner). Wake-log record/replay verified
-under relay traffic (agent parks are Io deliveries; relay wakes ride the Pick
-stream). HONEST LIMITATION, documented: a wait cycle THROUGH CHANNELS across
-isolates hangs undetected (each VM's driver sees a live relay future; channel
-waits are not claims) — park labels ("relay channel send/receive") make the
-shape visible in `VM.ps`; real cross-VM wait-graph stitching is arc-4 adjacency.
-Still open for 7b/7c: process links (`ChanFrame` wire encoding + relay socket),
-block-capture shipping (`PortableCapture::Channel`), a `VM.channels` live view.
+locally receivable. Refusals, all with clear errors: re-shipping a relay endpoint
+(route through the owner) and `closed?`/`count`/`capacity` on endpoints (the
+state lives with the owner). Wake-log record/replay verified under relay
+traffic (agent parks are Io deliveries; relay wakes ride the Pick stream).
+HONEST LIMITATION, documented: a wait cycle THROUGH CHANNELS across isolates
+hangs undetected (each VM's driver sees a live relay future; channel waits are
+not claims) — park labels ("relay channel send/receive") make the shape visible
+in `VM.ps`; real cross-VM wait-graph stitching is arc-4 adjacency.
+
+**7b AS BUILT (2026-07-14): process links.** `ChanFrame` gained ONE wire form —
+`Msg::Chan { kind, chan, corr, value, message }` (tag 22, worker-only) — and each
+process worker one more socket, pumped by dumb frame relays both sides: the
+relay protocol is event-shaped, so unlike the conversation pumps there is no
+state to track, just bytes both ways. Channel ARGUMENTS stopped being a
+thread-lane sidecar and became `Arg::Chan(id)` (kind 4, worker-only) riding IN
+the `Call` frame — one mechanism for every carrier, which also made channels
+work on NESTED calls (the 7a sidecar couldn't ride the host-op lane; the
+refusal is gone). Channel endpoints over the mailbox lane cross as
+`Call{op:"sendChan", recv: id}`. The process-refusal and the `ChanLink.process`
+flag are deleted — channels now cross every worker link, verified by process
+twins of the pool and service-seam tests. Still open for 7c: block-capture
+shipping (`PortableCapture::Channel`), a `VM.channels` live view.
 
 ## 7. Boundary profiling (diagnosing chattiness)
 
@@ -588,9 +599,10 @@ injection wrapper, which feeds recorded results instead of re-performing.
    worker-side rebuild. COMPLETED by slice 4.5 (same day): the handle fallback
    landed, so blocks never refuse — see §3a's as-built note for the full rule.
 7. **Cross-isolate channels** (thread peers first — pure lane relay; process peers via
-   the socket). 7a DONE (2026-07-14): the whole semantic surface on thread links —
-   see §6's as-built note. 7b = process links (wire encoding for `ChanFrame`),
-   7c = block-capture shipping.
+   the socket). 7a DONE (2026-07-14): the whole semantic surface on thread links.
+   7b DONE (same day): process links — `Msg::Chan`/`Arg::Chan` wire forms + a relay
+   socket per process worker; see §6's as-built notes. Remaining: 7c =
+   block-capture shipping.
 8. `WorkerService` reimplemented as sugar over `Worker.host:` (or deprecated into it).
 
 Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, since

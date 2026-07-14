@@ -155,7 +155,6 @@ fn wrap_handle<'gc>(
         vm,
         ch.chan_tx.clone(),
         ch.chan_rx.clone(),
-        backing == "process",
     );
     Ok(vm.new_native_state(
         mc,
@@ -191,7 +190,6 @@ fn dispatch_hosted<'gc>(
     recv: u64,
     method_args: &[quoin_ext_proto::Arg],
     blocks: &[(usize, PortableBlock)],
-    chans: &[(usize, u64)],
 ) -> quoin_ext_proto::Msg {
     use quoin_ext_proto::{Arg, Msg};
     let err = |message: String| Msg::CallReturnError {
@@ -205,16 +203,6 @@ fn dispatch_hosted<'gc>(
     for (i, a) in method_args.iter().enumerate() {
         if let Some((_, pb)) = blocks.iter().find(|(pos, _)| *pos == i) {
             match rebuild_portable_value(vm, mc, pb) {
-                Ok(v) => argv.push(v),
-                Err(e) => return err(format!("hosted call '{op}': argument {}: {e}", i + 1)),
-            }
-            continue;
-        }
-        // A shipped channel argument (§6): wrap the owner's id as a live
-        // relay endpoint on this worker's parent link.
-        if let Some((_, chan)) = chans.iter().find(|(pos, _)| *pos == i) {
-            let link = vm.parent_chan_link.unwrap_or(0);
-            match crate::runtime::channel_relay::relay_endpoint(vm, mc, link, *chan) {
                 Ok(v) => argv.push(v),
                 Err(e) => return err(format!("hosted call '{op}': argument {}: {e}", i + 1)),
             }
@@ -235,6 +223,17 @@ fn dispatch_hosted<'gc>(
                     ));
                 }
             },
+            // A shipped channel (§6): wrap the owner's id as a live relay
+            // endpoint on this worker's parent link.
+            Arg::Chan(chan) => {
+                let link = vm.parent_chan_link.unwrap_or(0);
+                match crate::runtime::channel_relay::relay_endpoint(vm, mc, link, *chan) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return err(format!("hosted call '{op}': argument {}: {e}", i + 1));
+                    }
+                }
+            }
             // A parent-held block (the §3a handle fallback): wrap it so
             // invocations round-trip on the conversation.
             Arg::Handle(h) => match host_block_value(vm, mc, *h) {
@@ -466,7 +465,7 @@ fn invoke_parent_block_inner<'gc>(
                 for rid in &releases {
                     vm.hosted_release(*rid);
                 }
-                let reply = dispatch_hosted(vm, mc, &nested_op, recv, &method_args, &[], &[]);
+                let reply = dispatch_hosted(vm, mc, &nested_op, recv, &method_args, &[]);
                 if conv.reply_tx.try_send(reply).is_err() {
                     return Err(QuoinError::Other(format!(
                         "host block '{op}': the caller abandoned the conversation"
@@ -569,7 +568,6 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     }
                 };
                 let blocks = req.blocks;
-                let chans = req.chans;
                 let quoin_ext_proto::Msg::Call {
                     op,
                     recv,
@@ -610,7 +608,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     },
                 );
                 let started = std::time::Instant::now();
-                let reply = dispatch_hosted(vm, mc, &op, recv, &method_args, &blocks, &chans);
+                let reply = dispatch_hosted(vm, mc, &op, recv, &method_args, &blocks);
                 req.handler_micros.store(
                     started.elapsed().as_micros() as u64,
                     std::sync::atomic::Ordering::Relaxed,

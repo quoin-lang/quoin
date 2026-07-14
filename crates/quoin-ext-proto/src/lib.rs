@@ -110,6 +110,10 @@ pub enum Arg {
     Resource(u64),
     Handle(u64),
     Array(ArrowArray),
+    /// A shipped channel endpoint (Quoin worker peers only,
+    /// docs/internal/ACTOR_OBJECTS.md §6): the owner-side channel id. Foreign
+    /// extensions never receive this kind.
+    Chan(u64),
 }
 
 /// A single control-plane frame, in either direction. Encode with [`encode`]; decode a
@@ -157,6 +161,18 @@ pub enum Msg {
     /// hosted table. The receiver wraps it as a relay endpoint. Foreign extensions
     /// never produce or receive this frame.
     CallReturnChannel { chan: u64 },
+    /// worker <-> host, both directions (Quoin peers only, docs/internal/ACTOR_OBJECTS.md
+    /// §6): one channel-relay event on the link's relay socket. `kind` discriminates the
+    /// event (the VM's `ChanFrame` vocabulary: send/ack/recv/value/closed/recv-error/
+    /// close/cancel/release/return); unused fields are zero/empty. Foreign extensions
+    /// never produce or receive this frame.
+    Chan {
+        kind: u8,
+        chan: u64,
+        corr: u64,
+        value: Option<DataValue>,
+        message: String,
+    },
     /// ext -> host: the call returns a bulk `Array` (the data plane).
     CallReturnArray { array: ArrowArray },
     /// ext -> host: the call returns a structured value (materialized as a nested Quoin Value).

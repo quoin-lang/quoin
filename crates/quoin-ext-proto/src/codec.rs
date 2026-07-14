@@ -42,6 +42,7 @@ const T_READ_HANDLE: u64 = 18;
 const T_READ_HANDLE_RETURN: u64 = 19;
 const T_HOST_OP_RETURN: u64 = 20;
 const T_CALL_RETURN_CHANNEL: u64 = 21;
+const T_CHAN: u64 = 22;
 
 // ---------------------------------------------------------------------------------------------
 // Encode
@@ -133,6 +134,24 @@ pub fn encode_with_meta(msg: &Msg, meta: Option<&ReplyMeta>) -> Vec<u8> {
             write_array_header(&mut out, 2 + meta_n);
             write_uint(&mut out, T_CALL_RETURN_CHANNEL);
             write_uint(&mut out, *chan);
+        }
+        Msg::Chan {
+            kind,
+            chan,
+            corr,
+            value,
+            message,
+        } => {
+            write_array_header(&mut out, 6);
+            write_uint(&mut out, T_CHAN);
+            write_uint(&mut out, *kind as u64);
+            write_uint(&mut out, *chan);
+            write_uint(&mut out, *corr);
+            match value {
+                Some(dv) if !matches!(dv, DataValue::Null) => write_dv(&mut out, dv),
+                _ => out.push(0xc0),
+            }
+            write_str(&mut out, message);
         }
         Msg::CallReturnArray { array } => {
             write_array_header(&mut out, 2 + meta_n);
@@ -484,6 +503,10 @@ fn write_arg(out: &mut Vec<u8>, a: &Arg) {
             write_uint(out, 3);
             write_arrow(out, a);
         }
+        Arg::Chan(c) => {
+            write_uint(out, 4);
+            write_uint(out, *c);
+        }
     }
 }
 
@@ -593,6 +616,18 @@ pub fn decode_frame_with_meta(bytes: &[u8]) -> Result<(Msg, ReplyMeta), String> 
                 chan: read_uint(rd)?,
             };
             meta.handler_micros = read_appended_u64(rd, &mut extra)?;
+            skip_extra(rd, extra)?;
+            msg
+        }
+        T_CHAN => {
+            let extra = need(fields, 5, "Chan")?;
+            let msg = Msg::Chan {
+                kind: read_uint(rd)? as u8,
+                chan: read_uint(rd)?,
+                corr: read_uint(rd)?,
+                value: read_opt_dv(rd)?,
+                message: read_str(rd)?,
+            };
             skip_extra(rd, extra)?;
             msg
         }
@@ -996,6 +1031,7 @@ fn read_arg(rd: &mut &[u8]) -> Result<Arg, String> {
         1 => Arg::Resource(read_uint(rd)?),
         2 => Arg::Handle(read_uint(rd)?),
         3 => Arg::Array(read_arrow(rd)?),
+        4 => Arg::Chan(read_uint(rd)?),
         other => return Err(format!("extension protocol: unknown Arg kind {other}")),
     };
     skip_extra(rd, extra)?;

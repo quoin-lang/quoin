@@ -141,6 +141,65 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
     assert_channel_script_passes("service", script, &[("pump.qn", PUMP_UNIT)]);
 }
 
+/// The service seams again, over PROCESS backing: channel args, returns, and
+/// block answers all relay across the sockets (the `Arg::Chan` /
+/// `CallReturnChannel` / `Msg::Chan` wire forms end to end).
+#[test]
+fn channel_service_seams_process() {
+    const PUMP_UNIT: &str = r#"
+Pump <- { |@out|
+    init -> { @out = nil };
+    fill:upTo: -> { |ch n|
+        var i = 1;
+        { i < (n + 1) }.whileDo:{ ch.send:(i * 10); i = i + 1 };
+        ch.close;
+        'filled'
+    };
+    stream: -> { |n|
+        var ch = Channel.buffered:2;
+        @out = ch;
+        Task.spawn:{
+            var i = 1;
+            { i < (n + 1) }.whileDo:{ ch.send:i; i = i + 1 };
+            ch.close
+        };
+        ch
+    };
+    drainVia: -> { |blk|
+        var ch = blk.value:0;
+        var got = 0;
+        ch.each:{ |v| got = got + v };
+        got
+    }
+};
+"#;
+    let script = r#"
+var ok = true;
+var p = WorkerService.host:'@pump.qn@' class:'Pump' backing:'process';
+
+var sink = Channel.buffered:2;
+var t = Task.spawn:{ p.fill:sink upTo:4 };
+var got = 0;
+sink.each:{ |v| got = got + v };
+(got == 100).else:{ ok = false; ('FAIL fill: ' + got.s).print };
+(t.join == 'filled').else:{ ok = false; 'FAIL: fill return'.print };
+
+var stream = p.stream:5;
+var streamed = 0;
+stream.each:{ |v| streamed = streamed + v };
+(streamed == 15).else:{ ok = false; ('FAIL stream: ' + streamed.s).print };
+
+var feed = Channel.buffered:8;
+(1..4).each:{ |i| feed.send:i };
+feed.close;
+((p.drainVia:{ |n| feed }) == 6).else:{ ok = false; 'FAIL: drainVia'.print };
+
+p.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_channel_script_passes("service_proc", script, &[("pump.qn", PUMP_UNIT)]);
+}
+
 /// Backpressure and rendezvous across the boundary: a cap-0 send parks until
 /// the remote receiver takes it, and close/error semantics survive relaying.
 #[test]
@@ -207,7 +266,7 @@ ch.each:{ |v| v };
 
 /// Cancellation without value loss: a timed-out remote receive retracts its
 /// pending op; a value sent afterwards is still there for the next receive.
-/// Re-shipping refusal and process-link refusal give clear errors.
+/// Re-shipping still refuses with a clear error.
 #[test]
 fn channel_cancellation_and_v1_refusals() {
     const WAITER: &str = r#"
@@ -234,21 +293,31 @@ ch.send:7;
 ((back.receive) == 'refused').else:{ ok = false; 'FAIL: re-ship allowed'.print };
 w.join;
 
-"* channels refuse process links until the wire slice
-var pw = Worker.spawn:'@noop.qn@' backing:'process';
-var proc = { pw.send:(Channel.new); 'sent' }.catch:{ |e| e.s };
-(proc.contains?:'process boundary').else:{ ok = false; ('FAIL proc: ' + proc).print };
-pw.send:0;
+"* channels cross PROCESS links too: the worker doubles values from one
+"* parent channel into another, over the relay socket
+var pin = Channel.buffered:2;
+var pout = Channel.buffered:2;
+var pw = Worker.spawn:'@doubler.qn@' backing:'process';
+pw.send:pin;
+pw.send:pout;
+(1..4).each:{ |i| pin.send:i };
+pin.close;
+var psum = 0;
+pout.each:{ |v| psum = psum + v };
+(psum == 12).else:{ ok = false; ('FAIL psum: ' + psum.s).print };
 pw.join;
 
 ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
     const NOOP: &str = r#"
-Worker.receive;
+var pin = Worker.receive;
+var pout = Worker.receive;
+pin.each:{ |v| pout.send:(v * 2) };
+pout.close;
 "#;
     assert_channel_script_passes(
         "cancel",
         script,
-        &[("waiter.qn", WAITER), ("noop.qn", NOOP)],
+        &[("waiter.qn", WAITER), ("doubler.qn", NOOP)],
     );
 }

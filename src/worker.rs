@@ -89,10 +89,6 @@ pub struct DispatchReq {
     /// richer-than-wire-taxonomy allowance as `WorkerMsg::Block`; unportable
     /// blocks and process peers take the handle path instead.
     pub blocks: Vec<(usize, PortableBlock)>,
-    /// Shipped channel arguments (§6): `(argument position, owner-side channel
-    /// id)` pairs, Null placeholders in `method_args` — like `blocks`, an
-    /// out-of-band sidecar (the wire form is the process slice).
-    pub chans: Vec<(usize, u64)>,
     pub reply: async_channel::Sender<quoin_ext_proto::Msg>,
     /// Parent→worker frames for this conversation (host-op replies and
     /// nested calls). A closed lane means the caller abandoned the
@@ -158,6 +154,83 @@ pub enum ChanFrame {
     Return { chan: u64, value: WireData },
 }
 
+// `ChanFrame`'s wire discriminants (`Msg::Chan.kind`, docs/internal/ACTOR_OBJECTS.md
+// §6): stable, append-only — the relay socket's whole vocabulary.
+const CK_SEND: u8 = 0;
+const CK_ACK: u8 = 1;
+const CK_RECV: u8 = 2;
+const CK_VALUE: u8 = 3;
+const CK_CLOSED_FOR: u8 = 4;
+const CK_RECV_ERROR: u8 = 5;
+const CK_CLOSE: u8 = 6;
+const CK_CANCEL: u8 = 7;
+const CK_RELEASE: u8 = 8;
+const CK_RETURN: u8 = 9;
+
+/// Encode one relay event as its wire frame (`Msg::Chan`) — the process
+/// links' transport; thread links move `ChanFrame` values directly.
+pub(crate) fn chan_frame_to_msg(f: ChanFrame) -> quoin_ext_proto::Msg {
+    use quoin_ext_proto::Msg;
+    let (kind, chan, corr, value, message) = match f {
+        ChanFrame::Send { chan, corr, value } => (CK_SEND, chan, corr, Some(value), String::new()),
+        ChanFrame::Ack { corr } => (CK_ACK, 0, corr, None, String::new()),
+        ChanFrame::Recv { chan, corr } => (CK_RECV, chan, corr, None, String::new()),
+        ChanFrame::Value { corr, value } => (CK_VALUE, 0, corr, Some(value), String::new()),
+        ChanFrame::ClosedFor { corr } => (CK_CLOSED_FOR, 0, corr, None, String::new()),
+        ChanFrame::RecvError { corr, message } => (CK_RECV_ERROR, 0, corr, None, message),
+        ChanFrame::Close { chan } => (CK_CLOSE, chan, 0, None, String::new()),
+        ChanFrame::Cancel { chan, corr } => (CK_CANCEL, chan, corr, None, String::new()),
+        ChanFrame::Release { chan } => (CK_RELEASE, chan, 0, None, String::new()),
+        ChanFrame::Return { chan, value } => (CK_RETURN, chan, 0, Some(value), String::new()),
+    };
+    Msg::Chan {
+        kind,
+        chan,
+        corr,
+        value,
+        message,
+    }
+}
+
+/// Decode a wire frame back into a relay event; `None` for a frame that is
+/// not a `Msg::Chan` or carries an unknown kind (skipped, append-only rule).
+pub(crate) fn msg_to_chan_frame(m: quoin_ext_proto::Msg) -> Option<ChanFrame> {
+    let quoin_ext_proto::Msg::Chan {
+        kind,
+        chan,
+        corr,
+        value,
+        message,
+    } = m
+    else {
+        return None;
+    };
+    let value_or_null = || value.clone().unwrap_or(WireData::Null);
+    Some(match kind {
+        CK_SEND => ChanFrame::Send {
+            chan,
+            corr,
+            value: value_or_null(),
+        },
+        CK_ACK => ChanFrame::Ack { corr },
+        CK_RECV => ChanFrame::Recv { chan, corr },
+        CK_VALUE => ChanFrame::Value {
+            corr,
+            value: value_or_null(),
+        },
+        CK_CLOSED_FOR => ChanFrame::ClosedFor { corr },
+        CK_RECV_ERROR => ChanFrame::RecvError { corr, message },
+        CK_CLOSE => ChanFrame::Close { chan },
+        CK_CANCEL => ChanFrame::Cancel { chan, corr },
+        CK_RELEASE => ChanFrame::Release { chan },
+        CK_RETURN => ChanFrame::Return {
+            chan,
+            value: value_or_null(),
+        },
+        _ => return None,
+    })
+}
+
 /// One worker link's channel-relay state, registered in `vm.io.chan_links`
 /// (each side of a link has one): the outbound lane, the inbound lane (drained
 /// by this side's relay-agent task), the pending ops this side has in flight,
@@ -166,9 +239,6 @@ pub enum ChanFrame {
 pub struct ChanLink {
     pub out: async_channel::Sender<ChanFrame>,
     pub inbound: async_channel::Receiver<ChanFrame>,
-    /// True for a process-backed link: channel crossings refuse until the
-    /// wire encoding lands (§6's process slice).
-    pub process: bool,
     /// The relay agent (`Channel.relayAgent:`) has been spawned for this link.
     pub agent_running: bool,
     /// Correlation-id source for this side's pending ops.
@@ -191,6 +261,9 @@ pub struct PendingChanOp {
 /// The worker link's reserved ops on the `Call` frame (`class_name` routes a
 /// hosted-object dispatch; these built-ins keep it empty).
 pub(crate) const OP_SEND: &str = "send";
+/// A channel endpoint crossing the mailbox lane (`Worker.send:` of a Channel
+/// over a process link): `recv` carries the owner-side channel id (§6).
+pub(crate) const OP_SEND_CHAN: &str = "sendChan";
 pub(crate) const OP_PS_TREE: &str = "psTree";
 /// Ends the hosted serve loop (`WorkerService`'s `serviceStop`). Shadows a
 /// hosted method of the same name by design — the proxy owns the selector.

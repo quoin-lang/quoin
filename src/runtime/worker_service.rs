@@ -257,7 +257,6 @@ fn service_call<'gc>(
     // every block.
     let mut method_args = Vec::with_capacity(args.len());
     let mut blocks: Vec<(usize, PortableBlock)> = Vec::new();
-    let mut chans: Vec<(usize, u64)> = Vec::new();
     for (i, a) in args.iter().enumerate() {
         let same_worker_id = a
             .with_native_state::<NativeServiceState, _, _>(|s| {
@@ -270,7 +269,9 @@ fn service_call<'gc>(
             continue;
         }
         // A CHANNEL argument ships as a live relay endpoint (§6) — its sends
-        // and receives in the worker relay back to this side.
+        // and receives in the worker relay back to this side. `Arg::Chan`
+        // rides IN the frame (worker-only kind), so it crosses every carrier:
+        // thread lanes, the process socket, and nested calls alike.
         if crate::runtime::channel_relay::is_channel_value(*a) {
             let chan = crate::runtime::channel_relay::ship_for_crossing(vm, mc, *a, ctx.chan_link)
                 .map_err(|e| {
@@ -280,8 +281,7 @@ fn service_call<'gc>(
                         i + 1
                     ))
                 })?;
-            chans.push((i, chan));
-            method_args.push(Arg::Data(WireData::Null));
+            method_args.push(Arg::Chan(chan));
             continue;
         }
         if let Some((template, parent_env)) = block_parts(*a) {
@@ -326,13 +326,6 @@ fn service_call<'gc>(
     let frame = hosted_call(&ctx, selector.as_str().to_string(), method_args, releases);
 
     if nested {
-        if !chans.is_empty() {
-            return Err(QuoinError::Other(format!(
-                "service call '{}': channels cannot cross on a nested call yet — \
-                 pass them in a top-level call",
-                selector.as_str()
-            )));
-        }
         return nested_call(vm, mc, receiver, &ctx, selector, frame);
     }
 
@@ -349,7 +342,6 @@ fn service_call<'gc>(
         .try_send(DispatchReq {
             frame,
             blocks,
-            chans,
             reply: reply_tx,
             hostops: hostop_rx,
             handler_micros: handler.clone(),
@@ -825,7 +817,6 @@ fn host<'gc>(
         vm,
         ch.chan_tx.clone(),
         ch.chan_rx.clone(),
-        backing == "process",
     );
     Ok(vm.new_native_state(
         mc,
@@ -1012,7 +1003,6 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
                     .try_send(DispatchReq {
                         frame,
                         blocks: Vec::new(),
-                        chans: Vec::new(),
                         reply: reply_tx,
                         hostops: hostop_rx,
                         handler_micros: StdArc::new(AtomicU64::new(0)),

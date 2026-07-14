@@ -71,12 +71,10 @@ pub(crate) fn register_chan_link(
     vm: &mut VmState<'_>,
     out: async_channel::Sender<ChanFrame>,
     inbound: async_channel::Receiver<ChanFrame>,
-    process: bool,
 ) -> usize {
     vm.io.chan_links.push(crate::worker::ChanLink {
         out,
         inbound,
-        process,
         agent_running: false,
         next_corr: 1,
         pending: std::collections::HashMap::new(),
@@ -85,9 +83,8 @@ pub(crate) fn register_chan_link(
     vm.io.chan_links.len() - 1
 }
 
-/// Ship a LOCAL channel argument/return across `link`, refusing what §6's v1
-/// refuses: process links (no wire encoding yet) and re-shipping a relay
-/// endpoint (route through the owner).
+/// Ship a LOCAL channel argument/return across `link`, refusing what §6
+/// refuses: re-shipping a relay endpoint (route through the owner).
 pub(crate) fn ship_for_crossing<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -99,11 +96,6 @@ pub(crate) fn ship_for_crossing<'gc>(
             "a remote channel endpoint cannot be shipped onward — pass the channel \
              from its owning isolate instead"
                 .to_string(),
-        ));
-    }
-    if vm.io.chan_links.get(link).is_some_and(|l| l.process) {
-        return Err(QuoinError::Other(
-            "channels cannot cross a process boundary yet — use thread backing".to_string(),
         ));
     }
     ship_channel(vm, mc, channel, link)

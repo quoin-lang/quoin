@@ -792,8 +792,8 @@ pub fn build_channel_class() -> NativeClassBuilder {
              unbuffered rendezvous -- a send parks until a receiver takes the value; \
              `Channel.buffered:n` queues up to n values before sends park. `close` ends the \
              conversation: further sends raise, receives drain the buffer then answer nil, \
-             and `each:` ends. Channels also CROSS ISOLATE BOUNDARIES: sent to a \
-             thread-backed worker (or passed to / returned from a hosted service), the far \
+             and `each:` ends. Channels also CROSS ISOLATE BOUNDARIES: sent to a worker \
+             of either backing (or passed to / returned from a hosted service), the far \
              side gets a live endpoint whose operations relay here with the same semantics \
              -- values deep-copy and must be portable, backpressure crosses, close \
              propagates both ways.\n\n\

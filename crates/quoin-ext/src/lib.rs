@@ -1289,6 +1289,10 @@ fn resolve_args<'t>(
             }
             quoin_ext_proto::Arg::Handle(h) => Arg::Handle(*h),
             quoin_ext_proto::Arg::Array(a) => Arg::Array(a.clone()),
+            // Quoin worker peers only (a shipped channel endpoint) — a host
+            // never sends this kind to a foreign extension; surface it as an
+            // opaque handle rather than crash if one ever appears.
+            quoin_ext_proto::Arg::Chan(c) => Arg::Handle(*c),
         })
         .collect()
 }
