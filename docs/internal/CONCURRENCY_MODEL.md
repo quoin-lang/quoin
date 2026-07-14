@@ -58,7 +58,10 @@ language, whatever the version number says.
    tens of microseconds (UDS); other machines, if that day comes, milliseconds. The
    *semantics* are uniform across the gradient; the *cost* is controlled by placement.
    We never hide the gradient — pretending remote is local is the CORBA sin. If an
-   object is too chatty for its tier, move the object or batch the API.
+   object is too chatty for its tier, move the object or batch the API. And the
+   gradient must be *measurable*, not just visible: boundary profiling
+   (`ACTOR_OBJECTS.md` §7) decomposes every crossing so chattiness is a diagnosis,
+   not a guess.
 
 6. **Failure is contained and explains itself.** A dying isolate yields catchable errors
    at its boundary, never takes the VM down, and callers queued behind it fail fast.

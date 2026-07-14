@@ -66,7 +66,9 @@ counter.value                    "* -> 1
   whose unknown selectors forward as `Call`s — the MNU seam `WorkerService` already uses.
 - Sends park; concurrency is blocks and channels (stance guarantee 3). The mailbox is
   the fair-queued claim machinery from PR #11, replacing the one-token channel — waiters
-  park FIFO with epoch identity, nested re-entry composes, depth-capped.
+  park FIFO with epoch identity, nested re-entry composes, depth-capped. The claim is
+  keyed **per hosted object**, not per connection (§5) — sends to different objects in
+  one isolate may overlap.
 - **Multiple objects per isolate**: hosting returns instances backed by an object table
   in the worker (the SDK `ObjectTable` pattern), so a hosted object's methods can return
   further live instances (`makes`/resources-in-data semantics carry over verbatim), all
@@ -90,7 +92,7 @@ blob carries the worker's real rendered trace initially (day one, free via PR #1
 field), with a structured-trace upgrade (frames as data, uniformly steppable) as a
 later, purely additive field.
 
-**c. Cross-isolate channels.** See §5.
+**c. Cross-isolate channels.** See §6.
 
 **d. Re-entrancy both ways.** The worker peer services nested `Call`s while awaiting
 host-ops (as SDK peers now do), and — unlike foreign peers — hosted Quoin code calling
@@ -112,12 +114,51 @@ What convergence must build, in rough order of weight:
    `worker-serve` decodes with `decode_frame`. The control lane's request-id machinery
    (`worker_spawn.rs:351-405`) collapses into the protocol's conversation shape.
 4. **Claim machinery generalized** — `NativeExtension`'s owner/depth/waiters become a
-   shared "peer connection" state used by extension and worker proxies alike.
+   shared "peer connection" state used by extension and worker proxies alike, and the
+   claim key moves from the connection to the hosted object (§5).
 5. **Plain workers unchanged** — `Worker.spawn:`/`start:`/`send:`/`receive`/`join` keep
    their surface; only the wire beneath process backing converges. `terminate` stays
    process-only; thread isolates still cannot be killed (documented).
 
-## 5. Cross-isolate channels (CSP across the boundary)
+## 5. Per-object mailboxes, connection lanes (multi-in-flight sends)
+
+*Added 2026-07-13 after review: the database-connection example demands it. Queries are
+slow; funneling every send to a peer through one serialized conversation makes a hosted
+`Db` pool useless.*
+
+PR #11's fair-queued claim serializes at the wrong granularity: it is **per
+connection**, which conflates every object in a peer into one actor. The actor
+guarantee is only *one message at a time per object* — cross-object parallelism inside
+one peer is semantically fine and, for slow-op peers, essential.
+
+- **The claim moves to the hosted object** (keyed by resource id; class-side calls have
+  no object and claim nothing but a lane). Same machinery — FIFO waiters with epoch
+  identity, depth-capped nesting — different key. Sends to one object serialize (the
+  mailbox); sends to different objects may overlap.
+- **Overlap rides N connections ("lanes") to the same peer**, each speaking today's
+  protocol *unchanged* — LIFO nesting, host-ops, fairness are all per-lane properties.
+  Explicitly **not** frame multiplexing with correlation ids: that rewrites protocol
+  v2's conversation shape, and buys nothing — the peer still needs threads to overlap
+  blocking handlers, so the concurrency has to exist peer-side either way.
+- **The manifest declares the lane count** (`lanes`, append-only field; absent = 1 =
+  today's behavior, back-compat by construction). A GIL-bound compute peer stays at 1;
+  a database extension declares 8 and its SDK serves each lane on its own thread. The
+  shared object table needs only structural locking — instance exclusivity is already
+  guaranteed host-side by the per-object claim, plus the re-entrancy work's
+  take-instance-out-of-the-table discipline.
+- **Quoin peers get the better version free**: N lanes = N concurrent conversations =
+  N fibers in the worker VM, interleaved cooperatively — a hosted object parked on I/O
+  doesn't block its isolate-mates, with no threads at all.
+- The database story then reads correctly: host a `DbPool`; its `connection`s are
+  distinct hosted objects; queries on different connections run in parallel, queries on
+  one connection serialize.
+
+**Care point (scary, settle before that slice lands — see §10):** lock ordering
+between object claims and lane claims under nested re-entrancy. A nested call must
+ride its conversation's existing lane; the acquisition discipline for (object claim,
+lane claim) must be provably deadlock-free against lane waiters, and tested as such.
+
+## 6. Cross-isolate channels (CSP across the boundary)
 
 A channel endpoint becomes portable to a Quoin peer. Design, per the seam analysis:
 
@@ -143,7 +184,34 @@ A channel endpoint becomes portable to a Quoin peer. Design, per the seam analys
 - **Scope**: Quoin peers only. Foreign extensions keep request/response — a Rust/Python
   process cannot host Quoin channel semantics, and shouldn't pretend to.
 
-## 6. Replay hooks (ride along with this arc — decided 2026-07-13)
+## 7. Boundary profiling (diagnosing chattiness)
+
+*Added 2026-07-13 after review: the cost gradient (stance guarantee 5) is only usable
+if developers can **measure** it — placement decisions need data, not vibes.*
+
+Every crossing already funnels through one choke point (the proxy send), so the data
+is nearly free to collect:
+
+- **Host-side counters, always on**: per `(peer, class, selector)` — call count, bytes
+  out/in, total wall µs, and **claim-wait µs separately** (mailbox contention is its
+  own diagnosis, distinct from transport or remote work). Two `Instant` reads against
+  a ≥10µs round-trip floor is noise.
+- **Remote decomposition**: peers report `handler_micros` in reply frames (append-only
+  protocol field, all three SDKs). A round trip then splits into claim-wait +
+  transport/encode + remote handler — precisely the chatty-vs-slow distinction:
+  - `vec.at: — 40,000 calls, 480ms total, 91% transport` → *batch the API / move the
+    object*;
+  - `conn.query: — 14 calls, 210ms total, 93% remote handler` → *the work is slow;
+    placement is fine.*
+- **Surface**: `VM.boundaryStats` (structured rows, precedent `VM.stats`/
+  `aotRefusals`) plus a rendered report sorted by total time with a chattiness
+  callout. Per-object breakdown (hot-object hunts) behind a flag.
+- **The gleam, named not promised**: the replay event log (§8) is the natural
+  substrate for real distributed traces — chrome-trace/samply-style spans across VMs,
+  with Quoin peers eventually contributing full span trees. Arc-4 adjacency; the
+  counters come now.
+
+## 8. Replay hooks (ride along with this arc — decided 2026-07-13)
 
 The archaeology reduced deterministic replay to a startlingly small surface. Everything
 in the scheduler is already deterministic given two streams — all queues are FIFO
@@ -166,32 +234,40 @@ points. Known out-of-log inputs to document, not chase: wall-clock reads
 (`Timestamp.now` etc.), `[OS]Env`, the `ps`-collection deadline — replay either stubs
 them from the log later (full replayer, arc 4) or names them as divergence points.
 
-## 7. Slicing (proposed)
+## 9. Slicing (proposed)
 
 1. **Replay hooks + divergence test** (small, first — everything after must stay logged).
-2. **Peer-protocol convergence for process workers**: `worker-serve` speaks `Msg`
+2. **Boundary profiling** (§7): host-side counters + `VM.boundaryStats` +
+   `handler_micros` — early because it is valuable against extensions *today*.
+3. **Peer-protocol convergence for process workers**: `worker-serve` speaks `Msg`
    (manifest, Call, host-ops, nesting); the pump/envelope retire; plain
    `send:`/`receive` ride `Call`-shaped frames.
-3. **Hosted objects** (`Worker.host:`): object table + MNU proxy on the converged
+4. **Hosted objects** (`Worker.host:`): object table + MNU proxy on the converged
    protocol, thread + process backings; claim machinery shared with extensions;
    lifetime via proxy-drop release.
-4. **Portable-block arguments** for Quoin peers (thread first; process blocked on
+5. **Per-object mailboxes + lanes** (§5) — after hosted objects, when the claim
+   machinery is already generalized; the lock-ordering discipline gets settled and
+   tested here.
+6. **Portable-block arguments** for Quoin peers (thread first; process blocked on
    source-shipping and falls back to handles).
-5. **Cross-isolate channels** (thread peers first — pure lane relay; process peers via
+7. **Cross-isolate channels** (thread peers first — pure lane relay; process peers via
    the socket).
-6. `WorkerService` reimplemented as sugar over `Worker.host:` (or deprecated into it).
+8. `WorkerService` reimplemented as sugar over `Worker.host:` (or deprecated into it).
 
-Each slice lands green on its own; supervision (arc 3) starts once 3 is stable, since
+Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, since
 "restart the isolate and re-host" is where proxy lifetime and supervision meet.
 
-## 8. Open questions (to settle during, not before)
+## 10. Open questions (to settle during, not before)
 
 - Does `Worker.host:` take a portable block (evaluated remotely) or a class + init args
   (`WorkerService.host:class:` shape)? Block form is more general; class form survives
   process peers without source-shipping. Likely: both, block form thread-only at first.
 - Proxy identity: `==` on two proxies to the same hosted object; `ps`/introspection
   rendering of hosted objects.
+- **The lock-ordering discipline** for (object claim, lane claim) under nested
+  re-entrancy (§5's care point) — flagged as the scariest part of the design; must be
+  written down and deadlock-tested before slice 5, not discovered during it.
 - Should plain `Worker.send:`/`receive` mailboxes be re-expressed as a cross-isolate
-  channel pair once §5 lands (one concept fewer)?
+  channel pair once §6 lands (one concept fewer)?
 - Structured (non-blob) Quoin-to-Quoin stack frames — format, and whether the debugger
   can step across the boundary.
