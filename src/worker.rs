@@ -155,20 +155,32 @@ pub enum ChanFrame {
 }
 
 // `ChanFrame`'s wire discriminants (`Msg::Chan.kind`, docs/internal/ACTOR_OBJECTS.md
-// §6): stable, append-only — the relay socket's whole vocabulary.
+// §6): stable, append-only — the relay socket's whole vocabulary. Native-only,
+// like the socket pumps that speak them (thread links move `ChanFrame` values).
+#[cfg(not(target_arch = "wasm32"))]
 const CK_SEND: u8 = 0;
+#[cfg(not(target_arch = "wasm32"))]
 const CK_ACK: u8 = 1;
+#[cfg(not(target_arch = "wasm32"))]
 const CK_RECV: u8 = 2;
+#[cfg(not(target_arch = "wasm32"))]
 const CK_VALUE: u8 = 3;
+#[cfg(not(target_arch = "wasm32"))]
 const CK_CLOSED_FOR: u8 = 4;
+#[cfg(not(target_arch = "wasm32"))]
 const CK_RECV_ERROR: u8 = 5;
+#[cfg(not(target_arch = "wasm32"))]
 const CK_CLOSE: u8 = 6;
+#[cfg(not(target_arch = "wasm32"))]
 const CK_CANCEL: u8 = 7;
+#[cfg(not(target_arch = "wasm32"))]
 const CK_RELEASE: u8 = 8;
+#[cfg(not(target_arch = "wasm32"))]
 const CK_RETURN: u8 = 9;
 
 /// Encode one relay event as its wire frame (`Msg::Chan`) — the process
 /// links' transport; thread links move `ChanFrame` values directly.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn chan_frame_to_msg(f: ChanFrame) -> quoin_ext_proto::Msg {
     use quoin_ext_proto::Msg;
     let (kind, chan, corr, value, message) = match f {
@@ -194,6 +206,7 @@ pub(crate) fn chan_frame_to_msg(f: ChanFrame) -> quoin_ext_proto::Msg {
 
 /// Decode a wire frame back into a relay event; `None` for a frame that is
 /// not a `Msg::Chan` or carries an unknown kind (skipped, append-only rule).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn msg_to_chan_frame(m: quoin_ext_proto::Msg) -> Option<ChanFrame> {
     let quoin_ext_proto::Msg::Chan {
         kind,
@@ -260,10 +273,13 @@ pub struct PendingChanOp {
 
 /// The worker link's reserved ops on the `Call` frame (`class_name` routes a
 /// hosted-object dispatch; these built-ins keep it empty).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const OP_SEND: &str = "send";
 /// A channel endpoint crossing the mailbox lane (`Worker.send:` of a Channel
 /// over a process link): `recv` carries the owner-side channel id (§6).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const OP_SEND_CHAN: &str = "sendChan";
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const OP_PS_TREE: &str = "psTree";
 /// Ends the hosted serve loop (`WorkerService`'s `serviceStop`). Shadows a
 /// hosted method of the same name by design — the proxy owns the selector.
@@ -661,8 +677,8 @@ pub type ChildGrip = std::sync::Arc<std::sync::Mutex<Option<std::process::Child>
 
 // The spawn/boot machinery (worker threads boot a full runner; process backing rides a
 // Unix socket) is native-only, split into a `#[path]` child file. On wasm32 the four
-// spawn entry points still exist so the `Worker` class compiles, but every spawn is
-// stillborn: the done lane is primed with an error before the channels are returned,
+// spawn entry points still exist so the `Worker` class compiles, but every spawn is a
+// dead letter: the done lane is primed with an error before the channels are returned,
 // so `join`/`receive` surface a catchable "not supported" instead of hanging.
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "worker_spawn.rs"]
@@ -673,7 +689,7 @@ pub use worker_spawn::{
 };
 
 #[cfg(target_arch = "wasm32")]
-fn stillborn_channels() -> WorkerChannels {
+fn dead_letter_channels() -> WorkerChannels {
     let (inbox_tx, _inbox_rx) = async_channel::unbounded();
     let (_outbox_tx, outbox_rx) = async_channel::unbounded();
     let (done_tx, done_rx) = async_channel::bounded(1);
@@ -697,23 +713,24 @@ fn stillborn_channels() -> WorkerChannels {
 
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_worker(_path: String) -> WorkerChannels {
-    stillborn_channels()
+    dead_letter_channels()
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_worker_block(_job: PortableBlock) -> WorkerChannels {
-    stillborn_channels()
+    dead_letter_channels()
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn spawn_worker_service(_path: String, _class_name: String) -> WorkerChannels {
-    stillborn_channels()
+pub fn spawn_worker_service(_path: String, _class_name: String, _lanes: u32) -> WorkerChannels {
+    dead_letter_channels()
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_worker_process(
     _unit: String,
     _service: Option<String>,
+    _lanes: u32,
 ) -> Result<(WorkerChannels, u32, ChildGrip), String> {
     Err("workers are not supported on this platform".to_string())
 }

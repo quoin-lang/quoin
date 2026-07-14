@@ -926,14 +926,7 @@ pub fn build_channel_class() -> NativeClassBuilder {
     .typed_instance_method("each:", &["Block"], |vm, mc, receiver, args| {
         let block = arg!(args, Block, 0);
         if crate::runtime::channel_relay::relay_parts(receiver).is_some() {
-            loop {
-                match crate::runtime::channel_relay::relay_recv(vm, mc, receiver)? {
-                    Some(value) => {
-                        vm.execute_block(mc, block, vec![value], None)?;
-                    }
-                    None => return Ok(vm.new_nil(mc)),
-                }
-            }
+            return crate::runtime::channel_relay::relay_each(vm, mc, receiver, block);
         }
         vm.channel_each(mc, receiver, block)
     })

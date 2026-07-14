@@ -196,6 +196,15 @@ fn dispatch_hosted<'gc>(
         message,
         remote_stack: String::new(),
     };
+    // The relay-agent boot runs Quoin (a task spawn) and can YIELD — do it
+    // before any unrooted GC value lives on this frame (`target`, `argv`);
+    // the in-loop endpoint construction below is the non-yielding half.
+    if method_args.iter().any(|a| matches!(a, Arg::Chan(_))) {
+        let link = vm.parent_chan_link.unwrap_or(0);
+        if let Err(e) = crate::runtime::channel_relay::ensure_relay_agent(vm, mc, link) {
+            return err(format!("hosted call '{op}': {e}"));
+        }
+    }
     let Some(target) = vm.hosted_get(recv) else {
         return err(format!("hosted call '{op}': no live hosted object {recv}"));
     };
@@ -224,10 +233,11 @@ fn dispatch_hosted<'gc>(
                 }
             },
             // A shipped channel (§6): wrap the owner's id as a live relay
-            // endpoint on this worker's parent link.
+            // endpoint on this worker's parent link (agent already ensured
+            // above — this half cannot yield).
             Arg::Chan(chan) => {
                 let link = vm.parent_chan_link.unwrap_or(0);
-                match crate::runtime::channel_relay::relay_endpoint(vm, mc, link, *chan) {
+                match crate::runtime::channel_relay::relay_endpoint_raw(vm, mc, link, *chan) {
                     Ok(v) => v,
                     Err(e) => {
                         return err(format!("hosted call '{op}': argument {}: {e}", i + 1));

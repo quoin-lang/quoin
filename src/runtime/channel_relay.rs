@@ -179,6 +179,19 @@ pub(crate) fn relay_endpoint<'gc>(
     chan: u64,
 ) -> Result<Value<'gc>, QuoinError> {
     ensure_relay_agent(vm, mc, link)?;
+    relay_endpoint_raw(vm, mc, link, chan)
+}
+
+/// The allocation half of [`relay_endpoint`], for callers that already ran
+/// `ensure_relay_agent` and must not yield again while unrooted GC values sit
+/// on their frame (the agent boot runs Quoin — a task spawn — and can yield;
+/// this half cannot).
+pub(crate) fn relay_endpoint_raw<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    link: usize,
+    chan: u64,
+) -> Result<Value<'gc>, QuoinError> {
     let reap = vm
         .io
         .chan_links
@@ -322,6 +335,27 @@ pub(crate) fn relay_recv<'gc>(
         _ => Err(QuoinError::Other(
             "relay channel receive resumed without a result".to_string(),
         )),
+    }
+}
+
+/// `each:` on a relay endpoint: the consumer loop, over relay receives (ends
+/// when the owner reports closed-and-drained). `block` and `receiver` are the
+/// native call's arguments — rooted in `active_native_args` for its whole
+/// duration, so holding them across the relay parks is safe (the same rooting
+/// `channel_each` relies on).
+pub(crate) fn relay_each<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    block: gc_arena::Gc<'gc, crate::value::Block<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    loop {
+        match relay_recv(vm, mc, receiver)? {
+            Some(value) => {
+                vm.execute_block(mc, block, vec![value], None)?;
+            }
+            None => return Ok(vm.new_nil(mc)),
+        }
     }
 }
 
