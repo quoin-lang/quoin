@@ -718,9 +718,30 @@ fn host<'gc>(
             None,
         ),
     };
+    // Disambiguate the display label when several services host the same
+    // unit: the first keeps the bare label, later ones gain an ordinal —
+    // otherwise their VM.claims / boundary / ps rows are indistinguishable.
+    let label = {
+        let base = format!("svc:{path}");
+        let dupes = vm
+            .io
+            .claim_peers
+            .borrow()
+            .iter()
+            .filter(|p| {
+                let l = &p.borrow().label;
+                *l == base || l.starts_with(&format!("{base}#"))
+            })
+            .count();
+        if dupes == 0 {
+            base
+        } else {
+            format!("{base}#{}", dupes + 1)
+        }
+    };
     vm.worker_registry.push(crate::worker::WorkerReg {
         unit: format!("svc:{path}"),
-        label: format!("svc:{path}"),
+        label: label.clone(),
         backing,
         pid,
         inbox_tx: ch.inbox_tx.clone(),
@@ -748,10 +769,10 @@ fn host<'gc>(
     // Claims: the §5.1 machinery, one per worker, registered for VM.claims
     // and the cross-peer cycle walk; boundary rows registered beside the
     // extensions' (§7 — one diagnosis surface).
-    let claims = Rc::new(RefCell::new(PeerClaims::new(format!("svc:{path}"), lanes)));
+    let claims = Rc::new(RefCell::new(PeerClaims::new(label.clone(), lanes)));
     vm.io.claim_peers.borrow_mut().push(claims.clone());
     let boundary = Rc::new(RefCell::new(BoundaryStats {
-        peer: format!("svc:{path}"),
+        peer: label,
         rows: HashMap::new(),
     }));
     vm.io.ext_stats.borrow_mut().push(boundary.clone());

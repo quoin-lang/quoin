@@ -1,0 +1,81 @@
+"* ===========================================================================
+"* A tour of VM.claims / VM.claimsReport (docs/internal/ACTOR_OBJECTS.md 5.1).
+"*
+"* Run from the repo root:
+"*
+"*     qn qnlib/stress/claims_tour/main.qn
+"*
+"* Builds a complicated live claim tree across two hosted services and prints
+"* the report mid-flight — a hot object with a FIFO of waiters, a wait CHAIN
+"* three tasks deep crossing both services, a re-entrant hold (depth 2), full
+"* lane occupancy, and an object reserved for a lane-starved caller. Then it
+"* triggers a genuine deadlock (two callbacks that synchronously call each
+"* other's objects), prints the catchable error naming the cycle, and prints
+"* the post-mortem report: lanes home, queues empty, DEADLOCKS DETECTED: 1.
+"* ===========================================================================
+
+var unit = 'qnlib/stress/claims_tour/node.qn'
+
+"* crew: 4 lanes, objects a-d (plus x/y later for the deadlock)
+var crew = WorkerService.host:unit class:'Node' lanes:4
+var a = crew.mate
+var b = crew.mate
+var c = crew.mate
+var d = crew.mate
+
+"* depot: ONE lane, two objects — p will pin the lane, q will starve for it
+var depot = WorkerService.host:unit class:'Node'
+var p = depot.mate
+var q = depot.mate
+
+"* --- build the tree --------------------------------------------------------
+"* t3 is the chain's root: holds c and just works (sleeps) — waits on nothing
+var t3 = Task.spawn:{ c.slow:900 }
+"* t8 re-enters its own object: holds d, callback sends to d again (depth 2)
+var t8 = Task.spawn:{ d.hold:10 then:{ d.slow:900 } }
+Async.sleep:30
+"* t2 holds b, then its callback wants c (held by t3)            t2 -> t3
+var t2 = Task.spawn:{ b.hold:60 then:{ c.slow:1 } }
+"* t1 holds a, then its callback wants b (held by t2)            t1 -> t2
+var t1 = Task.spawn:{ a.hold:120 then:{ b.double:1 } }
+"* t6 holds depot's p, then its callback wants CREW's a — a cross-service
+"* edge (held by t1)                                             t6 -> t1
+var t6 = Task.spawn:{ p.hold:120 then:{ a.double:9 } }
+Async.sleep:30
+"* t7 wants depot's q: the object is FREE but t6 pinned the only lane — q is
+"* reserved for t7 while it waits for a lane (no barging past it)
+var t7 = Task.spawn:{ q.double:1 }
+Async.sleep:100
+"* t4 and t5 pile onto the hot object a (held by t1): the mailbox queue
+var t4 = Task.spawn:{ a.double:1 }
+var t5 = Task.spawn:{ a.double:1 }
+Async.sleep:150
+
+'================ live shapes, mid-flight ================'.print
+VM.claimsReport.print
+
+t1.join
+t2.join
+t3.join
+t4.join
+t5.join
+t6.join
+t7.join
+t8.join
+
+"* --- now a genuine deadlock: two callbacks that call each other ------------
+var x = crew.mate
+var y = crew.mate
+var tx = Task.spawn:{ { (x.hold:80 then:{ y.double:1 }).s }.catch:{ |e| e.s } }
+var ty = Task.spawn:{ { (y.hold:80 then:{ x.double:1 }).s }.catch:{ |e| e.s } }
+var ox = tx.join
+var oy = ty.join
+'================ the caught deadlock error =============='.print
+(ox.contains?:'deadlock').if:{ ox.print } else:{ oy.print }
+
+'================ after the dust settles ================='.print
+VM.claimsReport.print
+
+crew.serviceStop
+depot.serviceStop
+'done'.print

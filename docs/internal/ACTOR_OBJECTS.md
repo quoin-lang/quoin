@@ -359,7 +359,10 @@ the live waits-for edges, counters incl. deadlocks-detected) and
 End-to-end tests ride the 4.5 callbacks: lanes overlap, exact per-object totals on
 4 lanes, no head-of-line blocking, nested-rides-bound-lane at N=1, and the
 mutual-call cycle raising catchably at the closing task while the other call
-completes and the service survives.
+completes and the service survives. A hand-runnable tour of the observability —
+a live wait chain across two services, a re-entrant hold, a lane-starved
+reservation, then a real deadlock and its post-mortem —
+is `qn qnlib/stress/claims_tour/main.qn` (from the repo root).
 
 ## 6. Cross-isolate channels (CSP across the boundary)
 

@@ -861,15 +861,32 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                 let p = peer.borrow();
                 let (total, free) = p.lanes();
                 let s = &p.stats;
+                let rows = p.object_rows();
+                // Live waiters: the granted-wait counters only accumulate at
+                // handoff, so tasks queued RIGHT NOW are summed separately —
+                // otherwise "0µs waited" beside a full queue reads as a lie.
+                let (live_count, live_micros) = rows.iter().fold((0usize, 0u64), |acc, r| {
+                    (
+                        acc.0 + r.waiters.len(),
+                        acc.1 + r.waiters.iter().map(|(_, _, us)| us).sum::<u64>(),
+                    )
+                });
+                let waiting_now = if live_count > 0 {
+                    format!(
+                        "{live_count} waiting now — {} so far",
+                        fmt_micros(live_micros)
+                    )
+                } else {
+                    "0 waiting now".to_string()
+                };
                 out.push_str(&format!(
-                    "[{}] lanes {}/{} free  {} acquisitions ({} contended, {} waiting now)  \
-                     wait {} total / {} max  queue high-water {}  depth max {}{}\n",
+                    "[{}] lanes {}/{} free  {} acquisitions ({} contended, {waiting_now})  \
+                     granted waits {} total / {} max  queue high-water {}  depth max {}{}\n",
                     p.label,
                     free,
                     total,
                     s.acquisitions,
                     s.contended,
-                    p.edges().len(),
                     fmt_micros(s.total_wait_micros),
                     fmt_micros(s.max_wait_micros),
                     s.queue_high_water,
@@ -880,7 +897,7 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                         String::new()
                     },
                 ));
-                for row in p.object_rows() {
+                for row in rows {
                     let held = match row.owner {
                         Some(t) => format!("held by task {t} (depth {})", row.depth),
                         None if row.reserved => "reserved for its next caller".to_string(),
