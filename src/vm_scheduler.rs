@@ -199,6 +199,10 @@ pub enum Wake<'gc> {
     /// empty, closed channel (returns nil / ends `each:`); a sender raises "send on a
     /// closed channel".
     ChannelClosed,
+    /// A task queued for an extension connection was HANDED the in-flight claim by the
+    /// finishing call (`extension.rs` fair queuing): on resume it proceeds directly into
+    /// its call — ownership already transferred, no re-race with running tasks.
+    ExtClaim,
 }
 
 /// Classification of a finished detached task's outcome, used by `complete_detached`

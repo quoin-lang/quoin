@@ -51,6 +51,7 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::rc::Rc;
@@ -65,6 +66,7 @@ use quoin_ext_proto::{
 
 use crate::arg;
 use crate::error::QuoinError;
+use crate::fiber::YieldReason;
 use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::array::{self, ArrayDType};
 use crate::runtime::big_decimal::NativeBigDecimal;
@@ -75,6 +77,7 @@ use crate::runtime::runtime::eval_string;
 use crate::symbol::Symbol;
 use crate::value::{AnyCollect, Class, NamespacedName, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
+use crate::vm_scheduler::{TaskId, Wake};
 
 /// Resolve a name in the host's global table to its `Value` (a class is a class-valued global).
 /// The name is parsed as a `NamespacedName`, so a namespaced class such as `[ADBC]Database` resolves
@@ -280,13 +283,18 @@ pub struct NativeExtension {
     handle_reap: Rc<RefCell<Vec<u64>>>,
     /// Set once the child has been observed exited, so further calls fail fast (crash isolation).
     dead: bool,
-    /// True while a top-level call is in flight on this connection (from the moment it opens
+    /// The task whose top-level call owns this connection (from the moment the call opens
     /// until its reply — including the whole re-entrant host-reach conversation, which parks
     /// on the socket). The transport is a single request/response stream with no request ids,
-    /// so a *second* top-level call started while one is live — another task under
-    /// `Async.gather:`, or the extension re-entering the same extension through a host block —
-    /// would interleave frames and desync the connection. Guarded in `ext_prelude`.
-    in_flight: bool,
+    /// so a second top-level call while one is live would interleave frames and desync the
+    /// connection. A DIFFERENT task's call parks in `call_waiters` and is handed the claim
+    /// FIFO by `ext_end_call`; the SAME task re-entering (through a host block) still errors
+    /// — it can never be woken by a call it is itself blocking. Guarded in `ext_prelude`.
+    owner: Option<TaskId>,
+    /// Tasks parked waiting for the connection claim, FIFO, each stamped with its
+    /// `park_epoch` so a cancelled waiter's ghost entry is skipped on pop — the exact
+    /// channel park model (`channel.rs`).
+    call_waiters: VecDeque<(TaskId, u64)>,
     /// Ext-side resource ids whose host `ExtResource` was dropped, awaiting flush to the
     /// extension as `Call.releases`. Cloned into each `ExtResource` this extension hands out so
     /// its `Drop` can enqueue here (a GC `Drop` can't send a frame; mirrors the fd-reap pattern).
@@ -970,47 +978,131 @@ struct ExtCall {
     releases: Vec<u64>,
 }
 
+/// One attempt to claim the connection for the current task.
+enum Claim {
+    /// Claimed — the `ExtCall` context, releases drained.
+    Granted(ExtCall),
+    /// The CURRENT task already owns the connection: same-task re-entry (the extension
+    /// re-entering itself through a host block), which can never be queued — the waiter
+    /// would be waiting on the very call it is blocking.
+    ReEntry,
+    /// Another task's call is in flight; the current task was appended to `call_waiters`.
+    Queued,
+}
+
+/// Build the per-call context under an already-held claim (releases drained here, once).
+fn ext_call_ctx(e: &mut NativeExtension) -> ExtCall {
+    ExtCall {
+        id: e.id,
+        ext_id: e.ext_id,
+        dead: e.dead,
+        resource_reap: e.resource_reap.clone(),
+        releases: e.resource_reap.borrow_mut().drain(..).collect(),
+    }
+}
+
 /// Peek at the extension's native state and drain its pending dropped-resource releases (one peek
 /// per call), shared by the generic `call:with:` path and extension-backed-class dispatch. Also
-/// claims the connection for this top-level call (`in_flight`): a call attempted while one is
-/// already live returns a catchable "busy" error rather than interleaving frames on the shared
-/// socket. The caller must release the claim (`ext_end_call`) once the call completes.
+/// claims the connection for this top-level call: the transport is a single request/response
+/// stream, so one call runs at a time — a concurrent call from ANOTHER task parks FIFO and is
+/// handed the claim when the in-flight call finishes (`ext_end_call`), so `Async.gather:` over
+/// one connection just works; same-task re-entry stays a catchable error. The caller must
+/// release the claim (`ext_end_call`) once the call completes.
 fn ext_prelude<'gc>(
+    vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
 ) -> Result<ExtCall, QuoinError> {
-    let call = receiver
-        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
-            if e.in_flight {
-                return None;
+    let me = vm.sched.current_task;
+    let epoch = vm.current_park_epoch();
+    let claim = receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| match e.owner {
+            Some(owner) if owner == me => Claim::ReEntry,
+            Some(_) => {
+                e.call_waiters.push_back((me, epoch));
+                Claim::Queued
             }
-            e.in_flight = true;
-            Some(ExtCall {
-                id: e.id,
-                ext_id: e.ext_id,
-                dead: e.dead,
-                resource_reap: e.resource_reap.clone(),
-                releases: e.resource_reap.borrow_mut().drain(..).collect(),
-            })
+            None => {
+                e.owner = Some(me);
+                Claim::Granted(ext_call_ctx(e))
+            }
         })
         .map_err(QuoinError::Other)?;
-    call.ok_or_else(|| {
-        QuoinError::Other(
-            "extension is busy with another call: an extension connection serves one call at a \
-             time (no concurrent calls from separate tasks, and no re-entering the same \
-             extension from within its own call)"
+    match claim {
+        Claim::Granted(call) => Ok(call),
+        Claim::ReEntry => Err(QuoinError::Other(
+            "extension call re-entered from within its own call: an extension connection \
+             serves one call at a time, and a call made while servicing this extension's \
+             host-op (e.g. inside a block it is invoking) would wait on itself"
                 .to_string(),
-        )
-    })
+        )),
+        Claim::Queued => {
+            // Park until the in-flight call HANDS us the claim (fair FIFO, no re-race
+            // with running tasks) — the channel park model verbatim.
+            if let Some(t) = vm.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
+                t.parked_on_channel = true;
+            }
+            vm.set_park_info("extension call".to_string(), Some(receiver));
+            if let Some(yielder) = unsafe { vm.get_yielder() } {
+                yielder.suspend(YieldReason::ChannelPark);
+            } else {
+                return Err(QuoinError::Other(
+                    "extension call queued outside the VM scheduler".to_string(),
+                ));
+            }
+            // On resume: if the claim was already handed to us and a cancel raced in,
+            // pass it onward (mirrors channel_redeliver) — never strand the queue.
+            let handed = matches!(vm.sched.wake.take(), Some(Wake::ExtClaim));
+            if vm.sched.cancel_current {
+                if handed {
+                    ext_end_call(vm, mc, receiver);
+                }
+                return Err(vm.take_cancellation());
+            }
+            if !handed {
+                return Err(QuoinError::Other(
+                    "extension claim park resumed without the claim".to_string(),
+                ));
+            }
+            // Ownership was transferred by `ext_end_call`; build the context under it.
+            receiver
+                .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+                    debug_assert_eq!(e.owner, Some(me));
+                    ext_call_ctx(e)
+                })
+                .map_err(QuoinError::Other)
+        }
+    }
 }
 
-/// Release the `in_flight` claim taken by [`ext_prelude`] once a top-level call has finished
-/// (whether it succeeded, errored, or the extension died). Never clears when the extension is
-/// gone from the table (nothing to clear).
-fn ext_end_call<'gc>(mc: &gc_arena::Mutation<'gc>, receiver: Value<'gc>) {
-    let _ = receiver.with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
-        e.in_flight = false;
-    });
+/// Release the claim taken by [`ext_prelude`] once a top-level call has finished (whether it
+/// succeeded, errored, or the extension died): hand it to the front LIVE waiter — stale
+/// (cancelled) entries are skipped by park-epoch identity, exactly as in `channel.rs` — or
+/// clear it when no one waits. Never touches state when the extension is gone from the table.
+fn ext_end_call<'gc>(vm: &mut VmState<'gc>, mc: &gc_arena::Mutation<'gc>, receiver: Value<'gc>) {
+    loop {
+        let next = receiver
+            .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+                match e.call_waiters.pop_front() {
+                    Some(waiter) => {
+                        // Tentatively assign; confirmed below iff the waiter is live.
+                        e.owner = Some(waiter.0);
+                        Some(waiter)
+                    }
+                    None => {
+                        e.owner = None;
+                        None
+                    }
+                }
+            })
+            .unwrap_or(None);
+        let Some((id, epoch)) = next else { return };
+        if vm.channel_waiter_live(id, epoch) {
+            vm.wake_channel_task(id, Wake::ExtClaim);
+            return;
+        }
+        // Ghost (cancelled while queued): skip it and try the next waiter.
+    }
 }
 
 /// The shared body of the `call:` selectors: fail fast if the extension is already known dead,
@@ -1026,9 +1118,9 @@ fn run_extension_method<'gc>(
     args: Vec<Value<'gc>>,
     data_arg: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
-    let ctx = ext_prelude(mc, receiver)?;
+    let ctx = ext_prelude(vm, mc, receiver)?;
     if ctx.dead {
-        ext_end_call(mc, receiver);
+        ext_end_call(vm, mc, receiver);
         return Err(extension_dead_error("already exited"));
     }
     // Serialize the optional structured-value payload before opening the call (this extension's
@@ -1038,7 +1130,7 @@ fn run_extension_method<'gc>(
         Some(value) => match value_to_wire(value, Some(&ctx.resource_reap)) {
             Ok(d) => Some(d),
             Err(e) => {
-                ext_end_call(mc, receiver);
+                ext_end_call(vm, mc, receiver);
                 return Err(e);
             }
         },
@@ -1058,7 +1150,7 @@ fn run_extension_method<'gc>(
         0,
         ctx.releases,
     );
-    ext_end_call(mc, receiver);
+    ext_end_call(vm, mc, receiver);
     finish_outcome(vm, mc, receiver, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
@@ -1103,9 +1195,9 @@ pub fn dispatch_ext_method<'gc>(
     // both `[Ns]Name` (loadPackage) and a verbatim bare name (spawn:).
     let class_name = class_obj.borrow().name.name.clone();
 
-    let ctx = ext_prelude(mc, ext)?;
+    let ctx = ext_prelude(vm, mc, ext)?;
     if ctx.dead {
-        ext_end_call(mc, ext);
+        ext_end_call(vm, mc, ext);
         return Err(extension_dead_error("already exited"));
     }
     // The method arguments are routed by `extension_call` (ext-class mode) into the ordered
@@ -1124,7 +1216,7 @@ pub fn dispatch_ext_method<'gc>(
         recv,
         ctx.releases,
     );
-    ext_end_call(mc, ext);
+    ext_end_call(vm, mc, ext);
     finish_outcome(vm, mc, ext, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
@@ -1307,7 +1399,8 @@ fn spawn_and_connect<'gc>(
             reap: vm.io.socket_reap.clone(),
             handle_reap: vm.io.ext_handle_reap.clone(),
             dead: false,
-            in_flight: false,
+            owner: None,
+            call_waiters: VecDeque::new(),
             resource_reap: Rc::new(RefCell::new(Vec::new())),
             namespace,
         },

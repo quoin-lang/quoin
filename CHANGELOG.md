@@ -6,6 +6,18 @@ All notable changes to Quoin are recorded here. The format follows
 Quoin is pre-1.0. Minor versions may make breaking language changes; each one is called out
 under **Changed**, with the migration.
 
+## [Unreleased]
+
+### Changed
+
+- Extensions (experimental): concurrent calls to one extension connection now **queue
+  fairly** instead of raising a "busy" error — a waiting caller parks and is handed the
+  connection FIFO when the in-flight call finishes, so `Async.gather:` over one long-lived
+  connection (e.g. an `[ADBC]Connection`) just works. A cancelled waiter leaves the queue
+  cleanly, and callers queued behind a dying extension fail fast with the usual catchable
+  error. Same-task re-entry (calling the extension from inside a block it is invoking)
+  still raises — it would wait on the very call it is blocking.
+
 ## [0.1.1] — 2026-07-13
 
 The package release: installing, using, and writing Quoin packages — extension processes,
