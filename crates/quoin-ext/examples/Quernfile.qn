@@ -12,13 +12,15 @@
 "* The result is a self-contained `use`-able package:
 "*
 "*     dist/greeter/
-"*       extension.toml      "* command = bin/greeter, namespace = Greet
+"*       quoin.toml          "* command = bin/greeter, namespace = Greet
 "*       bin/greeter         "* the release binary
 "*
-"* Install by dropping the folder onto `$QUOIN_PATH` (or into a project's
-"* `quoin_packages/`); then `use greeter:*` spawns it and installs [Greet]Greeter:
+"* Install it with `qn pkg install dist/greeter` (lands in $QUOIN_HOME/packages, a
+"* built-in search root) — or point QUOIN_PATH at dist/ ad hoc. Either way,
+"* `use greeter:*` spawns it and installs [Greet]Greeter:
 "*
-"*     QUOIN_PATH=dist qn -e "use greeter:*; ([Greet]Greeter.named:'World').greet.print"
+"*     qn pkg install dist/greeter
+"*     qn -e "use greeter:*; ([Greet]Greeter.named:'World').greet.print"
 
 var binary = '../../../target/release/examples/greeter'
 
@@ -41,7 +43,7 @@ Quern.tasks:{
     (((.task:'package' needs:'build' does:{
         [IO]Folder.create:'dist/greeter/bin';
         .run:#( 'cp' binary 'dist/greeter/bin/greeter' );
-        [IO]File.write:manifest to:'dist/greeter/extension.toml';
+        [IO]File.write:manifest to:'dist/greeter/quoin.toml';
         .log:'packaged -> dist/greeter'
     }).info:'assemble the installable package folder').sources:#( binary ))
         .produces:#( 'dist/greeter' );

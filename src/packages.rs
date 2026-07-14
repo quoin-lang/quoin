@@ -123,6 +123,17 @@ pub struct FsResolver {
     self_root: PathBuf,
 }
 
+/// The per-user Quoin home: `$QUOIN_HOME`, defaulting to `$HOME/.quoin`. Holds the installed
+/// packages (`packages/` — the last `use` search root) and their linked executables (`bin/` —
+/// the directory users put on `PATH` once). `qn pkg install` writes here; `None` only when
+/// neither variable is set (then there simply is no user root).
+pub fn quoin_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("QUOIN_HOME") {
+        return Some(PathBuf::from(home));
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".quoin"))
+}
+
 impl FsResolver {
     /// `self_root` is the directory `use self:…` resolves against (the entry script's
     /// directory; the process CWD for the script-less modes — `repl`, `-e`, `test`).
@@ -133,9 +144,10 @@ impl FsResolver {
         }
     }
 
-    /// Roots searched for a named package `<name>/`: `./quoin_packages/` first, then each entry of
-    /// `$QUOIN_PATH` (platform path-separated). `docs/internal/EXT_PACKAGING.md` §6 — drop a folder on a
-    /// search path; no install/registry yet.
+    /// Roots searched for a named package `<name>/`: `./quoin_packages/` first, then each entry
+    /// of `$QUOIN_PATH` (platform path-separated), then the per-user install root
+    /// `$QUOIN_HOME/packages` (`qn pkg install`'s target) — project beats explicit path beats
+    /// installed. `docs/internal/EXT_PACKAGING.md` §6.
     ///
     /// Deliberately CWD-relative rather than `self_root`-relative: extension packaging is deferred
     /// past v0.1 (`docs/internal/RELEASE_PREP.md`), and following the script's directory would silently
@@ -145,17 +157,20 @@ impl FsResolver {
         if let Some(path) = std::env::var_os("QUOIN_PATH") {
             roots.extend(std::env::split_paths(&path));
         }
+        if let Some(home) = quoin_home() {
+            roots.push(home.join("packages"));
+        }
         roots
     }
 
     /// If `package` names an **extension package** on the search path — a `<name>/` directory
-    /// holding an `extension.toml` — return its absolute directory; else `None`. The first matching
+    /// holding an `quoin.toml` — return its absolute directory; else `None`. The first matching
     /// root wins. (`EXT_PACKAGING.md` §5: the resolver bakes the absolute dir into the synthesized
     /// `loadPackage:` glue, so there is no "where am I on disk?" problem.)
     fn ext_package_dir(&self, package: &str) -> Option<PathBuf> {
         for root in self.package_roots() {
             let dir = root.join(package);
-            if dir.join("extension.toml").is_file() {
+            if dir.join("quoin.toml").is_file() {
                 return std::fs::canonicalize(&dir).ok();
             }
         }

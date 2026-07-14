@@ -461,6 +461,11 @@ enum Cmd {
         #[arg(value_name = "ARGS", trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Install and list Quoin packages ($QUOIN_HOME, default ~/.quoin)
+    Pkg {
+        #[command(subcommand)]
+        cmd: crate::runner_pkg::PkgCmd,
+    },
     /// The child side of a process-backed worker (internal)
     #[command(name = "worker-serve", hide = true)]
     WorkerServe {
@@ -649,6 +654,10 @@ impl VmRunnerOptions {
                 VmRunnerMode::Test
             }
             Some(Cmd::Repl) => VmRunnerMode::Repl,
+            // Pure filesystem work — no VM. Runs and exits here.
+            Some(Cmd::Pkg { cmd }) => {
+                std::process::exit(crate::runner_pkg::run(cmd));
+            }
             Some(Cmd::Check { paths, json }) => {
                 vm_args = paths;
                 check_json = json;

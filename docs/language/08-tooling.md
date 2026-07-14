@@ -2,12 +2,13 @@
 
 Everything ships in one binary: `qn` runs programs, and its subcommands are the
 REPL, the test runner, the static checker, the formatter, the documentation
-generator, the debugger, and a syntax highlighter. This part is a tour of each,
-with real sessions. Shell transcripts are shown as plain fences (they are
+generator, the debugger, and a syntax highlighter — plus `qn pkg`, the package
+installer, which has its own chapter (Part X, [§50](10-packages.md)). This part
+is a tour of each of the rest, with real sessions. Shell transcripts are shown as plain fences (they are
 terminal text, not Quoin); runnable Quoin examples are tagged and verified like
 everywhere else in this book.
 
-Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · **Tooling** · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
+Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · **Tooling** · [Library & reference](09-library-and-reference.md) · [Packages](10-packages.md) · [Appendices](11-appendices.md)
 
 ---
 

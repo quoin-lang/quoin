@@ -1,11 +1,20 @@
 # Extension packaging — delivering an out-of-process extension as a `use`-able folder
 
-*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED**. An extension is a folder with an
-`extension.toml`; `use <name>:*` finds it under a `quoin_packages/` root and synthesizes
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED**. An extension is a folder with a
+`quoin.toml`; `use <name>:*` finds it under a `quoin_packages/` root and synthesizes
 `Extension loadPackage: '<dir>'` glue (`src/packages.rs`, `read_package_manifest` in
 `src/runtime/extension.rs`). Two packages ship: `quoin_packages/adbc` and `quoin_packages/numpy`.
 Tests: `src/packages_tests.rs`, `qnlib/tests/43-adbc.qn`. Package roots are resolved against the
 CWD, not the script — see `FsResolver::package_roots`. The v1 scope below is what got built.*
+
+*Update (2026-07-13, `feat/quoin-packages`): the manifest was **renamed `extension.toml` →
+`quoin.toml`**, and a package is now any folder with one — `[extension]` (loaded by `use`)
+and/or `[bin]` (executables). The first slice of §9's tooling shipped: **`qn pkg install DIR`
+/ `qn pkg list`** (`src/runner_pkg.rs`) copy a package into the per-user home
+(`$QUOIN_HOME`, default `~/.quoin`) — `$QUOIN_HOME/packages` is now the third built-in
+search root — and link `[bin]` entries into `$QUOIN_HOME/bin` for the user's `PATH`. Tests:
+`tests/pkg_install.rs`; user docs: book Part X (`docs/language/10-packages.md`). Still
+deferred: uninstall, registry/fetch/versions, signatures, per-platform binaries.*
 
 Companion to `docs/internal/FUTURE_EXT_ARCH.md` (the extension protocol / runtime) and `docs/internal/USE_ARCH.md`
 (the `use` / package-resolution machinery this hooks into).
@@ -50,12 +59,12 @@ package registry.
 
 ```
 vectors/                 # directory name == the `use` package name (§5)
-  extension.toml         # the manifest
+  quoin.toml         # the manifest
   main.py                # the extension entry (a script or a prebuilt binary)
   README.md              # human docs
 ```
 
-`extension.toml` — declarative TOML, so tooling can read it without spawning:
+`quoin.toml` — declarative TOML, so tooling can read it without spawning:
 
 ```toml
 [package]
@@ -102,7 +111,7 @@ simple `ClassDecl` names and installs `[Ns]Name`.
 The chosen v1 mechanism (over a shipped `init.qn`, see §9):
 
 1. The resolver, extended to handle named packages, finds `vectors/` on the search path (§6) and
-   reads `extension.toml`.
+   reads `quoin.toml`.
 2. It **synthesizes one line of glue as the unit's "source"**:
    `Extension loadPackage: '<absolute-package-dir>';`
    The resolver knows the absolute directory, so it bakes it in — there is no "where am I on disk?"
@@ -117,7 +126,9 @@ metadata. Version/compatibility enforcement is deferred.
 
 ## 6. Discovery — drop a folder on a search path
 
-v1 is **drop-a-folder**, no install step, no registry, no fetch:
+v1 as first shipped was **drop-a-folder** — no install step, no registry, no fetch. (An install
+step exists now: `qn pkg install` copies a folder to `$QUOIN_HOME/packages`, the third search
+root — see the 2026-07-13 status note. Registry/fetch remain deferred.)
 
 - The resolver looks up a named package in **project-local `./quoin_packages/<name>/` first, then each
   dir in `$QUOIN_PATH`** (colon-separated). `FsResolver` (which today knows only `qnlib/` for `std`
@@ -192,27 +203,30 @@ Concrete pieces, smallest-first:
 
 1. **Generalize the spawn primitive** — `Extension spawn:` (one binary path today, `extension.rs`)
    gains a command + args + cwd form; the package path uses it.
-2. **`Extension loadPackage:` (host primitive)** — read `extension.toml` (the TOML stdlib already
+2. **`Extension loadPackage:` (host primitive)** — read `quoin.toml` (the TOML stdlib already
    exists), launch via the spec, install the provided classes under the package namespace (§4), store
    the `Extension` in the registry (§7). Idempotent against the registry.
 3. **Package registry on `VmState`** — `HashMap<String, Extension-value>` (a `require_static` /
    GC-traced field as appropriate), with a `$packages` introspection hook.
 4. **Resolver extension** — teach the named-package path of `FsResolver` (`src/packages.rs`) the
-   search roots (§6), detect an extension package (`extension.toml` present), and return the
+   search roots (§6), detect an extension package (`quoin.toml` present), and return the
    synthesized `loadPackage:` glue as the unit source (§5).
 
 ## 12. Decided vs deferred
 
-**Decided (v1):** synthesized-`loadPackage:` load path; `extension.toml` with a single `command`/`args`
+**Decided (v1):** synthesized-`loadPackage:` load path; `quoin.toml` with a single `command`/`args`
 launch spec; directory name == `use` name; **all classes namespaced under the package namespace, no
 bare-global pollution**, host-applied to simple `ClassDecl` names; drop-a-folder search path
 (`./quoin_packages/` + `$QUOIN_PATH`); eager spawn + a `VmState` package registry; raw `Extension
 spawn:` remains the unmanaged escape hatch.
 
+**Since shipped (2026-07-13):** the first `qn pkg` slice — `install` (per-user home
+`$QUOIN_HOME`, `[bin]` PATH links) + `list`; the manifest generalized to `quoin.toml`.
+
 **Deferred:** distribution/registry/fetch/versions/lockfiles; per-platform binaries; version/compat
 enforcement; auto-respawn + circuit breaker; documentation format (folder-based, §8); signatures;
-`qn pkg` tooling; shipped `init.qn` (+ the "where am I on disk?" complexities); `use` aliasing;
-publishing the SDK crates (§13).
+the remaining `qn pkg` verbs (`new`/`build`/`info`/`uninstall`); shipped `init.qn` (+ the "where am
+I on disk?" complexities); `use` aliasing; publishing the SDK crates (§13).
 
 ## 13. Producing an extension (the author side)
 
@@ -255,7 +269,7 @@ fn main() {
 }
 ```
 
-`cargo build --release` produces a standalone binary; the package's `extension.toml` points `command`
+`cargo build --release` produces a standalone binary; the package's `quoin.toml` points `command`
 at it (§3). The host execs it with the socket path as the final argv and the serve loop answers
 `GetManifest` and dispatches — identical to an in-tree fixture. Other languages produce an equivalent
 binary against their own SDK (`sdk/python/quoin_ext`, …); to the host it is just a `command`.

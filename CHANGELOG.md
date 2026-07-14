@@ -10,6 +10,12 @@ under **Changed**, with the migration.
 
 ### Added
 
+- `qn pkg install DIR` / `qn pkg list`: install a package folder into the per-user home
+  (`$QUOIN_HOME`, default `~/.quoin`). Installed packages resolve via `use name:*` with no
+  `QUOIN_PATH` entry — `$QUOIN_HOME/packages` is a built-in search root after the
+  project-local `./quoin_packages/` and `$QUOIN_PATH` — and each `[bin]` manifest entry
+  links into `$QUOIN_HOME/bin` (put that directory on your `PATH` once). The book gained a
+  packages chapter (Part X).
 - Extensions (experimental): the Rust SDK reaches resources-in-data parity with the Python
   SDK. A handler can return a structured `Value` tree carrying new live instances
   (`Value::instance`, e.g. a List of instances), register class-side selectors that return
@@ -19,6 +25,9 @@ under **Changed**, with the migration.
 
 ### Changed
 
+- The package manifest is `quoin.toml` (was `extension.toml`) — a package is now any folder
+  with a `quoin.toml`: an extension package (`[extension]` launch spec), a program package
+  (`[bin]` executables), or both. Rename the file; the contents are unchanged.
 - A `%'…'` interpolation literal is now lowered to string concatenation at compile time, so
   `%{…}` expressions see the full enclosing scope — including instance variables, which the
   old runtime recompilation silently read as nil (`%'%{@name}'` rendered empty). Methods

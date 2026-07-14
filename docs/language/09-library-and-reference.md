@@ -10,7 +10,7 @@ together, and the idioms that make them work well — concepts, not catalogues.
 > or `$doc [IO]File.create:`. This chapter names the classes; the reference
 > documents them. Method lists are deliberately absent here.
 
-Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · [Tooling](08-tooling.md) · **The standard library** · [Appendices](10-appendices.md)
+Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · [Tooling](08-tooling.md) · **The standard library** · [Packages](10-packages.md) · [Appendices](11-appendices.md)
 
 ---
 
@@ -457,7 +457,7 @@ var root = [/]Object    "* explicit root; same as bare `Object`
 > **Rules**
 > - `use (pkg:)? path;` loads a `.qn` file **once** — a repeat `use` (or a cyclic one) is a no-op. It's a statement that runs when reached and evaluates to `nil`. `use` is a **soft keyword**: special only here, an ordinary identifier everywhere else.
 > - **Path is the load address** (with `.qn` implied, `/`-separated); the **`[Ns]` namespace is the logical name** a file's definitions register under. The two are independent — a file may define classes, extend existing ones, add mixins, anything.
-> - **Package qualifier** (`pkg:`): bare or **`std:`** = the standard library; **`self:`** = the current project; any other name is a (reserved) package, not yet resolvable.
+> - **Package qualifier** (`pkg:`): bare or **`std:`** = the standard library; **`self:`** = the current project; any other name is a **package** — a folder with a `quoin.toml`, found on the package search roots and installed with `qn pkg` (Part X, [§49–50](10-packages.md)).
 > - **`dir/*`** globs a directory, loading every `.qn` in it in **UTF-8-sorted** order.
 > - Loading is filesystem-**agnostic**: resolution goes through a host-supplied resolver (disk on the CLI; host-provided units on WASM / embedded). There is no way to load an arbitrary OS path.
 
@@ -524,5 +524,5 @@ MyFile <- [IO]File;     "* aliasing is just an ordinary definition — not a `us
 
 ---
 
-Next: **[Appendices](10-appendices.md)** — cheat-sheets, the consolidated gotchas
+Next: **[Packages](10-packages.md) · [Appendices](11-appendices.md)** — cheat-sheets, the consolidated gotchas
 list, and a glossary.

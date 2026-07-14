@@ -39,6 +39,8 @@ pub mod repl_complete;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
 pub mod runner_core;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod runner_pkg;
 pub mod runtime;
 pub mod stdlib;
 pub mod symbol;

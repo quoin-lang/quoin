@@ -1315,7 +1315,7 @@ fn spawn_and_connect<'gc>(
     Ok((ext_val, manifest))
 }
 
-/// The launch + identity spec parsed from a package's `extension.toml` (`EXT_PACKAGING.md` §3).
+/// The launch + identity spec parsed from a package's `quoin.toml` (`EXT_PACKAGING.md` §3).
 struct PackageSpec {
     /// `[package].name` — canonical metadata (the directory name is what `use` resolves).
     name: String,
@@ -1328,10 +1328,10 @@ struct PackageSpec {
     namespace: String,
 }
 
-/// Read and parse `<dir>/extension.toml` into a [`PackageSpec`] (v1: `[package].name` + the
+/// Read and parse `<dir>/quoin.toml` into a [`PackageSpec`] (v1: `[package].name` + the
 /// `[extension]` launch spec). The namespace defaults to PascalCase of the directory name (§4).
 fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
-    let manifest_path = dir.join("extension.toml");
+    let manifest_path = dir.join("quoin.toml");
     let text = std::fs::read_to_string(&manifest_path).map_err(|e| {
         QuoinError::Other(format!(
             "Extension loadPackage: cannot read {}: {e}",
@@ -1421,7 +1421,7 @@ fn resolve_command(dir: &Path, command: &str) -> PathBuf {
 }
 
 /// Load an extension *package* (a `use`-able folder; `docs/internal/EXT_PACKAGING.md`): read its
-/// `extension.toml`, spawn the subprocess, install the provided classes **under the package
+/// `quoin.toml`, spawn the subprocess, install the provided classes **under the package
 /// namespace** (so a package can never register a bare global — §4; an already-namespaced
 /// `ClassDecl` name is rejected), run the package's optional `init.qn` Quoin glue now that its
 /// classes exist, and cache the live `Extension` keyed by the canonical folder (idempotent: a
@@ -1509,7 +1509,7 @@ pub fn build_extension_class() -> NativeClassBuilder {
             "A connected out-of-process extension: a subprocess speaking the Quoin \
              extension wire, providing classes and operations to the host program. \
              `Extension.loadPackage:` is the managed entry point (spawn per the package's \
-             extension.toml, install its classes under the package namespace, run its \
+             quoin.toml, install its classes under the package namespace, run its \
              init.qn glue) -- `use name:*` does this for you. The handle's `call:with:` \
              family is the raw op surface that package glue builds on. See \
              docs/internal/EXT_PACKAGING.md.",
@@ -1541,7 +1541,7 @@ pub fn build_extension_class() -> NativeClassBuilder {
              managed path is `loadPackage:`.",
         )
         // `Extension loadPackage: '<dir>'` -> load an extension *package* (a folder with an
-        // `extension.toml` launch/identity spec + an optional `init.qn` of Quoin-side glue;
+        // `quoin.toml` launch/identity spec + an optional `init.qn` of Quoin-side glue;
         // `EXT_PACKAGING.md`). Spawns the subprocess per the manifest, installs the provided classes
         // **under the package namespace** (no bare-global pollution), runs `init.qn`, and caches the
         // live extension (idempotent per folder). The managed counterpart to `spawn:`.
@@ -1550,7 +1550,7 @@ pub fn build_extension_class() -> NativeClassBuilder {
             load_package(vm, mc, &dir)
         })
         .doc(
-            "Load an extension PACKAGE -- a folder with an extension.toml launch/identity \
+            "Load an extension PACKAGE -- a folder with an quoin.toml launch/identity \
              spec and optional init.qn glue: spawn the subprocess per the manifest, install \
              its classes under the package namespace (no bare-global pollution), run \
              init.qn, and cache the live extension (idempotent per folder). `use name:*` \

@@ -9,11 +9,12 @@ the interpreter. Longer-term, this is intended to grow into end-user documentati
 every section opens with a terse **Rules** box so it also works for lookup.
 Parts I–V teach the language core; Parts VI–VIII cover networking & the web,
 the gradual type system, and the tooling; Part IX tours the standard library,
-and the appendices consolidate the cheat-sheets and gotchas. Method-level
+Part X covers packages and installation, and the appendices consolidate the
+cheat-sheets and gotchas. Method-level
 reference is kept brief: the API reference is generated — run `qn doc`, or ask
 the REPL with `$doc Name` / `$doc Name.selector` — rather than duplicated here.
 
-> Status: full draft (Parts I–IX + appendices) pending review. Claims are verified
+> Status: full draft (Parts I–X + appendices) pending review. Claims are verified
 > against the parser grammar, `src/vm.rs`, `qnlib/`, and the test suite — the
 > surprising ones were confirmed by running the VM directly.
 
@@ -85,7 +86,12 @@ the REPL with `$doc Name` / `$doc Name.selector` — rather than duplicated here
 47. File loading & packages — `use (pkg:)? path`, the resolver seam, directory globs
 48. Stdlib map — one line per unit: the `core/*` prelude, `net/`, `web/`; native vs Quoin
 
-### Appendices · [`10-appendices.md`](10-appendices.md)
+### Part X — Quoin packages · [`10-packages.md`](10-packages.md)
+49. What a package is — `quoin.toml`, extension vs program packages, the search roots, namespacing
+50. Installing packages — `qn pkg install`/`list`, `$QUOIN_HOME` (default `~/.quoin`), `bin/` on the PATH
+51. Writing packages — the SDKs, `init.qn` glue, `[bin]` programs, what's deliberately deferred
+
+### Appendices · [`11-appendices.md`](11-appendices.md)
 - A. Sigil & operator cheat-sheet
 - B. Selector / desugaring quick-reference
 - C. **Gotchas for writing & generating Quoin** — all corner cases consolidated
