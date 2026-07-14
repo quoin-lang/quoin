@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "no_borrow_across_yield"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clippy_utils",
  "dylint_linting",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "no_gc_across_yield"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clippy_utils",
  "dylint_linting",
@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "quoin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-channel",
  "async-compression",
@@ -2157,25 +2157,25 @@ dependencies = [
 
 [[package]]
 name = "quoin-ext"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "quoin-ext-proto",
 ]
 
 [[package]]
 name = "quoin-ext-proto"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "quoin-fmt"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "quoin-syntax",
 ]
 
 [[package]]
 name = "quoin-syntax"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gc-arena",
  "once_cell",
@@ -2187,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "quoin-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",

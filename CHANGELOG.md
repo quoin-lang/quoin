@@ -6,7 +6,11 @@ All notable changes to Quoin are recorded here. The format follows
 Quoin is pre-1.0. Minor versions may make breaking language changes; each one is called out
 under **Changed**, with the migration.
 
-## [Unreleased]
+## [0.1.1] — 2026-07-13
+
+The package release: installing, using, and writing Quoin packages — extension processes,
+pure-Quoin source libraries, and executables on your `PATH` — plus interpolation fixes and
+extension-SDK parity.
 
 ### Added
 
@@ -33,8 +37,9 @@ under **Changed**, with the migration.
 ### Changed
 
 - The package manifest is `quoin.toml` (was `extension.toml`) — a package is now any folder
-  with a `quoin.toml`: an extension package (`[extension]` launch spec), a program package
-  (`[bin]` executables), or both. Rename the file; the contents are unchanged.
+  with a `quoin.toml`, providing any mix of `[extension]` (a subprocess providing classes),
+  `[lib]` (source units), and `[bin]` (executables). Rename the file; the contents are
+  unchanged.
 - A `%'…'` interpolation literal is now lowered to string concatenation at compile time, so
   `%{…}` expressions see the full enclosing scope — including instance variables, which the
   old runtime recompilation silently read as nil (`%'%{@name}'` rendered empty). Methods

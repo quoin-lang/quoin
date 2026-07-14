@@ -71,7 +71,7 @@ members = [
 # published under it. `crates/adbc` is its own workspace and repeats these
 # explicitly.
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/quoin-lang/quoin"
