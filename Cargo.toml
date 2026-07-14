@@ -9,13 +9,50 @@ description = "Quoin — a small, object-oriented language in the Smalltalk trad
 readme = "README.md"
 keywords = ["language", "smalltalk", "vm", "interpreter", "quoin"]
 categories = ["development-tools"]
-# `src/bin/ext_echo.rs` (a Tier-1 test-fixture extension) adds a second bin, so name
-# the default for a bare `cargo run`.
+# The ext_* fixture bins below add more bins, so name the default for a bare `cargo run`.
 default-run = "qn"
 
 [[bin]]
 name = "qn"
 path = "src/main.rs"
+
+# Out-of-process extension TEST FIXTURES (tests/extension.rs, tests/extension_socket.rs).
+# They live under tests/fixtures/ because they are test code, but they must stay *bin*
+# targets: `Extension.spawn:` execs each as a separate process, and the tests locate them
+# via `env!("CARGO_BIN_EXE_<name>")`, which Cargo provides only for bins. Files under
+# tests/fixtures/ are not auto-discovered as integration tests (only top-level tests/*.rs).
+
+[[bin]]
+name = "ext_arrays"
+path = "tests/fixtures/ext_arrays.rs"
+
+[[bin]]
+name = "ext_crash"
+path = "tests/fixtures/ext_crash.rs"
+
+[[bin]]
+name = "ext_data"
+path = "tests/fixtures/ext_data.rs"
+
+[[bin]]
+name = "ext_echo"
+path = "tests/fixtures/ext_echo.rs"
+
+[[bin]]
+name = "ext_handles"
+path = "tests/fixtures/ext_handles.rs"
+
+[[bin]]
+name = "ext_resources"
+path = "tests/fixtures/ext_resources.rs"
+
+[[bin]]
+name = "ext_silent"
+path = "tests/fixtures/ext_silent.rs"
+
+[[bin]]
+name = "ext_vector"
+path = "tests/fixtures/ext_vector.rs"
 
 [workspace]
 members = [
@@ -141,8 +178,8 @@ clap = { version = "4.6.1", features = ["derive"] }
 # The wasm build gates the dependent code with `cfg(target_arch = "wasm32")`; see
 # `src/lib.rs` and `src/io_backend.rs`.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# Extension-side SDK (Tier 1). A normal dep so the `ext_echo` test-fixture bin (src/bin/)
-# can link it; the VM itself does not use it.
+# Extension-side SDK (Tier 1). A normal dep so the ext_* test-fixture bins
+# (tests/fixtures/) can link it; the VM itself does not use it.
 quoin-ext = { path = "crates/quoin-ext" }
 cargo-llvm-cov = "0.8.7"
 # Stackful coroutines (per-arch assembly): the fiber/scheduler substrate.

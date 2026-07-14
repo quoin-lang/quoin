@@ -409,12 +409,10 @@ Quoin over the current sockets/streams).
     (mirrors the channel park model in `src/runtime/channel.rs`). Same-task re-entry (the
     extension re-entering itself through a host block) must still error — only cross-task
     contention queues.
-  - [ ] **Extension socket files leak on abnormal *host* exit.** *(audit follow-up, PR 48.)* An
-    extension's socket file (`/tmp/quoin-ext-*.sock`) and child are torn down by
-    `NativeExtension::drop` (and promptly on a timeout via `kill_now`), but if the *host* crashes
-    or is killed, `Drop` never runs and the socket file persists. Add a startup sweep of stale
-    `quoin-ext-*.sock` files (own-pid-tagged so a concurrently-running host isn't clobbered), or
-    place them under a process-scoped temp dir removed on a best-effort atexit/panic hook.
+  - [x] **Extension socket files leak on abnormal *host* exit.** *(audit follow-up, PR 48.)*
+    FIXED at f4f9c91 (RELEASE_PREP Tier 4, which supersedes this item): both SDKs unlink the
+    socket path right after `accept`, so the established connection carries the session and no
+    path survives a signal death of either process — no startup sweep needed.
 
 ## REPL (`qn repl`)
 

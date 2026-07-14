@@ -63,13 +63,36 @@ class Matrix:
     def row(self, i):
         return Vector(self.rows[int(i)])
 
+    def rows_value(self):
+        # Resources-in-data: a Map whose 'rows' entry is a list of live Vector instances — the
+        # SDK's table-aware pack embeds each as a live-instance reference (ext type 3).
+        return {"count": len(self.rows), "rows": [Vector(r) for r in self.rows]}
+
+
+def basis(n):
+    """Class-side factory returning a data tree of NEW instances (the standard basis)."""
+    n = int(n)
+    return [Vector([1.0 if i == j else 0.0 for j in range(n)]) for i in range(n)]
+
+
+def sum_of(vectors):
+    """Inbound instance references: the list arg's live-instance refs arrive already resolved."""
+    return sum(v.sum() for v in vectors)
+
 
 if __name__ == "__main__":
     ext = quoin_ext.Extension()
     ext.register(
         "Vector",
         Vector,
-        constructors={"ofFloats:": Vector},
+        # Class-side selectors returning a non-instance reply as data (the Rust SDK's explicit
+        # `class_method`): a scalar, a list of new instances, and an inbound-refs reducer.
+        constructors={
+            "ofFloats:": Vector,
+            "dtypeName": lambda: "float64",
+            "basis:": basis,
+            "sumOf:": sum_of,
+        },
         methods={
             "sum": Vector.sum,
             "length": Vector.length,
@@ -83,6 +106,10 @@ if __name__ == "__main__":
         "Matrix",
         Matrix,
         constructors={"ofRows:": Matrix},
-        methods={"rowCount": Matrix.rowCount, "row:": Matrix.row},
+        methods={
+            "rowCount": Matrix.rowCount,
+            "row:": Matrix.row,
+            "rows": Matrix.rows_value,
+        },
     )
     ext.serve(sys.argv[1])

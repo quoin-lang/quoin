@@ -7,10 +7,16 @@
 //! - `v map: aBlock` — a **host-block argument**; applies the block to each element -> a new `Vector`.
 //! - `Matrix ofRows: aListOfLists` (constructor); `m rowCount`; `m row: i` -> a **`Vector`** (a
 //!   *cross-class* return).
+//! - `m rows` — **resources-in-data**: a `Map` whose `'rows'` entry is a `List` of live `Vector`
+//!   instances (`Value::instance`).
+//! - `Vector dtypeName` / `Vector basis: n` — **class-side selectors returning values**
+//!   (`class_method`): a scalar, and a `List` of new instances.
+//! - `Vector sumOf: aListOfVectors` — **inbound instance references**: the list arg's `Resource`
+//!   leaves resolve to live instances via `Host::instance`.
 //!
 //! A test/example fixture, not a shipped feature.
 
-use quoin_ext::{Arg, DataValue, Extension};
+use quoin_ext::{Arg, DataValue, Extension, Value};
 
 /// A plain Rust type. The SDK keeps instances in its object table keyed by an opaque id (the
 /// resource id the host holds); method sends arrive already routed to the right instance.
@@ -136,6 +142,38 @@ fn main() {
                 data: results.iter().map(as_f64).collect(),
             })
         });
+        // Class-side selectors returning VALUES rather than a constructed instance (`class_method`):
+        // a plain scalar…
+        c.class_method("dtypeName", |_host, _args| Ok("float64"));
+        // …and a data tree carrying NEW instances (resources-in-data from the class side): the
+        // standard basis of dimension n, as a `List` of live `Vector`s.
+        c.class_method("basis:", |_host, args| {
+            let n = arg_f64(&args[0]) as usize;
+            Ok(Value::List(
+                (0..n)
+                    .map(|i| {
+                        Value::instance(Vector {
+                            data: (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect(),
+                        })
+                    })
+                    .collect(),
+            ))
+        });
+        // Inbound instance references: the single list argument carries `Resource` leaves that
+        // `Host::instance` resolves to this extension's live `Vector`s.
+        c.class_method("sumOf:", |host, args| {
+            let Some(DataValue::List(items)) = args[0].data() else {
+                return Err("sumOf: expects a list of Vectors".into());
+            };
+            let mut total = 0.0;
+            for item in items {
+                let v = host
+                    .instance::<Vector>(item)
+                    .ok_or("sumOf: list elements must be live Vectors")?;
+                total += v.sum();
+            }
+            Ok(DataValue::Float(total))
+        });
     });
     ext.class::<Matrix>("Matrix", |c| {
         c.constructor("ofRows:", |_host, args| {
@@ -149,6 +187,19 @@ fn main() {
         // Returns a `Vector` — a different registered class (cross-class return).
         c.makes("row:", |m, _host, args| {
             Ok(m.row(arg_f64(&args[0]) as usize))
+        });
+        // Resources-in-data: a structured value whose leaves include NEW live instances — a `Map`
+        // with an Int and a `List` of `Vector`s (the numpy `eig`/`split:` return shape).
+        c.method("rows", |m, _host, _args| {
+            let rows: Vec<Value> = m
+                .rows
+                .iter()
+                .map(|r| Value::instance(Vector { data: r.clone() }))
+                .collect();
+            Ok(Value::Map(vec![
+                ("count".to_string(), Value::Int(m.rows.len() as i64)),
+                ("rows".to_string(), Value::List(rows)),
+            ]))
         });
     });
     ext.serve(&path).expect("ext_vector serve loop");

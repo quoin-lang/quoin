@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Extension-side SDK for writing out-of-process Quoin extensions (Tier 1, UDS transport)."
+readme = "README.md"
 
 [dependencies]
 quoin-ext-proto = { path = "../quoin-ext-proto" }
