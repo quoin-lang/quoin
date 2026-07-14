@@ -5,5 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Wire types + hand-rolled MessagePack codec for the Quoin out-of-process extension protocol (Tier 1). The byte-level contract is PROTOCOL.md."
+# The protocol contract doubles as the crates.io page — it IS this crate's documentation.
+readme = "PROTOCOL.md"
 
 [dependencies]
