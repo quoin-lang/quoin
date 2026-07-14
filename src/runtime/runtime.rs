@@ -359,6 +359,52 @@ pub(crate) fn eval_string<'gc>(
     compile_and_execute_source(vm, mc, code, filename, self_val, bindings, false)
 }
 
+/// `use self:` names the package the EXECUTING unit belongs to: inside a package's unit it
+/// addresses that package's own units — so the run-once key matches however a consumer
+/// spells it, and a library's internal `self:` habits work identically whether it runs as
+/// a program or loads as a package (a package never wants a file from its *caller*). At
+/// top level (an empty load stack) `self:` keeps meaning the entry script's root.
+fn effective_package(vm: &VmState, package: Option<&str>) -> Option<String> {
+    if package == Some("self")
+        && let Some(ctx) = vm.modules.load_stack.last()
+    {
+        return ctx.clone();
+    }
+    package.map(str::to_string)
+}
+
+/// A **named** package's unit may not define a bare-global class — the no-pollution rule
+/// extension packages get structurally (`EXT_PACKAGING.md` §4), enforced for source units
+/// at load time, before anything runs. Reopening an existing class (`String <-- { … }`)
+/// stays allowed. Checks the unit's top level; a parse failure is left to the real
+/// compile path, which reports it with full spans.
+fn forbid_bare_class_definitions(
+    source: &str,
+    display: &str,
+    package: &str,
+) -> Result<(), QuoinError> {
+    let Ok(node) = crate::parser::try_parse_quoin_string_named(source, display) else {
+        return Ok(());
+    };
+    let NodeValue::Program(program) = &node.value else {
+        return Ok(());
+    };
+    for expr in &program.expressions {
+        if let NodeValue::ClassDefinition(cd) = &expr.value
+            && cd.identifier.namespace.is_none()
+        {
+            return Err(QuoinError::Other(format!(
+                "use: {display} defines the bare-global class `{name}` — a package's \
+                 classes must live under a namespace (e.g. `[{ns}]{name}`); packages \
+                 cannot claim bare globals",
+                name = cd.identifier.name,
+                ns = crate::runtime::extension::pascal_case(package),
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Load a unit once. Resolves `(package, path)` to source via the VM's resolver, runs
 /// it in a nested top-level frame (frame-balanced), and records it in the run-once
 /// registry in load order. A repeat `use` — or a cyclic one (an in-progress entry) —
@@ -369,9 +415,10 @@ pub fn load_unit<'gc>(
     package: Option<&str>,
     path: &str,
 ) -> Result<(), QuoinError> {
+    let rewritten = effective_package(vm, package);
     // Bare and `std:` name the same package — canonicalize so they share one run-once
     // key instead of double-loading the same file.
-    let package = canonical_package(package);
+    let package = canonical_package(rewritten.as_deref());
     if vm
         .modules
         .loaded
@@ -389,14 +436,23 @@ pub fn load_unit<'gc>(
             )));
         }
     };
+    let q = package.map(|p| format!("{p}:")).unwrap_or_default();
+    let display = format!("{q}{path}.qn");
+    if let Some(named) = package
+        && named != "self"
+    {
+        forbid_bare_class_definitions(&source, &display, named)?;
+    }
     vm.modules.loaded.push(LoadedUnit {
         package: package.map(|s| s.to_string()),
         path: path.to_string(),
         status: LoadStatus::InProgress,
     });
-    let q = package.map(|p| format!("{p}:")).unwrap_or_default();
-    let display = format!("{q}{path}.qn");
-    compile_and_execute_source(vm, mc, &source, &display, None, &[], true)?;
+    // The unit's package is the `self:` context for every `use` its top level executes.
+    vm.modules.load_stack.push(package.map(|s| s.to_string()));
+    let executed = compile_and_execute_source(vm, mc, &source, &display, None, &[], true);
+    vm.modules.load_stack.pop();
+    executed?;
     if let Some(u) = vm
         .modules
         .loaded
@@ -416,7 +472,8 @@ pub fn load_glob<'gc>(
     package: Option<&str>,
     dir: &str,
 ) -> Result<(), QuoinError> {
-    let package = canonical_package(package);
+    let rewritten = effective_package(vm, package);
+    let package = canonical_package(rewritten.as_deref());
     let units = match vm.modules.resolver.list(package, dir) {
         Some(u) => u,
         None => {

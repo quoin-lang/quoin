@@ -1393,7 +1393,7 @@ fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
 }
 
 /// PascalCase a directory name for the default package namespace (`my-vectors` -> `MyVectors`).
-fn pascal_case(s: &str) -> String {
+pub(crate) fn pascal_case(s: &str) -> String {
     s.split(['-', '_', ' '])
         .filter(|w| !w.is_empty())
         .map(|w| {

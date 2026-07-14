@@ -16,6 +16,13 @@ under **Changed**, with the migration.
   project-local `./quoin_packages/` and `$QUOIN_PATH` — and each `[bin]` manifest entry
   links into `$QUOIN_HOME/bin` (put that directory on your `PATH` once). The book gained a
   packages chapter (Part X).
+- Source packages: a package's `[lib]` section names a folder of `.qn` units that
+  `use name:*` loads through the ordinary pipeline (and `use name:unit` loads singly) —
+  pure-Quoin libraries now ship as packages. Inside a package's units, `use self:`
+  addresses the package's own units rather than the consuming project. A package unit
+  that defines a bare-global class is refused at load time — package classes must be
+  namespaced (reopening existing classes stays allowed). In a package with both
+  `[extension]` and `[lib]`, the extension's classes install before the source units run.
 - Extensions (experimental): the Rust SDK reaches resources-in-data parity with the Python
   SDK. A handler can return a structured `Value` tree carrying new live instances
   (`Value::instance`, e.g. a List of instances), register class-side selectors that return

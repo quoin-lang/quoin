@@ -8,13 +8,22 @@ Tests: `src/packages_tests.rs`, `qnlib/tests/43-adbc.qn`. Package roots are reso
 CWD, not the script — see `FsResolver::package_roots`. The v1 scope below is what got built.*
 
 *Update (2026-07-13, `feat/quoin-packages`): the manifest was **renamed `extension.toml` →
-`quoin.toml`**, and a package is now any folder with one — `[extension]` (loaded by `use`)
-and/or `[bin]` (executables). The first slice of §9's tooling shipped: **`qn pkg install DIR`
-/ `qn pkg list`** (`src/runner_pkg.rs`) copy a package into the per-user home
-(`$QUOIN_HOME`, default `~/.quoin`) — `$QUOIN_HOME/packages` is now the third built-in
-search root — and link `[bin]` entries into `$QUOIN_HOME/bin` for the user's `PATH`. Tests:
-`tests/pkg_install.rs`; user docs: book Part X (`docs/language/10-packages.md`). Still
-deferred: uninstall, registry/fetch/versions, signatures, per-platform binaries.*
+`quoin.toml`**, and a package is now any folder with one — `[extension]` (loaded by `use`),
+`[lib]` (source units), and/or `[bin]` (executables). The first slice of §9's tooling
+shipped: **`qn pkg install DIR` / `qn pkg list`** (`src/runner_pkg.rs`) copy a package into
+the per-user home (`$QUOIN_HOME`, default `~/.quoin`) — `$QUOIN_HOME/packages` is now the
+third built-in search root — and link `[bin]` entries into `$QUOIN_HOME/bin` for the user's
+`PATH`. Tests: `tests/pkg_install.rs`; user docs: book Part X (`docs/language/10-packages.md`).*
+
+*Update (2026-07-13, same branch): **source packages**. `[lib]` (root defaults to the package
+dir) declares `.qn` units the resolver serves like `std:`/`self:` files: `use name:*` loads
+the synthetic extension unit `*` first (when present) then the lib units sorted; `init.qn`
+is never listed (it is `loadPackage:`'s hook). **Decisions:** (A) inside a package's unit
+`self:` = that package — a load-context stack in `Modules` rewrites it before resolution, so
+run-once keys agree however a unit is reached; (B) a named package's unit that DEFINES a
+bare-global class errors at load (reopening allowed) — the §4 no-pollution rule for source;
+(C) no versioning — first root wins. Tests: `tests/pkg_source.rs`. Still deferred:
+uninstall, registry/fetch/versions, signatures, per-platform binaries.*
 
 Companion to `docs/internal/FUTURE_EXT_ARCH.md` (the extension protocol / runtime) and `docs/internal/USE_ARCH.md`
 (the `use` / package-resolution machinery this hooks into).

@@ -426,6 +426,13 @@ pub struct Modules<'gc> {
     /// per-entry status breaks cycles. See `USE_ARCH.md`.
     #[collect(require_static)]
     pub loaded: Vec<LoadedUnit>,
+    /// The packages of the units currently executing their top level, innermost last —
+    /// pushed/popped around each `load_unit` execution. `use self:` resolves against the top
+    /// entry: inside a package's unit, `self:` addresses that package's own units (a named
+    /// package never wants a file from its *caller*); at top level — an empty stack — it
+    /// keeps meaning the entry script's root.
+    #[collect(require_static)]
+    pub load_stack: Vec<Option<String>>,
     /// Loaded extension *packages* (`Extension loadPackage:`), keyed by canonical package directory →
     /// the live `Extension` value, so a repeat `loadPackage:` of the same folder is idempotent. The
     /// installed classes also root the extension, but this is its canonical owner for the session.
@@ -812,6 +819,7 @@ impl<'gc> VmState<'gc> {
             modules: Modules {
                 resolver: Box::new(FsResolver::new(options.self_root.clone())),
                 loaded: Vec::new(),
+                load_stack: Vec::new(),
                 packages: gcl!(mc, HashMap::new()),
             },
             output: OutputCapture {
