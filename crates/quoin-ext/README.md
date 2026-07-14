@@ -145,6 +145,11 @@ Folders are found in `./quoin_packages/<name>/` or on `$QUOIN_PATH`. A package's
 always install **namespaced** (`[Greet]Greeter`) — packages cannot claim bare globals.
 Design and details: `docs/internal/EXT_PACKAGING.md`.
 
+[`examples/Quernfile.qn`](examples/Quernfile.qn) is a copyable recipe that generates the
+package above with [quern](https://github.com/quoin-lang/quern), the Quoin task runner:
+`quern` in that directory compiles the release binary and assembles `dist/greeter/`,
+mtime-skipping both steps when nothing changed.
+
 ## Wire compatibility
 
 The protocol (v2) is append-only MessagePack, version-checked at the spawn-time manifest

@@ -11,3 +11,6 @@ __pycache__/
 
 # Editor swap files
 *.swp
+
+# The greeter example's packaged output (crates/quoin-ext/examples/Quernfile.qn).
+/crates/quoin-ext/examples/dist/

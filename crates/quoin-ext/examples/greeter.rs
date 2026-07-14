@@ -29,7 +29,8 @@
 //!
 //! The e2e-tested twin of this example is `tests/fixtures/ext_vector.rs` (driven by
 //! `tests/extension.rs`); this file is the reading copy. To ship an extension as a
-//! `use`-able package instead of a hand-spawned binary, see `docs/internal/EXT_PACKAGING.md`.
+//! `use`-able package instead of a hand-spawned binary, see `docs/internal/EXT_PACKAGING.md` —
+//! the sibling `Quernfile.qn` packages this example that way (`quern` in this directory).
 
 use quoin_ext::{Arg, DataValue, Extension, Value};
 

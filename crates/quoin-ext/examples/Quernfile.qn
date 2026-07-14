@@ -1,0 +1,50 @@
+"* Package the `greeter` example as an installable extension folder — the recipe any
+"* out-of-tree extension crate can copy (layout: docs/internal/EXT_PACKAGING.md).
+"*
+"* quern is the parallel task runner for Quoin projects — make's dependency graph with
+"* Quoin's concurrency underneath, tasks declared as blocks in a Quernfile like this one:
+"* https://github.com/quoin-lang/quern (`bin/quern` on the PATH, needs `qn`).
+"*
+"* Run from this directory:
+"*
+"*     quern                 "* build (release) + assemble dist/greeter/
+"*
+"* The result is a self-contained `use`-able package:
+"*
+"*     dist/greeter/
+"*       extension.toml      "* command = bin/greeter, namespace = Greet
+"*       bin/greeter         "* the release binary
+"*
+"* Install by dropping the folder onto `$QUOIN_PATH` (or into a project's
+"* `quoin_packages/`); then `use greeter:*` spawns it and installs [Greet]Greeter:
+"*
+"*     QUOIN_PATH=dist qn -e "use greeter:*; ([Greet]Greeter.named:'World').greet.print"
+
+var binary = '../../../target/release/examples/greeter'
+
+var manifest = '[package]
+name = "greeter"
+version = "0.1.0"
+description = "The quoin-ext greeter example, packaged as a use-able extension folder."
+
+[extension]
+command = "bin/greeter"
+namespace = "Greet"
+'
+
+Quern.tasks:{
+    (((.task:'build' does:{
+        .run:#( 'cargo' 'build' '--release' '-p' 'quoin-ext' '--example' 'greeter' )
+    }).info:'compile the greeter example (release)').sources:#( '../src' 'greeter.rs' ))
+        .produces:#( binary );
+
+    (((.task:'package' needs:'build' does:{
+        [IO]Folder.create:'dist/greeter/bin';
+        .run:#( 'cp' binary 'dist/greeter/bin/greeter' );
+        [IO]File.write:manifest to:'dist/greeter/extension.toml';
+        .log:'packaged -> dist/greeter'
+    }).info:'assemble the installable package folder').sources:#( binary ))
+        .produces:#( 'dist/greeter' );
+
+    .default:'package'
+}
