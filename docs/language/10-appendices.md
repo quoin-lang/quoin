@@ -44,7 +44,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 | `..` | Range (half-open) |
 | `!` (prefix) | Boolean negation |
 | `-` (prefix) | Negate (→ the no-arg `-` method) |
-| `%` (prefix) | String interpolation (→ `mod`) |
+| `%` (prefix) | String interpolation |
 | `+` (prefix) | Identity (→ the no-arg `+` method) |
 
 ### Operator precedence
@@ -67,7 +67,7 @@ Postfix sends (`.method`) bind tighter than any infix operator; prefix operators
 | `a && b` / `a \|\| b` | short-circuit jumps (not a method send) |
 | `-x` / `+x` | `Send("-")` / `Send("+")` — the no-arg `-` (negate) / `+` (identity) methods |
 | `!x` | `Send("!")` |
-| `%x` (prefix, on a string) | `Send("mod")` — `%{…}` interpolation |
+| `%x` (prefix, on a string) | literal: compiler-lowered to a `+` concatenation chain; computed string: `Send("%")` — reflective `%{…}` interpolation |
 | `'fmt' % arg` | `Send("%:")` — `printf`-style substitution |
 | `obj.sel:arg` | `Send("sel:"…)` |
 | `.sel` | send `sel` to `self` |
@@ -123,7 +123,7 @@ this first.
     `TypeError ~ e` (the matcher class is on the **left** of `~`), throw `Error`
     subclasses (or use `Error.throw:`).
 13. **`%` has three meanings.** Infix between numbers = modulo; infix on a string =
-    `printf`-style `%:`; prefix on a string = `%{…}` interpolation (`mod`).
+    `printf`-style `%:`; prefix on a string = `%{…}` interpolation.
 14. **`<-` vs `=`.** `<-` defines a once-only constant/class (redefining throws);
     `=` is a reassignable local. They're not interchangeable.
 15. **Fibers throw on misuse.** Resuming a `done`/`failed` fiber, yielding outside a

@@ -6,6 +6,25 @@ All notable changes to Quoin are recorded here. The format follows
 Quoin is pre-1.0. Minor versions may make breaking language changes; each one is called out
 under **Changed**, with the migration.
 
+## [Unreleased]
+
+### Changed
+
+- A `%'…'` interpolation literal is now lowered to string concatenation at compile time, so
+  `%{…}` expressions see the full enclosing scope — including instance variables, which the
+  old runtime recompilation silently read as nil (`%'%{@name}'` rendered empty). Methods
+  containing interpolation literals are also no longer excluded from ahead-of-time
+  compilation. Migration: a malformed `%{…}` in a literal is now a compile-time parse error
+  instead of a runtime-catchable `ParseError`; sending `%` to a *computed* string keeps the
+  reflective runtime path and its catchable `ParseError`.
+
+### Fixed
+
+- The reflective path (`%` sent to a computed string) now sees the caller's `self` too:
+  `%{@ivar}`, `%{self}`, and `%{.send}` resolve against the calling method's receiver
+  instead of silently reading nil — the interpolated unit compiles like `eval:self:`,
+  without the top-level `self = nil` default that shadowed the caller's binding.
+
 ## [0.1.0] — 2026-07-12
 
 The first release of Quoin: a small, dynamically-typed, object-oriented language in the

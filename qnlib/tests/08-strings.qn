@@ -1,3 +1,21 @@
+"* Interpolation fixtures: a `%'…'` literal lowers to a `+` chain at compile
+"* time, so `%{…}` sees the enclosing scope — locals AND instance variables.
+"* The runtime reflective path (kept for computed strings) sees the same
+"* scope dynamically: caller locals plus the caller's `self`.
+InterpNamed <- { |@name|
+    init: -> { |name| @name = name }
+    greet -> { %'Hello, %{@name}!' }
+    tag -> { 'T' }
+    dynGreet -> {
+        var t = 'Hello, %{@name} (%{.tag}, %{self.class.name})!';
+        %t
+    }
+}
+
+InterpCustomS <- {
+    s -> { 'CUSTOM' }
+}
+
 (TestSuite.new:{ var name = 'Strings' }).add:{
     .test:
     equality -> {
@@ -22,6 +40,55 @@
         .is:{ '%c-%b-%a' % #{ 'a':42 'b':43 'c':44 } } equalTo:'44-43-42';
         .is:{ %'1%{2}3' } equalTo:'123';
         .is:{ %'1%{1+1}3' } equalTo:'123';
+    };
+
+    .test:
+    interpolation -> {
+        "* Locals resolve lexically; adjacent fragments; a template that
+        "* starts with a fragment still concatenates as a String.
+        var x = 6;
+        .is:{ %'x is %{x}' } equalTo:'x is 6';
+        .is:{ %'%{x}%{x + 1}' } equalTo:'67';
+        .is:{ %'%{x}' } equalTo:'6';
+
+        "* Instance variables — the compile-time lowering sees them (the old
+        "* runtime recompilation silently read them as nil).
+        .is:{ (InterpNamed.new:{ var name = 'Ada' }).greet } equalTo:'Hello, Ada!';
+
+        "* Values splice via the same `.s` coercion String#+ applies.
+        .is:{ %'v=%{InterpCustomS.new}' } equalTo:'v=CUSTOM';
+
+        "* Braces nest by depth, so block literals work inside a fragment.
+        .is:{ %'%{ #(1 2 3).collect:{ |i| i * 2 } }' } equalTo:'#(2 4 6)';
+
+        "* An unterminated `%{` is literal text, not an error.
+        .is:{ %'a%{ never closed' } equalTo:'a%{ never closed';
+
+        "* A multi-statement fragment evaluates as a block: its value is the
+        "* last statement's, its `var`s stay fragment-local, and an
+        "* assignment to an enclosing local writes through.
+        .is:{ %'%{var q = 3; q + 1}' } equalTo:'4';
+        var q = 'outer';
+        .is:{ q } equalTo:'outer';
+        .is:{ %'%{x = 60}' } equalTo:'60';
+        .is:{ x } equalTo:60;
+    };
+
+    .test:
+    dynamicInterpolation -> {
+        "* Sending `%` to a COMPUTED string takes the runtime reflective
+        "* path: `%{…}` re-parses at call time in the caller's scope.
+        var x = 6;
+        var t = 'x is %{x}';
+        .is:{ %t } equalTo:'x is 6';
+        "* The caller's `self` is visible too — `@ivars`, dot-sends, `self`
+        "* (the sub-unit compiles like `eval:self:`, no `self = nil` default).
+        .is:{ (InterpNamed.new:{ var name = 'Ada' }).dynGreet }
+            equalTo:'Hello, Ada (T, InterpNamed)!';
+        "* A malformed fragment there is a catchable ParseError (a malformed
+        "* `%'…'` literal is a compile error instead).
+        var bad = 'oops %{)}';
+        .does:{ %bad } throw:ParseError;
     };
 
     .test:

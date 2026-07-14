@@ -15,5 +15,5 @@ var damonPerson = Person.new:{
     var age = 39  "* Narrator: He's not 39
 }
 
-damonEmployee.s.print
+damonPerson.s.print
 "* Damon, 39 years old

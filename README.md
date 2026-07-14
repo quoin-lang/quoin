@@ -312,7 +312,7 @@ Error <- CustomError <- {}
 
 Ranges are **end-exclusive**. The match operator `~` puts the *matcher* on the
 left (a regex, range, class, or predicate block). `%` formats positionally, and
-`%'…%{expr}…'` interpolates over the surrounding locals.
+`%'…%{expr}…'` interpolates over the surrounding scope — locals and `@ivars`.
 
 ```quoin
 "* Operators: + - * / == != > >= < <= .. % ~   (unary: + - ! %)

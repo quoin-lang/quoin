@@ -2,6 +2,7 @@ use crate::arg;
 use crate::compiler::Compiler;
 use crate::error::QuoinError;
 use crate::parser::ast::NodeValue;
+use crate::parser::interp::{InterpPart, split_interpolation};
 use crate::recv;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
@@ -18,8 +19,8 @@ pub fn build_string_class() -> NativeClassBuilder {
             "Immutable UTF-8 text -- the type of 'single-quoted' literals (a double quote \
              starts a comment in Quoin, so strings are single-quoted). Position-based \
              operations (`length`, `index:`, `insert:at:`) count characters, not bytes. \
-             Strings concatenate with `+`, format with `%`, and interpolate with `.mod`; \
-             every operation returns a new String.\n\n\
+             Strings concatenate with `+`, format with binary `%`, and interpolate with \
+             `%'…%{expr}…'`; every operation returns a new String.\n\n\
              ```\n\
              'ab' + 'cd'       \"* -> abcd\n\
              'héllo'.length    \"* -> 5\n\
@@ -318,39 +319,11 @@ pub fn build_string_class() -> NativeClassBuilder {
             let s_borrow = recv!(receiver, String);
             let s = s_borrow.to_string();
 
-            enum InterpolPart {
-                Lit(String),
-                Expr(String),
-            }
-
-            let mut parts = Vec::new();
-            let chars: Vec<char> = s.chars().collect();
-            let mut i = 0;
-            while i < chars.len() {
-                if i + 1 < chars.len() && chars[i] == '%' && chars[i + 1] == '{' {
-                    let mut depth = 1;
-                    let mut j = i + 2;
-                    while j < chars.len() && depth > 0 {
-                        if chars[j] == '{' {
-                            depth += 1;
-                        } else if chars[j] == '}' {
-                            depth -= 1;
-                        }
-                        j += 1;
-                    }
-                    if depth == 0 {
-                        let expr_str: String = chars[i + 2..j - 1].iter().collect();
-                        parts.push(InterpolPart::Expr(expr_str));
-                        i = j;
-                    } else {
-                        parts.push(InterpolPart::Lit(chars[i].to_string()));
-                        i += 1;
-                    }
-                } else {
-                    parts.push(InterpolPart::Lit(chars[i].to_string()));
-                    i += 1;
-                }
-            }
+            // The DYNAMIC interpolation path: `%` sent to a computed string.
+            // A `%'…'` LITERAL never gets here — the compiler lowers it to a
+            // `+` concatenation chain (`compile_interpolated_literal`). Same
+            // splitter as the compiler, so the two paths can't disagree.
+            let parts = split_interpolation(&s);
 
             // Get the caller's frame context
             let (caller_env, caller_receiver, enclosing_method_id) = {
@@ -367,10 +340,10 @@ pub fn build_string_class() -> NativeClassBuilder {
             let mut result = String::new();
             for part in parts {
                 match part {
-                    InterpolPart::Lit(lit) => {
+                    InterpPart::Lit(lit) => {
                         result.push_str(&lit);
                     }
-                    InterpolPart::Expr(expr_str) => {
+                    InterpPart::Expr(expr_str) => {
                         // `%{…}` re-compiles user text at runtime — a bad
                         // expression must be a CATCHABLE ParseError, not a
                         // process abort (BUGS.md Finding 6).
@@ -403,8 +376,12 @@ pub fn build_string_class() -> NativeClassBuilder {
                         compiler.set_seen_types(vm.options.seen_types.clone());
                         compiler.set_class_table(vm.options.class_table.clone());
                         crate::class_table::populate_from_vm(vm, &vm.options.class_table);
+                        // `define_self: false`, exactly like `eval:self:`: the
+                        // default top-level `self = nil` would shadow the
+                        // caller's `self` in the env chain, silently rendering
+                        // `%{@ivar}` / `%{self}` / `%{.send}` as nil.
                         let compiled = compiler
-                            .compile_program(program_node)
+                            .compile_program_with(program_node, false)
                             .map_err(|e| QuoinError::Other(e.to_string()))?;
                         vm.report_type_warnings(compiler.diagnostics());
 
@@ -434,8 +411,11 @@ pub fn build_string_class() -> NativeClassBuilder {
         })
         .doc(
             "Interpolation: evaluate each `%{...}` in the receiver as a Quoin expression \
-             in the caller's scope and splice in the result's `.s` rendering. A malformed \
-             expression raises a catchable ParseError.\n\n\
+             in the surrounding scope — locals, `self`, and `@ivars` — and splice in the \
+             result's `.s` rendering. A `%'…'` literal is lowered to string concatenation \
+             at compile time, so a malformed expression there is a compile error; sending \
+             `%` to a computed string evaluates its `%{...}` reflectively at call time \
+             instead, and a malformed expression raises a catchable ParseError.\n\n\
              ```\n\
              %'x = %{1 + 2}'     \"* -> x = 3\n\
              ```",
