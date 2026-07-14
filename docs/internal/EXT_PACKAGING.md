@@ -218,7 +218,7 @@ publishing the SDK crates (§13).
 
 §3–§7 are what a *package* is and how it *loads*; this is what an *author* builds to go inside one. An
 extension is an ordinary program that links the extension-side SDK and runs a serve loop — **it needs
-no part of the VM.** The same SDK is used in-tree (the `ext_vector` fixtures in `src/bin/`) and
+no part of the VM.** The same SDK is used in-tree (the `ext_vector` fixtures in `tests/fixtures/`) and
 out-of-tree; the only difference is whether the SDK is a path dependency or a published one.
 
 **Rust** — a plain binary crate depending only on the `quoin-ext` SDK. The author never names the wire

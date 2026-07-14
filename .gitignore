@@ -8,3 +8,6 @@ __pycache__/
 
 # The wasm-pack output bundle (scripts/build_wasm.sh) — build artifact, not source.
 /playground/pkg/
+
+# Editor swap files
+*.swp
