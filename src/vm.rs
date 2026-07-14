@@ -712,6 +712,14 @@ pub struct VmState<'gc> {
     /// single bool load on the hot path) unless extensions are in use. See
     /// `src/handle_table.rs` / `docs/internal/FUTURE_EXT_ARCH.md` §2.
     pub handle_table: crate::handle_table::HandleTable<'gc>,
+
+    /// WORKER-side hosted-object table (`ACTOR_OBJECTS.md` §2): the objects this
+    /// worker hosts for its parent, keyed by the id in `Call.recv` /
+    /// `CallReturnResource.resource` (index + 1; 0 is never issued). A GC root set,
+    /// like `handle_table` — a hosted object lives until the parent's proxy drop
+    /// releases it (`Call.releases`) or the serve loop ends. Always empty outside
+    /// `Worker.hostServe:`.
+    pub hosted: Vec<Option<Value<'gc>>>,
 }
 
 pub enum VmStatus<'gc> {
@@ -862,6 +870,7 @@ impl<'gc> VmState<'gc> {
             },
             options,
             handle_table: crate::handle_table::HandleTable::new(),
+            hosted: Vec::new(),
         }
     }
 
@@ -1967,6 +1976,59 @@ impl<'gc> VmState<'gc> {
                 selector
             )))
         }
+    }
+
+    /// Insert a value into the worker-side hosted-object table (`hosted`),
+    /// answering its id: index + 1, so 0 is never issued (`Call.recv: 0` stays
+    /// free to mean "class-side" when hosted manifests arrive).
+    pub fn hosted_insert(&mut self, v: Value<'gc>) -> u64 {
+        for (i, slot) in self.hosted.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(v);
+                return (i + 1) as u64;
+            }
+        }
+        self.hosted.push(Some(v));
+        self.hosted.len() as u64
+    }
+
+    pub fn hosted_get(&self, id: u64) -> Option<Value<'gc>> {
+        self.hosted
+            .get((id as usize).checked_sub(1)?)
+            .copied()
+            .flatten()
+    }
+
+    pub fn hosted_release(&mut self, id: u64) {
+        if let Some(slot) = (id as usize)
+            .checked_sub(1)
+            .and_then(|i| self.hosted.get_mut(i))
+        {
+            *slot = None;
+        }
+    }
+
+    /// Like [`Self::call_method`], but a lookup miss raises `MessageNotUnderstood`
+    /// instead of answering nil. Remote dispatch (hosted objects; anything
+    /// forwarding a real SEND) wants send semantics; `call_method`'s nil-on-miss
+    /// is hook semantics ("call it if it's there").
+    pub fn call_method_mnu(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        selector: &str,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        let sel = Symbol::intern(selector);
+        if self.lookup_method(mc, receiver, sel, &args)?.is_none() {
+            return Err(QuoinError::MessageNotUnderstood {
+                receiver: format!("{receiver}"),
+                selector: selector.to_string(),
+                args: args.iter().map(|a| format!("{a}")).collect(),
+                candidates: Vec::new(),
+            });
+        }
+        self.call_method(mc, receiver, selector, args)
     }
 
     pub fn call_method(

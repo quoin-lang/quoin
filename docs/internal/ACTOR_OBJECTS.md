@@ -301,7 +301,23 @@ injection wrapper, which feeds recorded results instead of re-performing.
    note: two sockets — conversation + mailbox).
 4. **Hosted objects** (`Worker.host:`): object table + MNU proxy on the converged
    protocol, thread + process backings; claim machinery shared with extensions;
-   lifetime via proxy-drop release.
+   lifetime via proxy-drop release. DONE (as built, 2026-07-14): `WorkerService`
+   upgraded IN PLACE (§2's "evolve, don't invent beside") — class form only; the
+   block form waits for portable-block work. Dispatch = `Call{class_name, op, recv,
+   method_args}` → `CallReturn*`, over the dispatch lane (thread: owned `Msg` values,
+   no pump; process: via the conversation socket). The worker's serve loop is native
+   (`Worker.hostServe:`, replacing the synthesized Quoin `perform:` loop) over a
+   rooted `vm.hosted` table (the `handle_table` rooting pattern). THE RULE SHIPPED:
+   a method's non-portable object return is HOSTED (`CallReturnResource` → parent
+   mints a sub-proxy); same-worker proxies pass back as `Arg::Resource` live
+   references; proxy drop reaps into `Call.releases`; errors carry the worker's
+   rendered trace as `remote_stack` (labeled "(worker)"), surfacing as
+   `ex.remoteStack`. One discovery worth keeping: the native `call_method` answers
+   NIL on a lookup miss (hook semantics) — remote dispatch needs send semantics, so
+   `call_method_mnu` exists now and hosted dispatch uses it; and a `Thrown` error's
+   message lives in `vm.exceptions.active`, not the error value. The one-token
+   serializer remains until per-object claims (slice 5); the MNU-seam proxy hook
+   remains until hosted manifests (§10).
 5. **Per-object mailboxes + lanes** (§5) — after hosted objects, when the claim
    machinery is already generalized; the lock-ordering discipline gets settled and
    tested here.
@@ -324,6 +340,15 @@ Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, 
 - **The lock-ordering discipline** for (object claim, lane claim) under nested
   re-entrancy (§5's care point) — flagged as the scariest part of the design; must be
   written down and deadlock-tested before slice 5, not discovered during it.
+- **Decoupling proxy dispatch from the VM miss path** (raised in review, 2026-07-14):
+  the service proxy's MNU-seam hook (`try_service_call` in `vm.rs`) is tolerated for
+  now but must not be permanent. The exit is the extension pattern, already in-tree:
+  `install_ext_class` puts a dispatch node in an ordinary method table — no hook —
+  because the manifest enumerates selectors. Once hosted classes declare theirs (the
+  ready message carries the selector list; the handshake itself runs before the unit
+  compiles), the parent installs a real class and the hook is deleted. Full dynamism
+  (`doesNotUnderstand:` as a language protocol, Smalltalk-style) is a separate,
+  independent language feature — QUOIN_TODO — not the load-bearing mechanism here.
 - Should plain `Worker.send:`/`receive` mailboxes be re-expressed as a cross-isolate
   channel pair once §6 lands (one concept fewer)?
 - Structured (non-blob) Quoin-to-Quoin stack frames — format, and whether the debugger

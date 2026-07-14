@@ -84,7 +84,7 @@ use crate::vm_scheduler::{TaskId, Wake};
 /// The name is parsed as a `NamespacedName`, so a namespaced class such as `[ADBC]Database` resolves
 /// the same way it was installed (not as a bare name). `None` if unbound. Used by the `get_global`
 /// host-op (Phase 2) and to resolve a returned resource's class (Phase 3 cross-class returns).
-fn resolve_global<'gc>(vm: &VmState<'gc>, name: &str) -> Option<Value<'gc>> {
+pub(crate) fn resolve_global<'gc>(vm: &VmState<'gc>, name: &str) -> Option<Value<'gc>> {
     let key = NamespacedName::parse(name);
     vm.globals.borrow().get(&key).copied()
 }
@@ -783,7 +783,7 @@ fn invoke_block_batches<'gc>(
 /// in-band so a clipped blob is never mistaken for a complete one.
 const MAX_REMOTE_STACK: usize = 64 * 1024;
 
-fn truncate_blob(mut blob: String) -> String {
+pub(crate) fn truncate_blob(mut blob: String) -> String {
     if blob.len() > MAX_REMOTE_STACK {
         let mut cut = MAX_REMOTE_STACK;
         while !blob.is_char_boundary(cut) {
@@ -799,8 +799,14 @@ fn truncate_blob(mut blob: String) -> String {
 /// message, the frame lines the error carried, and — when the failure was itself a deeper
 /// extension error — that error's own blob appended, preserving the interleave through
 /// arbitrarily deep host<->extension nesting. Opaque to the peer (PROTOCOL.md §Errors).
-fn quoin_stack_segment(e: &QuoinError) -> String {
-    let mut seg = format!("--- Quoin (host) ---\n{}\n", e.innermost());
+pub(crate) fn quoin_stack_segment(e: &QuoinError) -> String {
+    quoin_stack_segment_labeled(e, "host")
+}
+
+/// [`quoin_stack_segment`] with the side named — a worker's segment says
+/// "(worker)", the host's says "(host)".
+pub(crate) fn quoin_stack_segment_labeled(e: &QuoinError, side: &str) -> String {
+    let mut seg = format!("--- Quoin ({side}) ---\n{}\n", e.innermost());
     if let QuoinError::WithSourceInfo { trace, .. } = e {
         for frame in trace {
             seg.push_str(frame);

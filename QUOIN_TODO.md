@@ -21,6 +21,16 @@ This document outlines the language features, compiler updates, and VM modificat
   `qn doc` (a corpus file that parks forever — hit via the VM repo's own tree in an e2e); a
   per-unit load timeout or `--exclude` would bound it.
 
+- [ ] **`doesNotUnderstand:` as a language protocol.** Promote the dispatch miss path to one
+  generic protocol: on lookup miss, if the receiver's class defines `doesNotUnderstand:` (with
+  a reified message — selector + args), send it; otherwise raise MNU as today. Makes proxies,
+  mocks, delegators, and lazy loaders ordinary user-space code, and retires the last reason
+  for feature-specific hooks in `vm.rs`'s miss branches (the WorkerService proxy hook — whose
+  own exit is manifest-installed classes, see ACTOR_OBJECTS.md §10). Design surface: the
+  message reification value, `super` interaction, sealed-class rules, and how the gradual
+  checker treats DNU classes (open-ended selector sets). Deliberately NOT the load-bearing
+  mechanism for hosted objects/extensions — those have enumerable selectors and install real
+  method nodes; DNU is for genuinely dynamic receivers.
 - [ ] **`qn doc` for COMMANDS, not just classes/methods.** A `[CLI]Spec`-based tool is an API
   too — its flags, options, positionals, and subcommands deserve a generated doc page (roughly:
   the `-h` help, as publishable HTML/Markdown, next to the tool's library classes). Blocked on

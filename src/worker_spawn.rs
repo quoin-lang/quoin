@@ -28,6 +28,9 @@ fn spawn_worker_with(
     let (outbox_tx, outbox_rx) = async_channel::unbounded();
     let (done_tx, done_rx) = async_channel::bounded(1);
     let (control_tx, control_rx) = async_channel::unbounded();
+    // Thread backing: the dispatch lane IS the transport — owned `Msg` values,
+    // no pump, no bytes (ACTOR_OBJECTS.md §1).
+    let (dispatch_tx, dispatch_rx) = async_channel::unbounded();
     let id = SPAWNED.fetch_add(1, Ordering::Relaxed);
     std::thread::Builder::new()
         .name(format!("qn-worker-{id}"))
@@ -41,6 +44,7 @@ fn spawn_worker_with(
                     inbox_rx,
                     outbox_tx,
                     control_rx,
+                    dispatch_rx,
                     process: false,
                 })
             }))
@@ -61,31 +65,16 @@ fn spawn_worker_with(
         outbox_rx,
         done_rx,
         control_tx,
+        dispatch_tx,
     }
 }
 
-/// The generic service loop appended to a hosted unit's source
-/// (docs/internal/CONCURRENCY_ARCH.md §10 L4): instantiate the hosted class, report
-/// ready, then serve calls forever — one at a time, actor-style. Calls are
-/// reflective sends (`perform:args:`), so a missing method raises the same
-/// MessageNotUnderstood a direct send would, and it travels back as the
-/// reply's 'err'. A nil message (serviceStop) ends the loop; the unit then
-/// completes and the done lane reports.
-const SERVICE_LOOP_QN: &str = r#"
-var svcHostInstance = @CLASS@.new;
-Worker.send:#{ 'ready': true };
-var svcHostRunning = true;
-{ svcHostRunning }.whileDo:{
-    var svcHostCall = Worker.receive;
-    (svcHostCall == nil).if:{ svcHostRunning = false }
-    else:{
-        var svcHostReply = {
-            #{ 'ret': (svcHostInstance.perform:(svcHostCall.at:'sel') args:(svcHostCall.at:'args')) }
-        }.catch:{ |e| #{ 'err': e.s } };
-        Worker.send:svcHostReply
-    }
-};
-"#;
+/// The hosting line appended to a hosted unit's source: `Worker.hostServe:`
+/// (src/runtime/worker.rs) instantiates the class, roots it in the worker's
+/// hosted-object table, reports ready, and serves peer-protocol `Call`
+/// dispatches from the dispatch lane — one at a time, actor-style — until
+/// the reserved stop op or the lane closing ends it.
+const SERVICE_LOOP_QN: &str = "\nWorker.hostServe:'@CLASS@';\n";
 
 /// Spawn a SERVICE worker: the unit at `path` (which defines `class_name`)
 /// plus the generic serve loop, compiled as one program.
@@ -280,11 +269,6 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 use quoin_ext_proto::{Msg, PROTOCOL_VERSION};
 
-/// The worker link's reserved ops on the `Call` frame (`class_name` stays
-/// empty; hosted objects will dispatch with real class names).
-const OP_SEND: &str = "send";
-const OP_PS_TREE: &str = "psTree";
-
 /// A bare `Call` frame carrying only an op and an optional data payload —
 /// the worker link's message shape.
 fn call_frame(op: &str, data: Option<WireData>) -> Msg {
@@ -433,27 +417,63 @@ pub fn spawn_worker_process(
     let (outbox_tx, outbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (done_tx, done_rx) = async_channel::bounded::<Result<WireData, String>>(1);
     let (control_tx, control_rx) = async_channel::unbounded::<ControlReq>();
+    let (dispatch_tx, dispatch_rx) = async_channel::unbounded::<DispatchReq>();
 
     // Conversation pump: one conversation at a time (write the Call, read to its
     // terminal), so each reply pairs with the request it answers by shape alone.
+    // Serves both request sources — control (ps) and hosted-object dispatch; a
+    // closed lane becomes a pending future so the other keeps being served (the
+    // registry pins `control_tx` open, so the pump lives with the worker).
     {
         let mut sock = conv_sock;
         std::thread::spawn(move || {
-            while let Ok(req) = control_rx.recv_blocking() {
-                let op = match req.kind {
-                    ControlKind::PsTree => OP_PS_TREE,
-                };
-                if write_msg_frame(&mut sock, &call_frame(op, None)).is_err() {
-                    break;
+            enum ConvReq {
+                Ctl(ControlReq),
+                Dispatch(Box<DispatchReq>),
+            }
+            async fn recv_or_pending<T>(rx: &async_channel::Receiver<T>) -> T {
+                match rx.recv().await {
+                    Ok(v) => v,
+                    Err(_) => std::future::pending().await,
                 }
-                match read_msg_frame(&mut sock) {
-                    Ok(Msg::CallReturnData { value }) => {
-                        let _ = req.reply.send_blocking(WorkerMsg::Data(value));
+            }
+            loop {
+                let req = futures_lite::future::block_on(futures_lite::future::or(
+                    async { ConvReq::Ctl(recv_or_pending(&control_rx).await) },
+                    async { ConvReq::Dispatch(Box::new(recv_or_pending(&dispatch_rx).await)) },
+                ));
+                match req {
+                    ConvReq::Ctl(req) => {
+                        let op = match req.kind {
+                            ControlKind::PsTree => OP_PS_TREE,
+                        };
+                        if write_msg_frame(&mut sock, &call_frame(op, None)).is_err() {
+                            break;
+                        }
+                        match read_msg_frame(&mut sock) {
+                            Ok(Msg::CallReturnData { value }) => {
+                                let _ = req.reply.send_blocking(WorkerMsg::Data(value));
+                            }
+                            // An error terminal (or unexpected frame) drops the reply;
+                            // the requester's bounded-staleness deadline reads
+                            // 'unresponsive'.
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
                     }
-                    // An error terminal (or unexpected frame) drops the reply; the
-                    // requester's bounded-staleness deadline reads 'unresponsive'.
-                    Ok(_) => {}
-                    Err(_) => break,
+                    ConvReq::Dispatch(req) => {
+                        if write_msg_frame(&mut sock, &req.frame).is_err() {
+                            break;
+                        }
+                        match read_msg_frame(&mut sock) {
+                            // Any terminal answers the dispatch; a dropped reply
+                            // lane (cancelled caller) is the sender's problem.
+                            Ok(msg) => {
+                                let _ = req.reply.send_blocking(msg);
+                            }
+                            Err(_) => break,
+                        }
+                    }
                 }
             }
         });
@@ -528,6 +548,7 @@ pub fn spawn_worker_process(
             outbox_rx,
             done_rx,
             control_tx,
+            dispatch_tx,
         },
         pid,
         grip,
@@ -581,44 +602,67 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
     let (inbox_tx, inbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (outbox_tx, outbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (control_tx, control_rx) = async_channel::unbounded::<ControlReq>();
+    let (dispatch_tx, dispatch_rx) = async_channel::unbounded::<DispatchReq>();
 
-    // Conversation thread: serve conversations one at a time.
+    // Conversation thread: serve conversations one at a time. A `psTree` (empty
+    // class) routes to the driver's control lane; anything else is a
+    // hosted-object dispatch for the serve loop's dispatch lane.
     {
         let mut sock = conv_sock;
         let control_tx = control_tx.clone();
         std::thread::spawn(move || {
-            while let Ok(Msg::Call { op, .. }) = read_msg_frame(&mut sock) {
-                if op != OP_PS_TREE {
-                    // Unknown conversation op: answer recoverably, stay in sync.
-                    if write_msg_frame(
-                        &mut sock,
-                        &Msg::CallReturnError {
-                            message: format!("worker link: unknown op '{op}'"),
-                            remote_stack: String::new(),
-                        },
-                    )
-                    .is_err()
+            while let Ok(frame) = read_msg_frame(&mut sock) {
+                let Msg::Call {
+                    ref op,
+                    ref class_name,
+                    ..
+                } = frame
+                else {
+                    continue;
+                };
+                let terminal = if op == OP_PS_TREE && class_name.is_empty() {
+                    // One conversation at a time: a fresh reply lane per request,
+                    // the terminal written before the next Call is read.
+                    let (reply_tx, reply_rx) = async_channel::bounded::<WorkerMsg>(1);
+                    if control_tx
+                        .send_blocking(ControlReq {
+                            kind: ControlKind::PsTree,
+                            reply: reply_tx,
+                        })
+                        .is_err()
                     {
                         return;
                     }
-                    continue;
-                }
-                // One conversation at a time: a fresh reply lane per request, the
-                // terminal written before the next Call is read.
-                let (reply_tx, reply_rx) = async_channel::bounded::<WorkerMsg>(1);
-                if control_tx
-                    .send_blocking(ControlReq {
-                        kind: ControlKind::PsTree,
-                        reply: reply_tx,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-                let Ok(WorkerMsg::Data(value)) = reply_rx.recv_blocking() else {
-                    return;
+                    let Ok(WorkerMsg::Data(value)) = reply_rx.recv_blocking() else {
+                        return;
+                    };
+                    Msg::CallReturnData { value }
+                } else {
+                    let (reply_tx, reply_rx) = async_channel::bounded::<Msg>(1);
+                    if dispatch_tx
+                        .send_blocking(DispatchReq {
+                            frame,
+                            reply: reply_tx,
+                        })
+                        .is_err()
+                    {
+                        // No serve loop (a plain worker, or one that already
+                        // stopped): answer recoverably, stay in sync.
+                        Msg::CallReturnError {
+                            message: "this worker hosts no objects".to_string(),
+                            remote_stack: String::new(),
+                        }
+                    } else {
+                        match reply_rx.recv_blocking() {
+                            Ok(msg) => msg,
+                            Err(_) => Msg::CallReturnError {
+                                message: "the hosted serve loop exited mid-call".to_string(),
+                                remote_stack: String::new(),
+                            },
+                        }
+                    }
                 };
-                if write_msg_frame(&mut sock, &Msg::CallReturnData { value }).is_err() {
+                if write_msg_frame(&mut sock, &terminal).is_err() {
                     return;
                 }
             }
@@ -678,6 +722,7 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
         inbox_rx,
         outbox_tx,
         control_rx,
+        dispatch_rx,
         process: true,
     };
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match service {

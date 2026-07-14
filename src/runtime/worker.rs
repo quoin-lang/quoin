@@ -150,9 +150,172 @@ fn wrap_handle<'gc>(
     ))
 }
 
+/// One hosted-object dispatch (`Worker.hostServe:`'s per-request body,
+/// docs/internal/ACTOR_OBJECTS.md §2): decode the `Call`'s arguments, perform the
+/// send, and classify the result into its terminal — portable data COPIES
+/// (`CallReturnData`); a non-portable object is HOSTED (table insert →
+/// `CallReturnResource`, the parent wraps it as a sub-proxy) — objects are
+/// addressed, values are copied; a raise becomes `CallReturnError` carrying the
+/// worker's rendered stack segment (`ex.remoteStack` at the call site).
+fn dispatch_hosted<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    op: &str,
+    recv: u64,
+    method_args: &[quoin_ext_proto::Arg],
+) -> quoin_ext_proto::Msg {
+    use quoin_ext_proto::{Arg, Msg};
+    let err = |message: String| Msg::CallReturnError {
+        message,
+        remote_stack: String::new(),
+    };
+    let Some(target) = vm.hosted_get(recv) else {
+        return err(format!("hosted call '{op}': no live hosted object {recv}"));
+    };
+    let mut argv = Vec::with_capacity(method_args.len());
+    for (i, a) in method_args.iter().enumerate() {
+        let v = match a {
+            Arg::Data(dv) => match wire_to_value(vm, mc, dv, None) {
+                Ok(v) => v,
+                Err(e) => return err(format!("hosted call '{op}': argument {}: {e}", i + 1)),
+            },
+            // A proxy of THIS worker passed back in: resolve to the live object.
+            Arg::Resource(id) => match vm.hosted_get(*id) {
+                Some(v) => v,
+                None => {
+                    return err(format!(
+                        "hosted call '{op}': argument {} references no live hosted object {id}",
+                        i + 1
+                    ));
+                }
+            },
+            Arg::Handle(_) | Arg::Array(_) => {
+                return err(format!(
+                    "hosted call '{op}': argument {} has an unsupported kind for a hosted call",
+                    i + 1
+                ));
+            }
+        };
+        argv.push(v);
+    }
+    match vm.call_method_mnu(mc, target, op, argv) {
+        Ok(v) => match value_to_wire(v, None) {
+            Ok(dv) => Msg::CallReturnData { value: dv },
+            Err(wire_err) => {
+                if let Value::Object(obj) = v {
+                    let class_name = obj.borrow().class_name().to_string();
+                    let id = vm.hosted_insert(v);
+                    Msg::CallReturnResource {
+                        resource: id,
+                        class_name,
+                    }
+                } else {
+                    err(format!(
+                        "hosted call '{op}': the return value is neither portable data nor \
+                         a hostable object: {wire_err}"
+                    ))
+                }
+            }
+        },
+        Err(e) => {
+            // A Quoin-level throw parks its value in `exceptions.active`; the wire
+            // can't carry the value, so render IT as the message (the `Thrown`
+            // marker itself just says "thrown exception").
+            let message = if matches!(e.innermost(), crate::error::QuoinError::Thrown) {
+                match vm.exceptions.active {
+                    Some(v) => format!("{v}"),
+                    None => e.to_string(),
+                }
+            } else {
+                e.to_string()
+            };
+            Msg::CallReturnError {
+                message,
+                remote_stack: crate::runtime::extension::quoin_stack_segment_labeled(&e, "worker"),
+            }
+        }
+    }
+}
+
 pub fn build_worker_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Worker", Some("Object"))
         .construct_with("use Worker.spawn: / Worker.start:")
+        // ---- worker side: the hosted-object serve loop (ACTOR_OBJECTS.md §2).
+        // Invoked by the synthesized line `Worker.hostServe:'Class'` a service
+        // spawn appends to the unit; not really a user-facing surface.
+        .class_method("hostServe:", |vm, mc, _receiver, args| {
+            let class_name = args[0].as_string().ok_or_else(|| {
+                QuoinError::Other("Worker.hostServe: expects a String class name".into())
+            })?;
+            let (dispatch_rx, outbox_tx) = match &vm.worker_link {
+                Some(link) => (link.dispatch_rx.clone(), link.outbox_tx.clone()),
+                None => {
+                    return Err(QuoinError::Other(
+                        "Worker.hostServe: only runs inside a worker".into(),
+                    ));
+                }
+            };
+            let class_val =
+                crate::runtime::extension::resolve_global(vm, &class_name).ok_or_else(|| {
+                    QuoinError::Other(format!("Worker.hostServe: no class named '{class_name}'"))
+                })?;
+            // The root hosted object (id 1): instantiation failures propagate
+            // to the done lane exactly as any unit error does.
+            let root = vm.call_method(mc, class_val, "new", Vec::new())?;
+            vm.hosted_insert(root);
+            // Ready: the parent's host: parks on this before answering the proxy.
+            let _ = outbox_tx.try_send(WorkerMsg::Data(WireData::Map(vec![(
+                "ready".to_string(),
+                WireData::Bool(true),
+            )])));
+            loop {
+                let req = match vm.await_io(IoRequest::DispatchRecv(dispatch_rx.clone()))? {
+                    IoResult::DispatchMsg(Some(req)) => req,
+                    // Lane closed: the parent side is gone; end the serve loop.
+                    IoResult::DispatchMsg(None) => break,
+                    other => {
+                        return Err(QuoinError::Other(format!(
+                            "Worker.hostServe: unexpected result {other:?}"
+                        )));
+                    }
+                };
+                let quoin_ext_proto::Msg::Call {
+                    op,
+                    recv,
+                    method_args,
+                    releases,
+                    ..
+                } = req.frame
+                else {
+                    let _ = req.reply.try_send(quoin_ext_proto::Msg::CallReturnError {
+                        message: "Worker.hostServe: expected a Call frame".to_string(),
+                        remote_stack: String::new(),
+                    });
+                    continue;
+                };
+                // Dropped-proxy releases ride every call, batched (the reap pattern).
+                for rid in &releases {
+                    vm.hosted_release(*rid);
+                }
+                if op == crate::worker::OP_STOP {
+                    let _ = req.reply.try_send(quoin_ext_proto::Msg::CallReturnData {
+                        value: WireData::Null,
+                    });
+                    break;
+                }
+                note_message();
+                let reply = dispatch_hosted(vm, mc, &op, recv, &method_args);
+                let _ = req.reply.try_send(reply);
+            }
+            vm.hosted.clear();
+            Ok(Value::Nil)
+        })
+        .doc(
+            "Worker side of a hosted service (used by the synthesized service unit): \
+             instantiate the named class, root it in the hosted-object table, report \
+             ready, and serve peer-protocol dispatches one at a time until the stop op \
+             or the lane closing ends the loop. Not meant to be called directly.",
+        )
         .class_doc(
             "An isolate: a fresh VM on its own OS thread (or child process) with message \
              lanes to its parent. Parent side: `Worker.spawn:'unit.qn'` answers a handle -- \

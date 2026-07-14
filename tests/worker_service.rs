@@ -137,3 +137,66 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
     assert_service_script_passes("boot", script, &[("counter.qn", COUNTER_UNIT)]);
 }
+
+/// Hosted objects (ACTOR_OBJECTS.md §2): a method returning a NON-portable
+/// object hosts it — the answer is a live sub-proxy — and sub-proxies pass
+/// back in as live references. Errors carry the worker's stack.
+const POOL_UNIT: &str = r#"
+Cell <- { |@value|
+    init -> { @value = 0 };
+    put: -> { |v| @value = v; @value };
+    value -> { @value };
+    plus: -> { |other| @value + other.value };
+    boomCell -> { 'cell went boom'.throw }
+};
+Pool <- { |@made|
+    init -> { @made = 0 };
+    makeCell -> { @made = @made + 1; Cell.new };
+    made -> { @made };
+    sum: -> { |cell| cell.value + @made }
+};
+"#;
+
+const HOSTED_OBJECTS_SCRIPT: &str = r#"
+var ok = true;
+var p = WorkerService.host:'@pool.qn@' class:'Pool' backing:'@BACKING@';
+
+"* a non-portable return is HOSTED: the answer is a live sub-proxy
+var a = p.makeCell;
+var b = p.makeCell;
+((p.made) == 2).else:{ ok = false; 'FAIL: made'.print };
+((a.put:41) == 41).else:{ ok = false; 'FAIL: put'.print };
+((a.value) == 41).else:{ ok = false; 'FAIL: value'.print };
+((b.value) == 0).else:{ ok = false; 'FAIL: sub-proxies not isolated'.print };
+
+"* sub-proxies as ARGUMENTS travel as live references (same worker)
+((a.plus:b) == 41).else:{ ok = false; 'FAIL: proxy arg to sub-proxy'.print };
+((p.sum:a) == 43).else:{ ok = false; 'FAIL: proxy arg to root'.print };
+
+"* a hosted raise carries the worker's rendered stack as remoteStack
+var msg = { a.boomCell; 'no-error' }.catch:{ |e| e.s };
+(msg.contains?:'cell went boom').else:{ ok = false; ('FAIL msg: ' + msg).print };
+var blob = { a.boomCell; nil }.catch:{ |e| e.remoteStack };
+((blob != nil) && (blob.contains?:'worker')).else:{ ok = false; 'FAIL: remoteStack'.print };
+
+"* stop is worker-wide: afterwards EVERY proxy of the service refuses
+p.serviceStop;
+var after = { a.value; 'no-error' }.catch:{ |e|
+    (e.s.contains?:'stopped').if:{ 'stopped' } else:{ e.s }
+};
+(after == 'stopped').else:{ ok = false; ('FAIL after: ' + after).print };
+
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+
+#[test]
+fn service_hosts_returned_objects() {
+    let script = HOSTED_OBJECTS_SCRIPT.replace("@BACKING@", "thread");
+    assert_service_script_passes("hosted", &script, &[("pool.qn", POOL_UNIT)]);
+}
+
+#[test]
+fn service_hosts_returned_objects_process() {
+    let script = HOSTED_OBJECTS_SCRIPT.replace("@BACKING@", "process");
+    assert_service_script_passes("hosted_proc", &script, &[("pool.qn", POOL_UNIT)]);
+}

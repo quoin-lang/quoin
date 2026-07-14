@@ -67,13 +67,35 @@ pub enum ControlKind {
     PsTree,
 }
 
+/// One hosted-object dispatch request crossing to a worker
+/// (docs/internal/ACTOR_OBJECTS.md §2): a peer-protocol `Call` frame plus the
+/// reply lane its `CallReturn*` terminal comes back on. For thread backing the
+/// request IS the transport (owned `Msg` values over an in-memory lane — the
+/// §1 "same protocol, cheaper carrier" row); for process backing the
+/// conversation pumps carry the same frames over the socket.
+#[derive(Clone, Debug)]
+pub struct DispatchReq {
+    pub frame: quoin_ext_proto::Msg,
+    pub reply: async_channel::Sender<quoin_ext_proto::Msg>,
+}
+
+/// The worker link's reserved ops on the `Call` frame (`class_name` routes a
+/// hosted-object dispatch; these built-ins keep it empty).
+pub(crate) const OP_SEND: &str = "send";
+pub(crate) const OP_PS_TREE: &str = "psTree";
+/// Ends the hosted serve loop (`WorkerService`'s `serviceStop`). Shadows a
+/// hosted method of the same name by design — the proxy owns the selector.
+pub(crate) const OP_STOP: &str = "serviceStop";
+
 /// The worker-side half of the lanes, injected into the worker's `VmState`
 /// at boot: `Worker.receive` parks on `inbox_rx`, `Worker.send:` pushes to
-/// `outbox_tx`; the driver services `control_rx` (§13.3).
+/// `outbox_tx`; the driver services `control_rx` (§13.3); the hosted serve
+/// loop (`Worker.hostServe:`) parks on `dispatch_rx`.
 pub struct WorkerLink {
     pub inbox_rx: async_channel::Receiver<WorkerMsg>,
     pub outbox_tx: async_channel::Sender<WorkerMsg>,
     pub control_rx: async_channel::Receiver<ControlReq>,
+    pub dispatch_rx: async_channel::Receiver<DispatchReq>,
     /// True inside a PROCESS-backed worker: blocks refuse at the lane
     /// (templates are `Arc` references — meaningless across a process).
     pub process: bool,
@@ -104,6 +126,9 @@ pub struct WorkerChannels {
     pub outbox_rx: async_channel::Receiver<WorkerMsg>,
     pub done_rx: async_channel::Receiver<Result<WireData, String>>,
     pub control_tx: async_channel::Sender<ControlReq>,
+    /// Hosted-object dispatch (the service proxy's lane); unused by plain
+    /// workers, whose serve loop never reads the other end.
+    pub dispatch_tx: async_channel::Sender<DispatchReq>,
 }
 
 // Counters for the `VM.stats` 'workers' section. Message counts are bumped
@@ -460,6 +485,7 @@ fn stillborn_channels() -> WorkerChannels {
     let (_outbox_tx, outbox_rx) = async_channel::unbounded();
     let (done_tx, done_rx) = async_channel::bounded(1);
     let (control_tx, _control_rx) = async_channel::unbounded();
+    let (dispatch_tx, _dispatch_rx) = async_channel::unbounded();
     // `try_send` (send_blocking is compiled out on wasm): the lane is a fresh
     // bounded(1), so the one slot is guaranteed free.
     let _ = done_tx.try_send(Err("workers are not supported on this platform".to_string()));
@@ -468,6 +494,7 @@ fn stillborn_channels() -> WorkerChannels {
         outbox_rx,
         done_rx,
         control_tx,
+        dispatch_tx,
     }
 }
 

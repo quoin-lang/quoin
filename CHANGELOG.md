@@ -39,6 +39,14 @@ under **Changed**, with the migration.
 
 ### Changed
 
+- `WorkerService` (experimental): hosted services now speak the peer protocol and
+  gained **hosted object returns** — a hosted method that returns a non-portable
+  object no longer refuses: the object is kept in the worker and the caller gets a
+  live **sub-proxy** for it, usable like any receiver (including as an argument to
+  further calls on the same service, where it travels as a live reference; a dropped
+  proxy's object is released on the next call). Hosted errors now surface with the
+  worker's rendered stack as `ex.remoteStack`, and an unknown selector raises
+  MessageNotUnderstood naming it. `serviceStop` is now explicitly worker-wide.
 - Workers (experimental): the process-worker wire now speaks the **extension
   protocol's frames** instead of a bespoke envelope — one remote-peer protocol
   (`docs/internal/ACTOR_OBJECTS.md`). Two sockets per process worker: a conversation
