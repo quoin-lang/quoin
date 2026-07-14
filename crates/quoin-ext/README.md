@@ -136,12 +136,15 @@ folder the VM loads with `use name:*`:
 
 ```text
 greeter/
-  extension.toml    # [extension] command = "bin/greeter"  + namespace = "Greet"
+  quoin.toml    # [extension] command = "bin/greeter"  + namespace = "Greet"
   bin/greeter       # the built binary (or command = "python3", args = ["main.py"])
   init.qn           # optional Quoin glue run after the classes install
 ```
 
-Folders are found in `./quoin_packages/<name>/` or on `$QUOIN_PATH`. A package's classes
+Install a package with `qn pkg install <dir>` — it lands in `$QUOIN_HOME/packages/`
+(default `~/.quoin/packages/`), a built-in search root, and any `[bin]` manifest entries
+link into `$QUOIN_HOME/bin/` for your `PATH`. Ad-hoc folders also resolve from
+`./quoin_packages/<name>/` or `$QUOIN_PATH`. A package's classes
 always install **namespaced** (`[Greet]Greeter`) — packages cannot claim bare globals.
 Design and details: `docs/internal/EXT_PACKAGING.md`.
 

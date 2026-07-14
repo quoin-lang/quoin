@@ -123,6 +123,17 @@ pub struct FsResolver {
     self_root: PathBuf,
 }
 
+/// The per-user Quoin home: `$QUOIN_HOME`, defaulting to `$HOME/.quoin`. Holds the installed
+/// packages (`packages/` — the last `use` search root) and their linked executables (`bin/` —
+/// the directory users put on `PATH` once). `qn pkg install` writes here; `None` only when
+/// neither variable is set (then there simply is no user root).
+pub fn quoin_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("QUOIN_HOME") {
+        return Some(PathBuf::from(home));
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".quoin"))
+}
+
 impl FsResolver {
     /// `self_root` is the directory `use self:…` resolves against (the entry script's
     /// directory; the process CWD for the script-less modes — `repl`, `-e`, `test`).
@@ -133,9 +144,10 @@ impl FsResolver {
         }
     }
 
-    /// Roots searched for a named package `<name>/`: `./quoin_packages/` first, then each entry of
-    /// `$QUOIN_PATH` (platform path-separated). `docs/internal/EXT_PACKAGING.md` §6 — drop a folder on a
-    /// search path; no install/registry yet.
+    /// Roots searched for a named package `<name>/`: `./quoin_packages/` first, then each entry
+    /// of `$QUOIN_PATH` (platform path-separated), then the per-user install root
+    /// `$QUOIN_HOME/packages` (`qn pkg install`'s target) — project beats explicit path beats
+    /// installed. `docs/internal/EXT_PACKAGING.md` §6.
     ///
     /// Deliberately CWD-relative rather than `self_root`-relative: extension packaging is deferred
     /// past v0.1 (`docs/internal/RELEASE_PREP.md`), and following the script's directory would silently
@@ -145,22 +157,51 @@ impl FsResolver {
         if let Some(path) = std::env::var_os("QUOIN_PATH") {
             roots.extend(std::env::split_paths(&path));
         }
+        if let Some(home) = quoin_home() {
+            roots.push(home.join("packages"));
+        }
         roots
     }
 
-    /// If `package` names an **extension package** on the search path — a `<name>/` directory
-    /// holding an `extension.toml` — return its absolute directory; else `None`. The first matching
-    /// root wins. (`EXT_PACKAGING.md` §5: the resolver bakes the absolute dir into the synthesized
-    /// `loadPackage:` glue, so there is no "where am I on disk?" problem.)
-    fn ext_package_dir(&self, package: &str) -> Option<PathBuf> {
+    /// If `package` names a package on the search path — a `<name>/` directory holding a
+    /// `quoin.toml` — return its absolute directory; else `None`. The first matching root
+    /// wins: no version resolution, first-found shadows the rest (project-local beats
+    /// `$QUOIN_PATH` beats installed). (`EXT_PACKAGING.md` §5: the resolver bakes the
+    /// absolute dir into any synthesized glue, so there is no "where am I on disk?" problem.)
+    fn package_dir(&self, package: &str) -> Option<PathBuf> {
         for root in self.package_roots() {
             let dir = root.join(package);
-            if dir.join("extension.toml").is_file() {
+            if dir.join("quoin.toml").is_file() {
                 return std::fs::canonicalize(&dir).ok();
             }
         }
         None
     }
+}
+
+/// What a named package's `quoin.toml` provides, as the resolver needs it: an `[extension]`
+/// launch spec maps to the synthesized `loadPackage:` unit `*`; a `[lib]` section declares
+/// **source units** — `.qn` files loaded through the ordinary pipeline — rooted at
+/// `[lib].root` (default: the package root). No `[lib]` section, no source units: content
+/// is opt-in via the manifest, never inferred from stray `.qn` files.
+struct PackageShape {
+    has_extension: bool,
+    lib_root: Option<PathBuf>,
+}
+
+fn package_shape(dir: &std::path::Path) -> Option<PackageShape> {
+    let text = std::fs::read_to_string(dir.join("quoin.toml")).ok()?;
+    // A malformed manifest resolves to nothing here; the descriptive parse error surfaces
+    // on the `loadPackage:` path, which reads the manifest for real.
+    let value: toml::Value = text.parse().ok()?;
+    let lib_root = value.get("lib").map(|lib| {
+        let root = lib.get("root").and_then(|v| v.as_str()).unwrap_or(".");
+        dir.join(root)
+    });
+    Some(PackageShape {
+        has_extension: value.get("extension").is_some(),
+        lib_root,
+    })
 }
 
 impl Default for FsResolver {
@@ -180,16 +221,22 @@ impl PackageResolver for FsResolver {
             }
             Some(_) => {}
         }
-        // A named package: an extension package resolves to one synthesized line of glue — the
-        // whole-package unit is `*` (see `list`), and the resolver bakes in the absolute dir so the
-        // package loads itself without a "where am I?" lookup. `Extension loadPackage:` reads the
-        // manifest, spawns, installs the namespaced classes, and runs the package's `init.qn`.
+        // A named package. The synthetic unit `*` is the extension half: one synthesized
+        // line of glue (`Extension loadPackage:` reads the manifest, spawns, installs the
+        // namespaced classes, runs `init.qn`), with the absolute dir baked in so the package
+        // loads itself without a "where am I?" lookup. Any other path is a SOURCE unit,
+        // read from the `[lib]` root like a `std:`/`self:` file.
         let package = package?;
-        if path != "*" {
-            return None;
+        let dir = self.package_dir(package)?;
+        let shape = package_shape(&dir)?;
+        if path == "*" {
+            if !shape.has_extension {
+                return None;
+            }
+            return Some(format!("Extension.loadPackage: '{}';\n", dir.display()));
         }
-        let dir = self.ext_package_dir(package)?;
-        Some(format!("Extension.loadPackage: '{}';\n", dir.display()))
+        let lib_root = shape.lib_root?;
+        std::fs::read_to_string(lib_root.join(format!("{path}.qn"))).ok()
     }
 
     fn list(&self, package: Option<&str>, dir: &str) -> Option<Vec<String>> {
@@ -200,15 +247,31 @@ impl PackageResolver for FsResolver {
             Some("self") => return list_dir(&self.self_root.join(dir), dir),
             Some(_) => {}
         }
-        // A named extension package: `use pkg:*` (whole-package glob, empty dir) maps to one
-        // synthetic unit `*`, which `resolve` turns into the `loadPackage:` glue. (A sub-glob of a
-        // named package — non-empty `dir` — has no meaning here.)
+        // A named package's whole-package glob (`use pkg:*`, empty dir): the synthetic
+        // extension unit `*` first — classes install before any source unit runs, the same
+        // ordering `init.qn` gets — then the `[lib]` source units, UTF-8-sorted. `init` is
+        // never listed as a source unit (it is the extension hook, evaluated by
+        // `loadPackage:`). A sub-glob (`use pkg:dir/*`) lists inside the lib root.
         let package = package?;
+        let pkg_dir = self.package_dir(package)?;
+        let shape = package_shape(&pkg_dir)?;
         if !dir.is_empty() {
+            return list_dir(&shape.lib_root?.join(dir), dir);
+        }
+        let mut units = Vec::new();
+        if shape.has_extension {
+            units.push("*".to_string());
+        }
+        if let Some(lib_root) = &shape.lib_root {
+            let source_units = list_dir(lib_root, "")?;
+            units.extend(source_units.into_iter().filter(|u| u != "init"));
+        }
+        if units.is_empty() {
+            // A manifest with neither [extension] nor [lib] (e.g. a pure-[bin] program
+            // package) has nothing `use`-able — resolve to nothing, like an unknown name.
             return None;
         }
-        self.ext_package_dir(package)?;
-        Some(vec!["*".to_string()])
+        Some(units)
     }
 }
 

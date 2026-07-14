@@ -4,7 +4,7 @@ Status: **SHIPPED through extension-backed classes** — Tier 0 (gc-free `Host` 
 Tier 1 (UDS transport, structured values, host reach, crash/timeout isolation), and
 extension-backed classes with Rust + Python SDKs at parity (PRs 17-22 and follow-ons; see
 `QUOIN_TODO.md` `## Networking & Async I/O` for the live remaining-refinements list).
-Packaging has since shipped too — an extension is a `use`-able folder with an `extension.toml`
+Packaging has since shipped too — an extension is a `use`-able folder with an `quoin.toml`
 (`docs/internal/EXT_PACKAGING.md`), and `quoin_packages/adbc` + `quoin_packages/numpy` ship as real
 examples. Remaining from this design: **Tier 0.5** (publish the `quoin-ext`/`quoin-ext-proto` SDK
 crates — they are still internal path-dependencies), and the explicitly deferred SCM_RIGHTS

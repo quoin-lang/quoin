@@ -711,7 +711,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 }
 
 /// Slice 1 of extension packaging (`docs/internal/EXT_PACKAGING.md`): `Extension loadPackage:` loads a
-/// *folder* — an `extension.toml` (launch spec + namespace) plus an optional `init.qn` of Quoin
+/// *folder* — an `quoin.toml` (launch spec + namespace) plus an optional `init.qn` of Quoin
 /// glue. The `ext_vector` fixture is packaged here with namespace `Vec` and an `init.qn` that
 /// reopens the installed class to add a convenience method. Proves: classes install **namespaced**
 /// (`[Vec]Vector` — the binary only declares a simple `Vector`, never a bare global), `init.qn` runs
@@ -723,12 +723,12 @@ fn extension_load_package() {
     let pkg_dir = std::env::temp_dir().join(format!("qn_ext_pkg_{}", std::process::id()));
     std::fs::create_dir_all(&pkg_dir).expect("create package dir");
     std::fs::write(
-        pkg_dir.join("extension.toml"),
+        pkg_dir.join("quoin.toml"),
         format!(
             "[package]\nname = \"vectors\"\n\n[extension]\ncommand = \"{ext_bin}\"\nnamespace = \"Vec\"\n"
         ),
     )
-    .expect("write extension.toml");
+    .expect("write quoin.toml");
     // init.qn reopens the (namespaced) class to add a Quoin method composing a socket primitive:
     // `tripledSum` scales the vector by 3 (a socket `scale:` -> new instance) and sums it.
     std::fs::write(
@@ -778,12 +778,12 @@ fn extension_use_package() {
     let pkg = root.join("vectors");
     std::fs::create_dir_all(&pkg).expect("create package dir");
     std::fs::write(
-        pkg.join("extension.toml"),
+        pkg.join("quoin.toml"),
         format!(
             "[package]\nname = \"vectors\"\n\n[extension]\ncommand = \"{ext_bin}\"\nnamespace = \"Vec\"\n"
         ),
     )
-    .expect("write extension.toml");
+    .expect("write quoin.toml");
     std::fs::write(
         pkg.join("init.qn"),
         "[Vec]Vector <-- {\n    tripledSum -> { (self.scale:3.0).sum }\n}\n",
