@@ -456,8 +456,22 @@ work on NESTED calls (the 7a sidecar couldn't ride the host-op lane; the
 refusal is gone). Channel endpoints over the mailbox lane cross as
 `Call{op:"sendChan", recv: id}`. The process-refusal and the `ChanLink.process`
 flag are deleted — channels now cross every worker link, verified by process
-twins of the pool and service-seam tests. Still open for 7c: block-capture
-shipping (`PortableCapture::Channel`), a `VM.channels` live view.
+twins of the pool and service-seam tests.
+
+**7c (block-capture shipping) DEFERRED by decision (2026-07-14).** It turned out
+to be ergonomics, not capability: a service block that captures a channel already
+works fully — it fails the portability scan, takes the §3a handle path, and runs
+parent-side with direct channel access — and pool workers receive channels via
+`Worker.send:` (the fan-out tests' shape). The only addition would be the
+`Worker.start:{ … jobs.each:… }` one-liner. For whoever picks it up, the design
+wrinkle found in scoping: `PortableCapture::Channel` must rebuild
+CONTEXT-DEPENDENTLY — a remote rebuild wraps a relay endpoint, but a HANDLE-path
+rebuild happens locally in the owner and must resolve `hosted_get` back to the
+original channel (a self-pointing relay would be wrong), so rebuild context
+threads through `snapshot_block`/`rebuild_portable_value`; and `Worker.start:`
+needs `spawn_worker_with` split so the `ChanLink` exists before the snapshot
+ships captures. Also still open: a `VM.channels` live view (the `VM.claims`
+mirror).
 
 ## 7. Boundary profiling (diagnosing chattiness)
 
@@ -601,8 +615,9 @@ injection wrapper, which feeds recorded results instead of re-performing.
 7. **Cross-isolate channels** (thread peers first — pure lane relay; process peers via
    the socket). 7a DONE (2026-07-14): the whole semantic surface on thread links.
    7b DONE (same day): process links — `Msg::Chan`/`Arg::Chan` wire forms + a relay
-   socket per process worker; see §6's as-built notes. Remaining: 7c =
-   block-capture shipping.
+   socket per process worker; see §6's as-built notes. 7c (block-capture shipping)
+   DEFERRED by decision — ergonomics only; rationale and the rebuild-context
+   wrinkle recorded in §6.
 8. `WorkerService` reimplemented as sugar over `Worker.host:` (or deprecated into it).
 
 Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, since
