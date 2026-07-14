@@ -49,7 +49,7 @@ the REPL with `$doc Name` / `$doc Name.selector` — rather than duplicated here
 18. Tasks & the cooperative scheduler — `Task.spawn:`, `join`/`cancel`, round-robin at yield boundaries, parking parks the task
 19. Async — `sleep:`, `gather:`, `timeout:do:` (+ `onCancel:`), `joinAll:`
 20. Channels — rendezvous & buffered CSP, `close`, deadlock detection
-21. Workers, Parallel & Plan — isolates, `parallelCollect:`, task graphs, `WorkerService`
+21. Workers, Parallel & Plan — isolates, `parallelCollect:`, task graphs, `Worker.host:`
 
 ### Part VI — Networking & the web · [`06-networking-and-web.md`](06-networking-and-web.md)
 22. The I/O model — park-don't-block; what `use std:net/*` / `use std:web/*` load (tasks, gather & timeouts: Part V)

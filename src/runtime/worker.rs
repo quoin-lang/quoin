@@ -593,6 +593,36 @@ pub fn build_host_block_class() -> NativeClassBuilder {
         .doc("Invoke the parent block with a List of arguments (one round trip).")
 }
 
+/// Root a freshly created host object (id 1) and send the ready message
+/// carrying its class's MANIFEST (§2): the parent installs a real class from
+/// it, so proxy dispatch is ordinary method lookup, no VM hook.
+fn announce_root<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    root: Value<'gc>,
+    class_val: Value<'gc>,
+    class_name: &str,
+    outbox_tx: &async_channel::Sender<WorkerMsg>,
+) {
+    vm.hosted_insert(root);
+    let (instance, class_side) = manifest_selectors(class_val);
+    vm.hosted_announced.insert(class_name.to_string());
+    let _ = outbox_tx.try_send(WorkerMsg::Data(WireData::Map(vec![
+        ("ready".to_string(), WireData::Bool(true)),
+        (
+            "className".to_string(),
+            WireData::Str(class_name.to_string()),
+        ),
+        (
+            "instance".to_string(),
+            WireData::List(instance.into_iter().map(WireData::Str).collect()),
+        ),
+        (
+            "classSide".to_string(),
+            WireData::List(class_side.into_iter().map(WireData::Str).collect()),
+        ),
+    ])));
+}
+
 pub fn build_worker_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Worker", Some("Object"))
         .construct_with("use Worker.spawn: / Worker.start:")
@@ -619,29 +649,46 @@ pub fn build_worker_class() -> NativeClassBuilder {
             // The root hosted object (id 1): instantiation failures propagate
             // to the done lane exactly as any unit error does.
             let root = vm.call_method(mc, class_val, "new", Vec::new())?;
-            vm.hosted_insert(root);
-            // Ready — carrying the hosted class's MANIFEST (§2): the parent
-            // installs a real class from it, so proxy dispatch is ordinary
-            // method lookup, no VM hook.
-            let (instance, class_side) = manifest_selectors(class_val);
-            vm.hosted_announced.insert(class_name.clone());
-            let _ = outbox_tx.try_send(WorkerMsg::Data(WireData::Map(vec![
-                ("ready".to_string(), WireData::Bool(true)),
-                (
-                    "instance".to_string(),
-                    WireData::List(instance.into_iter().map(WireData::Str).collect()),
-                ),
-                (
-                    "classSide".to_string(),
-                    WireData::List(class_side.into_iter().map(WireData::Str).collect()),
-                ),
-            ])));
+            announce_root(vm, root, class_val, &class_name, &outbox_tx);
             Ok(Value::Nil)
         })
         .doc(
             "Worker side of a hosted service (used by the synthesized service unit): \
              instantiate the named class, root it in the hosted-object table, and \
              report ready. Not meant to be called directly.",
+        )
+        .class_method("hostBlockRoot", |vm, mc, _receiver, _args| {
+            let outbox_tx = match &vm.worker_link {
+                Some(link) => link.outbox_tx.clone(),
+                None => {
+                    return Err(QuoinError::Other(
+                        "Worker.hostBlockRoot: only runs inside a worker".into(),
+                    ));
+                }
+            };
+            let Some(pb) = vm.pending_host_block.take() else {
+                return Err(QuoinError::Other(
+                    "Worker.hostBlockRoot: no host block was shipped".into(),
+                ));
+            };
+            // Rebuild AFTER the unit (if any) loaded, so the block's global
+            // references resolve against it; run it; host what it answers.
+            let block_val = rebuild_portable_value(vm, mc, &pb).map_err(QuoinError::Other)?;
+            let root = vm.call_method_mnu(mc, block_val, "value", Vec::new())?;
+            let Value::Object(obj) = root else {
+                return Err(QuoinError::Other(format!(
+                    "Worker.host:with: the block must answer an object to host, got {root}"
+                )));
+            };
+            let class_val = Value::Class(obj.borrow().class);
+            let class_name = obj.borrow().class_name().to_string();
+            announce_root(vm, root, class_val, &class_name, &outbox_tx);
+            Ok(Value::Nil)
+        })
+        .doc(
+            "Worker side of a block-form host (used by the synthesized unit): run the \
+             shipped block, root the object it answers, and report ready with its \
+             class's manifest. Not meant to be called directly.",
         )
         .class_method("hostServeLane", |vm, mc, _receiver, _args| {
             let dispatch_rx = match &vm.worker_link {
@@ -1035,6 +1082,104 @@ pub fn build_worker_class() -> NativeClassBuilder {
              lane (deep-copied). Raises when not inside a worker, or when the parent has \
              gone away. Answers nil.",
         )
+        // ---- hosting (ACTOR_OBJECTS.md §2): worker-resident objects behind
+        // real installed proxy classes.
+        .class_method("host:class:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let class_name = crate::runtime::worker_service::string_arg(args[1], "the class name")?;
+            crate::runtime::worker_service::host_class(
+                vm, mc, receiver, path, class_name, "thread", 1,
+            )
+        })
+        .doc(
+            "Host an object in a dedicated worker isolate: spawn a worker running the \
+             unit, instantiate the named class in it (`TheClass.new`), and answer a \
+             PROXY -- a real class installed from the worker's manifest, whose method \
+             sends park and cross the boundary. Sticky state, serialized per object: \
+             an actor. Errors raise catchably with the worker's stack as \
+             `ex.remoteStack`; `serviceStop` ends the worker.\n\n\
+             ```\n\
+             var index = Worker.host:'search/index.qn' class:'SearchIndex';\n\
+             index.add:doc;\n\
+             var hits = index.query:'quoin'\n\
+             ```",
+        )
+        .class_method("host:class:lanes:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let class_name = crate::runtime::worker_service::string_arg(args[1], "the class name")?;
+            let lanes = crate::runtime::worker_service::lanes_arg(args[2])?;
+            crate::runtime::worker_service::host_class(
+                vm, mc, receiver, path, class_name, "thread", lanes,
+            )
+        })
+        .doc(
+            "As `host:class:` with N concurrent lanes (docs/internal/ACTOR_OBJECTS.md \
+             section 5): calls to DIFFERENT hosted objects overlap, up to N in flight; \
+             calls to one object still serialize (its mailbox). Worker-side, each lane \
+             is a cooperative fiber.",
+        )
+        .class_method("host:class:backing:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let class_name = crate::runtime::worker_service::string_arg(args[1], "the class name")?;
+            let backing = crate::runtime::worker_service::backing_arg(args[2])?;
+            crate::runtime::worker_service::host_class(
+                vm, mc, receiver, path, class_name, backing, 1,
+            )
+        })
+        .doc(
+            "As `host:class:`, choosing the backing: 'thread' (the default) or 'process' \
+             (a child qn process -- the escape from the in-process thread ceiling).",
+        )
+        .class_method("host:class:backing:lanes:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let class_name = crate::runtime::worker_service::string_arg(args[1], "the class name")?;
+            let backing = crate::runtime::worker_service::backing_arg(args[2])?;
+            let lanes = crate::runtime::worker_service::lanes_arg(args[3])?;
+            crate::runtime::worker_service::host_class(
+                vm, mc, receiver, path, class_name, backing, lanes,
+            )
+        })
+        .doc(
+            "Backing and lanes together: N concurrent lanes on either backing, with \
+             identical semantics -- calls to one object serialize, calls to different \
+             objects overlap.",
+        )
+        .class_method("host:with:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            crate::runtime::worker_service::host_block(vm, mc, receiver, Some(path), args[1], 1)
+        })
+        .doc(
+            "Host with an INIT BLOCK: spawn a worker running the unit, ship the \
+             portable block, run it there, and host the object it answers -- real \
+             constructor arguments for hosted objects. Thread-backed only (a block \
+             cannot ship to a process).\n\n\
+             ```\n\
+             var pool = Worker.host:'db.qn' with:{ Pool.new:{ size = 8 } }\n\
+             ```",
+        )
+        .class_method("host:with:lanes:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let lanes = crate::runtime::worker_service::lanes_arg(args[2])?;
+            crate::runtime::worker_service::host_block(vm, mc, receiver, Some(path), args[1], lanes)
+        })
+        .doc("As `host:with:` with N concurrent lanes.")
+        .class_method("with:", |vm, mc, receiver, args| {
+            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], 1)
+        })
+        .doc(
+            "Host the object a portable block answers, with no unit -- `host:with:` \
+             without the host: the block runs in a fresh worker that booted qnlib \
+             only, so it can reach stdlib classes but not the parent's definitions \
+             (put those in a unit and use `host:with:`). Thread-backed only.\n\n\
+             ```\n\
+             var clock = Worker.with:{ Timer.new }\n\
+             ```",
+        )
+        .class_method("with:lanes:", |vm, mc, receiver, args| {
+            let lanes = crate::runtime::worker_service::lanes_arg(args[1])?;
+            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], lanes)
+        })
+        .doc("As `with:` with N concurrent lanes.")
         .class_method("worker?", |vm, mc, _receiver, _args| {
             Ok(vm.new_bool(mc, vm.worker_link.is_some()))
         })

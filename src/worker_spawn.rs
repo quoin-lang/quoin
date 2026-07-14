@@ -96,6 +96,41 @@ pub fn spawn_worker_service(path: String, class_name: String, lanes: u32) -> Wor
     spawn_worker_with(move |link| run_worker_service(&path, &class_name, lanes, link))
 }
 
+/// Spawn a hosted-BLOCK worker (`Worker.host:'unit.qn' with:{ … }` /
+/// `Worker.with:{ … }`): boot, load the unit if any, then run the shipped
+/// block via `Worker.hostBlockRoot` and host the object it answers.
+pub fn spawn_worker_hosted_block(
+    path: Option<String>,
+    pb: PortableBlock,
+    lanes: u32,
+) -> WorkerChannels {
+    spawn_worker_with(move |link| run_worker_hosted_block(path.as_deref(), pb, lanes, link))
+}
+
+fn run_worker_hosted_block(
+    path: Option<&str>,
+    pb: PortableBlock,
+    lanes: u32,
+    link: WorkerLink,
+) -> Result<WireData, String> {
+    let unit_source = match path {
+        Some(p) => {
+            std::fs::read_to_string(PathBuf::from(p)).map_err(|e| format!("host unit {p}: {e}"))?
+        }
+        None => String::new(),
+    };
+    let thunks = "{ Worker.hostServeLane } ".repeat(lanes.max(1) as usize);
+    let source = format!(
+        "{unit_source}
+Worker.hostBlockRoot;
+Async.gather:#( {thunks});
+"
+    );
+    run_worker_source_with(path.unwrap_or("{host block}"), &source, link, move |vm| {
+        vm.pending_host_block = Some(pb);
+    })
+}
+
 pub(crate) fn run_worker_service(
     path: &str,
     class_name: &str,
@@ -138,6 +173,17 @@ fn canonical_unit(path: &str) -> String {
 }
 
 fn run_worker_source(path: &str, source: &str, link: WorkerLink) -> Result<WireData, String> {
+    run_worker_source_with(path, source, link, |_| {})
+}
+
+/// As `run_worker_source`, with a post-boot hook run on the fresh VM before
+/// the program starts (the hosted-block spawn stashes its shipped block here).
+fn run_worker_source_with(
+    path: &str,
+    source: &str,
+    link: WorkerLink,
+    prepare: impl FnOnce(&mut VmState<'_>),
+) -> Result<WireData, String> {
     let ast = try_parse_quoin_string_named(source, path)
         .map_err(|e| format!("worker unit {path}: parse error: {e}"))?;
     let NodeValue::Program(program_node) = &ast.value else {
@@ -145,6 +191,14 @@ fn run_worker_source(path: &str, source: &str, link: WorkerLink) -> Result<WireD
     };
 
     let mut arena = boot_worker_arena(link)?;
+    {
+        let mut prepare = Some(prepare);
+        arena.mutate_root(|_mc, vm| {
+            if let Some(p) = prepare.take() {
+                p(vm);
+            }
+        });
+    }
     let unit = canonical_unit(path);
     arena.mutate_root(|_mc, vm| vm.unit_path = Some(unit));
 

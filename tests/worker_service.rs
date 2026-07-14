@@ -58,7 +58,7 @@ fn service_state_errors_and_stop() {
     let script = r#"
 Marker <- { x -> { 1 } };
 var ok = true;
-var c = WorkerService.host:'@counter.qn@' class:'Counter';
+var c = Worker.host:'@counter.qn@' class:'Counter';
 
 "* sticky state across ordinary sends
 ((c.add:5) == 5).else:{ ok = false };
@@ -98,7 +98,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_serializes_concurrent_callers() {
     let script = r#"
 var ok = true;
-var c = WorkerService.host:'@counter.qn@' class:'Counter';
+var c = Worker.host:'@counter.qn@' class:'Counter';
 var outs = Async.gather:#(
     { c.slowAdd:1 } { c.slowAdd:1 } { c.slowAdd:1 } { c.slowAdd:1 }
     { c.slowAdd:1 } { c.slowAdd:1 } { c.slowAdd:1 } { c.slowAdd:1 }
@@ -120,19 +120,19 @@ fn service_boot_failures_and_reserved_backing() {
     let script = r#"
 var ok = true;
 "* missing unit file: host: raises, catchable
-var miss = { WorkerService.host:'/nonexistent/nope.qn' class:'Counter'; 'hosted' }
+var miss = { Worker.host:'/nonexistent/nope.qn' class:'Counter'; 'hosted' }
     .catch:{ |e| 'boot-error' };
 (miss == 'boot-error').else:{ ok = false };
 "* unit loads but the class doesn't exist
-var noClass = { WorkerService.host:'@counter.qn@' class:'NoSuchClass'; 'hosted' }
+var noClass = { Worker.host:'@counter.qn@' class:'NoSuchClass'; 'hosted' }
     .catch:{ |e| 'no-class' };
 (noClass == 'no-class').else:{ ok = false };
 "* class names must be plain identifiers (they are interpolated)
-var inject = { WorkerService.host:'@counter.qn@' class:'X; 1.print'; 'hosted' }
+var inject = { Worker.host:'@counter.qn@' class:'X; 1.print'; 'hosted' }
     .catch:{ |e| 'refused' };
 (inject == 'refused').else:{ ok = false };
 "* process backing is REAL now (§13): host, call, stop over the wire
-var pc = WorkerService.host:'@counter.qn@' class:'Counter' backing:'process';
+var pc = Worker.host:'@counter.qn@' class:'Counter' backing:'process';
 ((pc.add:3) == 3).else:{ ok = false };
 pc.serviceStop;
 ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
@@ -167,7 +167,7 @@ Pool <- { |@made @stash|
 
 const HOSTED_OBJECTS_SCRIPT: &str = r#"
 var ok = true;
-var p = WorkerService.host:'@pool.qn@' class:'Pool' backing:'@BACKING@';
+var p = Worker.host:'@pool.qn@' class:'Pool' backing:'@BACKING@';
 
 "* a non-portable return is HOSTED: the answer is a live sub-proxy
 var a = p.makeCell;
@@ -197,6 +197,61 @@ var after = { a.value; 'no-error' }.catch:{ |e|
 ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
 
+/// The block host forms (slice 8): `host:'unit' with:{ … }` gives hosted
+/// objects real constructor arguments (the block ships and runs IN the
+/// worker after its unit loads); bare `with:{ … }` hosts a qnlib-only object
+/// with no unit at all. Non-objects, unportable blocks, and parent-defined
+/// globals all refuse with clear errors.
+#[test]
+fn worker_host_block_forms() {
+    const SIZED_UNIT: &str = r#"
+Sized <- { |@size|
+    init -> { @size = 0 };
+    size -> { @size };
+    size: -> { |n| @size = n; self }
+};
+"#;
+    let script = r#"
+Marker <- { x -> { 1 } };
+var ok = true;
+
+"* host:with: — the init block runs IN the worker: real constructor args
+var cfg = 6;
+var s = Worker.host:'@sized.qn@' with:{ Sized.new.size:cfg };
+((s.size) == 6).else:{ ok = false; ('FAIL size: ' + s.size.s).print };
+((s.class.name.s) == 'Sized').else:{ ok = false; 'FAIL: class name'.print };
+s.serviceStop;
+
+"* host:with:lanes: — the lanes variant of the same
+var s2 = Worker.host:'@sized.qn@' with:{ Sized.new.size:1 } lanes:2;
+((s2.size) == 1).else:{ ok = false; 'FAIL: lanes form'.print };
+s2.serviceStop;
+
+"* bare with: — no unit, qnlib classes only; a hosted stdlib Map is an actor
+var m = Worker.with:{ #{} };
+m.at:'x' put:41;
+((m.at:'x') == 41).else:{ ok = false; 'FAIL: hosted map'.print };
+m.serviceStop;
+
+"* a parent-defined global in the block errors clearly (workers boot qnlib)
+var bad = { Worker.with:{ Marker.new }; 'hosted' }.catch:{ |e| e.s };
+(bad.contains?:'not defined in the worker')
+    .else:{ ok = false; ('FAIL bad: ' + bad).print };
+
+"* a block answering a non-object refuses
+var prim = { Worker.with:{ 42 }; 'hosted' }.catch:{ |e| 'refused' };
+(prim == 'refused').else:{ ok = false; 'FAIL: primitive host'.print };
+
+"* an unportable block refuses at the seam
+var w = 0;
+var unport = { Worker.with:{ w = 1; #{} }; 'hosted' }.catch:{ |e| 'refused' };
+(unport == 'refused').else:{ ok = false; 'FAIL: unportable'.print };
+
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("block_forms", script, &[("sized.qn", SIZED_UNIT)]);
+}
+
 /// Hosted manifests (ACTOR_OBJECTS.md §2): proxies are REAL installed classes
 /// — the VM dispatch hook is gone. Introspection answers the manifest, misses
 /// are honest MNUs, `==` is hosted-object identity (the worker table dedupes),
@@ -207,7 +262,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_manifest_classes() {
     let script = r#"
 var ok = true;
-var p = WorkerService.host:'@pool.qn@' class:'Pool';
+var p = Worker.host:'@pool.qn@' class:'Pool';
 
 "* the proxy's class is a REAL class named after the hosted one, and
 "* introspection answers the manifest without any round trip
@@ -284,7 +339,7 @@ fn service_block_args() {
     let script = r#"
 GHelper <- { twice: -> { |n| n * 2 } };
 var ok = true;
-var r = WorkerService.host:'@runner.qn@' class:'Runner';
+var r = Worker.host:'@runner.qn@' class:'Runner';
 
 "* a portable block ships and runs worker-side
 ((r.apply:{ |n| n * 3 } to:14) == 42).else:{ ok = false; 'FAIL: apply'.print };
@@ -324,7 +379,7 @@ y = 100;
     .else:{ ok = false; 'FAIL: nested'.print };
 
 "* ...and into a DIFFERENT service
-var other = WorkerService.host:'@runner.qn@' class:'Runner';
+var other = Worker.host:'@runner.qn@' class:'Runner';
 ((r.apply:{ |n| other.double:n } to:7) == 14)
     .else:{ ok = false; 'FAIL: other service'.print };
 other.serviceStop;
@@ -364,7 +419,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_block_args_process() {
     let script = r#"
 var ok = true;
-var r = WorkerService.host:'@runner.qn@' class:'Runner' backing:'process';
+var r = Worker.host:'@runner.qn@' class:'Runner' backing:'process';
 
 "* blocks cross a PROCESS boundary as handles: the block runs in the
 "* PARENT, driven over the socket, seeing its captures live
@@ -408,7 +463,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_lanes_overlap_and_serialize() {
     let script = r#"
 var ok = true;
-var r = WorkerService.host:'@runner.qn@' class:'Runner' lanes:4;
+var r = Worker.host:'@runner.qn@' class:'Runner' lanes:4;
 var m = r.mate;
 
 "* two lanes genuinely overlap: a slow call on one object does not delay a
@@ -462,7 +517,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_nested_rides_bound_lane() {
     let script = r#"
 var ok = true;
-var r = WorkerService.host:'@runner.qn@' class:'Runner';
+var r = Worker.host:'@runner.qn@' class:'Runner';
 var m = r.mate;
 ((r.apply:{ |n| m.double:n } to:9) == 18)
     .else:{ ok = false; 'FAIL: nested cross-object'.print };
@@ -480,7 +535,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_lanes_process() {
     let script = r#"
 var ok = true;
-var r = WorkerService.host:'@runner.qn@' class:'Runner' backing:'process' lanes:3;
+var r = Worker.host:'@runner.qn@' class:'Runner' backing:'process' lanes:3;
 var m = r.mate;
 
 "* two lanes genuinely overlap over the socket pair
@@ -523,7 +578,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_mutual_call_deadlock_detected_process() {
     let script = r#"
 var ok = true;
-var r = WorkerService.host:'@runner.qn@' class:'Runner' backing:'process' lanes:2;
+var r = Worker.host:'@runner.qn@' class:'Runner' backing:'process' lanes:2;
 var a = r.mate;
 var b = r.mate;
 var ta = Task.spawn:{ { (a.apply:{ |n| Async.sleep:80; b.double:n } to:1).s }.catch:{ |e| e.s } };
@@ -549,7 +604,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_mutual_call_deadlock_detected() {
     let script = r#"
 var ok = true;
-var r = WorkerService.host:'@runner.qn@' class:'Runner' lanes:2;
+var r = Worker.host:'@runner.qn@' class:'Runner' lanes:2;
 var a = r.mate;
 var b = r.mate;
 

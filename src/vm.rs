@@ -757,6 +757,11 @@ pub struct VmState<'gc> {
     /// registry is their GC root (and, through their method nodes, the
     /// services' root).
     pub service_classes: Vec<ServiceClassEntry<'gc>>,
+    /// WORKER-side: the shipped block a `Worker.host:with:` / `Worker.with:`
+    /// spawn carries — taken by `Worker.hostBlockRoot` once the unit (if any)
+    /// has loaded, so the block's global references resolve against it.
+    #[collect(require_static)]
+    pub pending_host_block: Option<crate::worker::PortableBlock>,
     /// WORKER-side: hosted class names whose selector manifests this worker
     /// has already sent (the ready message or a `CallReturnResourceDecl`);
     /// later returns of the same class carry only the name.
@@ -918,6 +923,7 @@ impl<'gc> VmState<'gc> {
             handle_table: crate::handle_table::HandleTable::new(),
             hosted: Vec::new(),
             service_classes: Vec::new(),
+            pending_host_block: None,
             hosted_announced: std::collections::HashSet::new(),
         }
     }

@@ -39,6 +39,20 @@ under **Changed**, with the migration.
 
 ### Changed
 
+- **`WorkerService` is removed; hosting lives on `Worker`** (experimental,
+  breaking). The class-form constructor moved verbatim — write
+  `Worker.host:'unit.qn' class:'Pool'` (plus the `backing:`/`lanes:` variants)
+  where `WorkerService.host:class:` used to be — and hosting gained **block
+  forms**: `Worker.host:'unit.qn' with:{ Pool.new:cfg }` runs the portable block
+  *in* the worker after its unit loads and hosts the object it answers (real
+  constructor arguments, at last), and bare `Worker.with:{ … }` is the unit-less
+  version (qnlib classes only; block forms are thread-backed only). Proxies are
+  now **real installed classes** built from a manifest the worker sends at
+  ready: introspection (`can?:`, `class.name`) answers locally, an unknown
+  selector raises an honest MessageNotUnderstood instead of a round trip,
+  class-side selectors dispatch to the hosted class, `==` compares hosted-object
+  identity, and classes appearing for the first time in a return install
+  themselves lazily — even a returned Block works, with remote `value:`.
 - `WorkerService` (experimental): hosted services now speak the peer protocol and
   gained **hosted object returns** — a hosted method that returns a non-portable
   object no longer refuses: the object is kept in the worker and the caller gets a

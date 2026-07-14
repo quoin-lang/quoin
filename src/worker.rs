@@ -685,7 +685,8 @@ pub type ChildGrip = std::sync::Arc<std::sync::Mutex<Option<std::process::Child>
 mod worker_spawn;
 #[cfg(not(target_arch = "wasm32"))]
 pub use worker_spawn::{
-    spawn_worker, spawn_worker_block, spawn_worker_process, spawn_worker_service, worker_serve_main,
+    spawn_worker, spawn_worker_block, spawn_worker_hosted_block, spawn_worker_process,
+    spawn_worker_service, worker_serve_main,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -723,6 +724,15 @@ pub fn spawn_worker_block(_job: PortableBlock) -> WorkerChannels {
 
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_worker_service(_path: String, _class_name: String, _lanes: u32) -> WorkerChannels {
+    dead_letter_channels()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn spawn_worker_hosted_block(
+    _path: Option<String>,
+    _pb: PortableBlock,
+    _lanes: u32,
+) -> WorkerChannels {
     dead_letter_channels()
 }
 

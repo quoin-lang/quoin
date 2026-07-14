@@ -62,8 +62,10 @@ counter.value                    "* -> 1
 ```
 
 - `Worker.host:` evaluates the block **in the worker** (it is a portable block — the
-  submit-time scan applies) and hosts the resulting object; the parent receives a proxy
-  whose unknown selectors forward as `Call`s — the MNU seam `WorkerService` already uses.
+  submit-time scan applies) and hosts the resulting object; the parent receives a proxy.
+  (As built: a real installed class from the worker's manifest — see §10's decoupling
+  entry; the shipped surface is `host:class:` / `host:with:` / `with:`, each ±lanes,
+  class form ±backing.)
 - Sends park; concurrency is blocks and channels (stance guarantee 3). The mailbox is
   the fair-queued claim machinery from PR #11, replacing the one-token channel — waiters
   park FIFO with epoch identity, nested re-entry composes, depth-capped. The claim is
@@ -619,6 +621,15 @@ injection wrapper, which feeds recorded results instead of re-performing.
    DEFERRED by decision — ergonomics only; rationale and the rebuild-context
    wrinkle recorded in §6.
 8. `WorkerService` reimplemented as sugar over `Worker.host:` (or deprecated into it).
+   DONE (2026-07-14, the other way round): `WorkerService` is REMOVED (Damon's call —
+   it complicated the documentation); hosting lives on `Worker` as the §2 surface:
+   `host:class:` (+backing/lanes), `host:with:` (+lanes — the init-block form: the
+   portable block ships, runs after the unit loads, and its answer is hosted), and
+   the unit-less `with:` (+lanes). Block forms are thread-only by construction (a
+   block cannot ship to a process, and the handle fallback would create the object
+   in the parent). The block-form worker body stashes the shipped `PortableBlock`
+   in a VM slot and synthesizes `Worker.hostBlockRoot` + the lane gather; the ready
+   message carries the class NAME too, since the parent cannot know it up front.
 
 Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, since
 "restart the isolate and re-host" is where proxy lifetime and supervision meet.

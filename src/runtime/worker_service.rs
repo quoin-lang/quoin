@@ -76,7 +76,7 @@ use crate::runtime::extension::{
 };
 use crate::runtime::worker::block_parts;
 use crate::symbol::Symbol;
-use crate::value::{AnyCollect, NativeClassBuilder, Value};
+use crate::value::{AnyCollect, Value};
 use crate::vm::VmState;
 use crate::vm_scheduler::{TaskId, Wake};
 use crate::worker::{
@@ -852,7 +852,10 @@ fn sub_proxy<'gc>(
     )
 }
 
-fn host<'gc>(
+/// `Worker.host:'unit.qn' class:'Pool'` (+ backing/lanes variants): spawn a
+/// worker running the unit, instantiate the named class in it, host the
+/// instance, and answer the root proxy.
+pub(crate) fn host_class<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
@@ -862,7 +865,7 @@ fn host<'gc>(
     lanes: u32,
 ) -> Result<Value<'gc>, QuoinError> {
     let Value::Class(_) = receiver else {
-        return Err(QuoinError::Other("WorkerService: bad receiver".into()));
+        return Err(QuoinError::Other("Worker.host: bad receiver".into()));
     };
     let (ch, pid) = match backing {
         "process" => {
@@ -876,6 +879,53 @@ fn host<'gc>(
             None,
         ),
     };
+    finish_host(vm, mc, ch, pid, backing, lanes, &path, Some(class_name))
+}
+
+/// The block forms — `Worker.host:'unit.qn' with:{ Pool.new:cfg }` and the
+/// unit-less `Worker.with:{ Timer.new }`: the PORTABLE block ships to the
+/// worker, runs there after its unit loads, and the object it answers is
+/// hosted as the root. Thread-only: a block cannot ship to a process, and
+/// the handle fallback would run it in the PARENT — precisely the wrong
+/// place to create the object being hosted.
+pub(crate) fn host_block<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    path: Option<String>,
+    block: Value<'gc>,
+    lanes: u32,
+) -> Result<Value<'gc>, QuoinError> {
+    let Value::Class(_) = receiver else {
+        return Err(QuoinError::Other("Worker.host: bad receiver".into()));
+    };
+    let Some((template, parent_env)) = crate::runtime::worker::block_parts(block) else {
+        return Err(QuoinError::Other(
+            "Worker.host:with: expects a Block (the object to host is its answer)".into(),
+        ));
+    };
+    let pb = snapshot_block(template, parent_env, 0)
+        .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
+    let label_path = path.clone().unwrap_or_else(|| "{block}".to_string());
+    let ch = crate::worker::spawn_worker_hosted_block(path, pb, lanes);
+    finish_host(vm, mc, ch, None, "thread", lanes, &label_path, None)
+}
+
+/// The shared back half of hosting: registry rows, the ready/manifest
+/// handshake, claim + boundary + relay registration, and the installed-class
+/// two-step that mints the root proxy. `class_name_hint` is the class form's
+/// argument; the block form learns the class from the ready message.
+#[allow(clippy::too_many_arguments)] // the two host forms thread their full spawn context
+fn finish_host<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    ch: crate::worker::WorkerChannels,
+    pid: Option<u32>,
+    backing: &'static str,
+    lanes: u32,
+    path: &str,
+    class_name_hint: Option<String>,
+) -> Result<Value<'gc>, QuoinError> {
     // Disambiguate the display label when several services host the same
     // unit: the first keeps the bare label, later ones gain an ordinal —
     // otherwise their VM.claims / boundary / ps rows are indistinguishable.
@@ -910,22 +960,30 @@ fn host<'gc>(
     // hosted class's MANIFEST (name + selector lists — ACTOR_OBJECTS.md §2); a
     // closed lane instead means boot/compile/instantiation failed — the done
     // lane says why. Parks, so slow boots don't block other tasks.
-    let (instance_selectors, class_selectors) =
+    let (ready_class, instance_selectors, class_selectors) =
         match vm.await_io(IoRequest::WorkerRecv(ch.outbox_rx.clone()))? {
             IoResult::WorkerMsg(Some(msg)) => parse_ready_manifest(&msg),
             IoResult::WorkerMsg(None) => {
                 let why = match vm.await_io(IoRequest::WorkerJoin(ch.done_rx.clone()))? {
                     IoResult::WorkerDone(Err(msg)) => msg,
-                    _ => "the service exited before reporting ready".to_string(),
+                    _ => "the worker exited before reporting ready".to_string(),
                 };
-                return Err(QuoinError::Other(format!("WorkerService.host: {why}")));
+                return Err(QuoinError::Other(format!("Worker.host: {why}")));
             }
             other => {
                 return Err(QuoinError::Other(format!(
-                    "WorkerService.host: unexpected result {other:?}"
+                    "Worker.host: unexpected result {other:?}"
                 )));
             }
         };
+    let class_name = match class_name_hint.or(ready_class) {
+        Some(n) => n,
+        None => {
+            return Err(QuoinError::Other(
+                "Worker.host: the worker did not report a hosted class".into(),
+            ));
+        }
+    };
     // Claims: the §5.1 machinery, one per worker, registered for VM.claims
     // and the cross-peer cycle walk; boundary rows registered beside the
     // extensions' (§7 — one diagnosis surface).
@@ -980,12 +1038,13 @@ fn host<'gc>(
     Ok(proxy)
 }
 
-/// Pull the selector lists out of the ready message (absent lists — a plain
-/// `ready: true` — decode as empty, leaving a proxy that answers only the
-/// proxy-owned selectors).
-fn parse_ready_manifest(msg: &crate::worker::WorkerMsg) -> (Vec<String>, Vec<String>) {
+/// Pull the hosted class name and selector lists out of the ready message
+/// (absent pieces — a plain `ready: true` — decode as empty/None).
+fn parse_ready_manifest(
+    msg: &crate::worker::WorkerMsg,
+) -> (Option<String>, Vec<String>, Vec<String>) {
     let crate::worker::WorkerMsg::Data(WireData::Map(entries)) = msg else {
-        return (Vec::new(), Vec::new());
+        return (None, Vec::new(), Vec::new());
     };
     let strings = |key: &str| -> Vec<String> {
         entries
@@ -1003,7 +1062,14 @@ fn parse_ready_manifest(msg: &crate::worker::WorkerMsg) -> (Vec<String>, Vec<Str
             })
             .unwrap_or_default()
     };
-    (strings("instance"), strings("classSide"))
+    let name = entries
+        .iter()
+        .find(|(k, _)| k == "className")
+        .and_then(|(_, v)| match v {
+            WireData::Str(s) => Some(s.clone()),
+            _ => None,
+        });
+    (name, strings("instance"), strings("classSide"))
 }
 
 /// `serviceStop`'s drain: park until every lane is home (each in-flight
@@ -1042,112 +1108,37 @@ fn drain_lanes<'gc>(
     Ok(())
 }
 
-fn backing_arg<'gc>(v: Value<'gc>) -> Result<&'static str, QuoinError> {
+pub(crate) fn backing_arg<'gc>(v: Value<'gc>) -> Result<&'static str, QuoinError> {
     match string_arg(v, "the backing")?.as_str() {
         "thread" => Ok("thread"),
         "process" => Ok("process"),
         other => Err(QuoinError::Other(format!(
-            "WorkerService: unknown backing '{other}' (thread|process)"
+            "Worker.host: unknown backing '{other}' (thread|process)"
         ))),
     }
 }
 
-fn lanes_arg<'gc>(v: Value<'gc>) -> Result<u32, QuoinError> {
+pub(crate) fn lanes_arg<'gc>(v: Value<'gc>) -> Result<u32, QuoinError> {
     match v.as_i64() {
         Some(n) if (1..=1024).contains(&n) => Ok(n as u32),
         _ => Err(QuoinError::Other(
-            "WorkerService: lanes must be an Integer between 1 and 1024".into(),
+            "Worker.host: lanes must be an Integer between 1 and 1024".into(),
         )),
     }
 }
 
-fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, QuoinError> {
+pub(crate) fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, QuoinError> {
     match v {
         Value::Object(obj) => match &obj.borrow().payload {
             crate::value::ObjectPayload::String(s) => Ok((**s).clone()),
             _ => Err(QuoinError::Other(format!(
-                "WorkerService: {what} must be a String"
+                "Worker.host: {what} must be a String"
             ))),
         },
         _ => Err(QuoinError::Other(format!(
-            "WorkerService: {what} must be a String"
+            "Worker.host: {what} must be a String"
         ))),
     }
-}
-
-pub fn build_worker_service_class() -> NativeClassBuilder {
-    NativeClassBuilder::new("WorkerService", Some("Object"))
-        .construct_with("use WorkerService.host:class:")
-        .class_doc(
-            "Host a class in a dedicated worker isolate and get a PROXY whose ordinary \
-             method sends become peer-protocol calls: sticky state with serialized \
-             access -- an actor, effectively. Portable arguments and returns deep-copy; \
-             a method that returns a NON-portable object HOSTS it -- the answer is a \
-             sub-proxy addressing it, usable like any receiver (including as an argument \
-             to further calls on the same service). A BLOCK argument always crosses: a \
-             portable block ships to a thread-backed service and runs worker-side on a \
-             snapshot of its captures (one crossing however many invocations); any other \
-             block -- unportable, or bound for a process -- crosses as a HANDLE the worker \
-             invokes back in the parent, where write-captures see live state. Code the \
-             worker runs this way may call back into the service; the nested call rides \
-             the open conversation. Errors in the hosted method raise \
-             catchably at the call site, with the worker's stack as `ex.remoteStack`; \
-             one call runs at a time (concurrent callers queue fairly).\n\n\
-             ```\n\
-             var index = WorkerService.host:'search/index.qn' class:'SearchIndex';\n\
-             index.add:doc;\n\
-             var hits = index.query:'quoin'\n\
-             ```",
-        )
-        .class_method("host:class:", |vm, mc, receiver, args| {
-            let path = string_arg(args[0], "the unit path")?;
-            let class_name = string_arg(args[1], "the class name")?;
-            host(vm, mc, receiver, path, class_name, "thread", 1)
-        })
-        .doc(
-            "Spawn a worker running the unit at the path, instantiate the named class in it \
-             (`TheClass.new`), and answer the proxy once the service reports ready. Every \
-             selector the proxy doesn't define itself (everything except `serviceStop`) \
-             forwards as a call and parks for the reply, so calls compose with \
-             `Async.gather:` / `timeout:do:` like any parked wait.",
-        )
-        .class_method("host:class:lanes:", |vm, mc, receiver, args| {
-            let path = string_arg(args[0], "the unit path")?;
-            let class_name = string_arg(args[1], "the class name")?;
-            let lanes = lanes_arg(args[2])?;
-            host(vm, mc, receiver, path, class_name, "thread", lanes)
-        })
-        .doc(
-            "As `host:class:` with N concurrent lanes (docs/internal/ACTOR_OBJECTS.md \
-             \u{a7}5): calls to DIFFERENT objects of the service overlap, up to N in \
-             flight; calls to one object still serialize (its mailbox). Worker-side, \
-             each lane is a cooperative fiber -- an object parked on IO doesn't block \
-             its isolate-mates.",
-        )
-        .class_method("host:class:backing:", |vm, mc, receiver, args| {
-            let path = string_arg(args[0], "the unit path")?;
-            let class_name = string_arg(args[1], "the class name")?;
-            let backing = backing_arg(args[2])?;
-            host(vm, mc, receiver, path, class_name, backing, 1)
-        })
-        .doc(
-            "As `host:class:`, choosing the backing at spawn time: 'thread' (the default) \
-             or 'process' (a child qn process -- the escape from the in-process thread \
-             ceiling for compute-heavy services).",
-        )
-        .class_method("host:class:backing:lanes:", |vm, mc, receiver, args| {
-            let path = string_arg(args[0], "the unit path")?;
-            let class_name = string_arg(args[1], "the class name")?;
-            let backing = backing_arg(args[2])?;
-            let lanes = lanes_arg(args[3])?;
-            host(vm, mc, receiver, path, class_name, backing, lanes)
-        })
-        .doc(
-            "Backing and lanes together: N concurrent lanes on either backing. A \
-             process-backed service opens one conversation socket per lane; a \
-             thread-backed one runs one serve fiber per lane. Semantics are identical \
-             -- calls to one object serialize, calls to different objects overlap.",
-        )
 }
 
 /// The proxy-owned `serviceStop` (installed on every service class): flag +
