@@ -15,7 +15,12 @@ under **Changed**, with the migration.
   order); `QN_WAKE_REPLAY=<path>` re-runs the program forcing those decisions,
   reproducing a recorded concurrent execution exactly — the groundwork for deterministic
   replay debugging (`docs/internal/ACTOR_OBJECTS.md` §8). `QN_WAKE_LOG=1` keeps a ring
-  of recent wake events and dumps it when the scheduler reports a global deadlock.
+  of recent wake events and dumps it when the scheduler reports a global deadlock;
+  `QN_WAKE_DEBUG=1` traces deliveries. Scope: replay re-performs real I/O and forces
+  its order, so it covers programs whose external inputs are deterministic (timers,
+  channels, file reads, schedule races); timing-dependent externals (extensions,
+  sockets, subprocesses) report a divergence naming the mismatched op — replaying
+  those needs result injection, a later arc.
 - Extensions (experimental): **cross-process stack traces**. A failed extension call now
   carries an opaque stack blob — a Python extension sends its real traceback, a Rust one
   its error chain under a dispatch-frame line, and failures that cross the boundary
@@ -26,6 +31,11 @@ under **Changed**, with the migration.
 
 ### Changed
 
+- Extensions (experimental): SDK manifests now list a class's selectors in **sorted
+  order** (both SDKs). The Rust SDK serialized them in hash order, so the manifest's
+  wire bytes differed from process to process for the same extension — semantically
+  harmless, but wire bytes must be deterministic. No interop impact: hosts treat the
+  lists as sets.
 - Extensions (experimental): concurrent calls to one extension connection now **queue
   fairly** instead of raising a "busy" error — a waiting caller parks and is handed the
   connection FIFO when the in-flight call finishes, so `Async.gather:` over one long-lived

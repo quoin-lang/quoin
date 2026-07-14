@@ -41,6 +41,30 @@ fn wake_event_for(tid: TaskId, wakeup: &TaskWakeup) -> crate::replay::WakeEvent 
     }
 }
 
+/// Divergence detail for a delivery mismatch: what the log wants next vs the
+/// completions that actually arrived (held back as unmatched). A non-empty `held`
+/// means the op ran but produced a different result this run — the usual culprit
+/// for timing-dependent external inputs.
+fn replay_mismatch(
+    want: &crate::replay::WakeEvent,
+    held: &[(TaskId, TaskWakeup)],
+    at: &str,
+) -> String {
+    if held.is_empty() {
+        format!("the log expects delivery {want:?} ({at}), but no background work is in flight")
+    } else {
+        let got: Vec<String> = held
+            .iter()
+            .map(|(t, w)| format!("{:?}", wake_event_for(*t, w)))
+            .collect();
+        format!(
+            "the log expects delivery {want:?} ({at}), but the completions that arrived \
+             do not match: [{}] — the op ran but its result differed from the recording",
+            got.join(", ")
+        )
+    }
+}
+
 /// A tiny deterministic PRNG (SplitMix64) for `QN_SCHED_STRESS`. Seeded so a
 /// randomized scheduling failure can be replayed exactly. Not used outside stress.
 struct SplitMix64 {
@@ -676,6 +700,20 @@ fn drive_to_completion<F: DriverFrontend>(
             if replay.logging() {
                 replay.log(wake_event_for(tid, &wakeup));
             }
+            if replay.debugging() {
+                let desc = match &wakeup {
+                    TaskWakeup::Io(Ok(r)) => {
+                        let mut d = format!("{r:?}");
+                        d.truncate(160);
+                        d
+                    }
+                    TaskWakeup::Io(Err(_)) => "aborted".to_string(),
+                    TaskWakeup::Deadline { target, epoch } => {
+                        format!("deadline target={} epoch={epoch}", target.0)
+                    }
+                };
+                eprintln!("[wake] deliver tid={} {desc}", tid.0);
+            }
             arena.mutate_root(|_mc, vm| match wakeup {
                 TaskWakeup::Io(result) => {
                     {
@@ -848,12 +886,14 @@ fn drive_to_completion<F: DriverFrontend>(
                                     match futures.next().await {
                                         Some(step) => held.push(step),
                                         None => {
-                                            return Err(QuoinError::Other(replay.divergence_msg(
-                                                &format!(
-                                                    "the log expects delivery {want:?}, but \
-                                                     no background work is in flight"
-                                                ),
-                                            )));
+                                            let what = replay_mismatch(
+                                                &want,
+                                                &held,
+                                                "while the scheduler is idle",
+                                            );
+                                            return Err(QuoinError::Other(
+                                                replay.divergence_msg(&what),
+                                            ));
                                         }
                                     }
                                 };
@@ -967,12 +1007,11 @@ fn drive_to_completion<F: DriverFrontend>(
                                 match futures.next().await {
                                     Some(step) => held.push(step),
                                     None => {
-                                        return Err(QuoinError::Other(replay.divergence_msg(
-                                            &format!(
-                                                "the log expects delivery {want:?} at a yield \
-                                                 boundary, but no background work is in flight"
-                                            ),
-                                        )));
+                                        let what =
+                                            replay_mismatch(&want, &held, "at a yield boundary");
+                                        return Err(QuoinError::Other(
+                                            replay.divergence_msg(&what),
+                                        ));
                                     }
                                 }
                             };

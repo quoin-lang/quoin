@@ -648,9 +648,12 @@ class Extension:
         return msgpack.packb(fields, use_bin_type=True, default=default)
 
     def _manifest(self):
-        """``(name, instance_selectors, class_selectors)`` for each registered class."""
+        """``(name, instance_selectors, class_selectors)`` for each registered class.
+        Selector lists are sorted — the canonical manifest form (dicts would already give
+        insertion order, but the Rust SDK's handler maps have no order, so sorted is the
+        one form both SDKs can emit; the host's replay tooling fingerprints wire bytes)."""
         return [
-            (reg.name, list(reg.methods.keys()), list(reg.constructors.keys()))
+            (reg.name, sorted(reg.methods), sorted(reg.constructors))
             for reg in self._classes.values()
         ]
 

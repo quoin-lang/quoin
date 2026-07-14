@@ -246,7 +246,21 @@ so the header records it and replay validates the match. Slice-1 replay re-perfo
 real I/O and forces delivery *order* (payloads content-hashed so divergence is
 reported); injecting logged results is the arc-4 replayer. Env surface:
 `QN_WAKE_RECORD=<path>`, `QN_WAKE_REPLAY=<path>`, `QN_WAKE_LOG=1` (diagnostic ring,
-dumped on global deadlock). Worker VMs stay unlogged until convergence names them.
+dumped on global deadlock), `QN_WAKE_DEBUG=1` (delivery trace). Worker VMs stay
+unlogged until convergence names them.
+
+**Scope, field-tested (2026-07-13):** replaying `qn test qnlib/tests` diverges, and
+that is the expected boundary, not a hook bug. Slice-1 replay pins *the schedule*;
+it cannot pin *external timing*: the suite spawns extensions (socket-path probe
+retries vary with child startup speed), reads sockets (chunking varies), and its
+recorded event streams differ run-to-run even without replay. Two findings came out
+of the field test: (a) a genuine determinism bug — the Rust SDK serialized manifest
+selector lists in `HashMap` order, so manifest bytes differed per process (fixed:
+both SDKs emit sorted selector lists — wire bytes must never depend on hash order);
+(b) the rule of thumb — programs whose external inputs are deterministic (timers,
+channels, plain file reads, schedule races) replay end-to-end today; programs with
+timing-dependent externals (extensions, sockets, subprocesses) need the arc-4
+injection wrapper, which feeds recorded results instead of re-performing.
 
 ## 9. Slicing (proposed)
 

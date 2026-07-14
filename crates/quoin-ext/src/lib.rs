@@ -931,20 +931,30 @@ impl Extension {
             .unwrap_or_default()
     }
 
-    /// The `ManifestReturn` describing every registered class.
+    /// The `ManifestReturn` describing every registered class. Selector lists are
+    /// SORTED: the handlers live in `HashMap`s, and hash order would make the manifest
+    /// bytes differ from process to process — wire bytes must be deterministic (the
+    /// host's replay tooling fingerprints them, and canonical output is right anyway).
     fn manifest(&self) -> Msg {
         let classes = self
             .classes
             .iter()
-            .map(|c| ClassDecl {
-                name: c.name.clone(),
-                instance_selectors: c.methods.keys().chain(c.makes.keys()).cloned().collect(),
-                class_selectors: c
+            .map(|c| {
+                let mut instance_selectors: Vec<String> =
+                    c.methods.keys().chain(c.makes.keys()).cloned().collect();
+                instance_selectors.sort();
+                let mut class_selectors: Vec<String> = c
                     .constructors
                     .keys()
                     .chain(c.class_methods.keys())
                     .cloned()
-                    .collect(),
+                    .collect();
+                class_selectors.sort();
+                ClassDecl {
+                    name: c.name.clone(),
+                    instance_selectors,
+                    class_selectors,
+                }
             })
             .collect();
         Msg::ManifestReturn {

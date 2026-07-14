@@ -78,12 +78,17 @@ fn expect_helpers_report_divergence() {
     ctx.replayer = Some(Replayer {
         events: all_events(),
         pos: 0,
+        run_index: 2,
+        run_total: 3,
     });
     assert_eq!(ctx.expect_pick(), Ok(3));
     assert_eq!(ctx.expect_rotate(), Ok(true));
-    // Next is Rotate(false); asking for a Pick is a divergence naming the position.
+    // Next is Rotate(false); asking for a Pick is a divergence naming the run + position.
     let err = ctx.expect_pick().unwrap_err();
-    assert!(err.contains("divergence at event 2"), "err was {err}");
+    assert!(
+        err.contains("divergence (driver run 2/3, event 2)"),
+        "err was {err}"
+    );
     // peek_delivery skips nothing: it answers None until the cursor sits on one.
     assert_eq!(ctx.peek_delivery(), None);
     ctx.expect_rotate().unwrap();

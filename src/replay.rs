@@ -17,6 +17,9 @@
 //!   the log, and completions are delivered in logged order (early arrivals are held
 //!   back). Combine with `QN_WAKE_RECORD` to emit the replayed run's own stream — the
 //!   divergence test's comparison artifact.
+//! - `QN_WAKE_DEBUG=1` — trace every delivery to stderr (task id + result payload,
+//!   truncated). The companion to a divergence report: it names the op whose result
+//!   changed between runs.
 //!
 //! A process drives the scheduler more than once (the stdlib load drives before the
 //! program does; the REPL drives per line), so the log file holds one `RUN` section
@@ -165,6 +168,10 @@ struct GlobalWake {
     recorded: Vec<Vec<WakeEvent>>,
     /// Replay mode: the recorded sections not yet claimed by a driver run.
     pending: Option<VecDeque<Vec<WakeEvent>>>,
+    /// Replay mode: sections claimed so far (`run_index` for the next claimant)
+    /// and the total in the file — divergence reports name the driver run.
+    claimed: usize,
+    total: usize,
 }
 
 fn global() -> &'static Mutex<GlobalWake> {
@@ -184,6 +191,10 @@ struct Recorder {
 struct Replayer {
     events: Vec<WakeEvent>,
     pos: usize,
+    /// Which driver run this section belongs to (1-based) and how many the log
+    /// holds — so a divergence report names the run it happened in.
+    run_index: usize,
+    run_total: usize,
 }
 
 impl Replayer {
@@ -199,6 +210,10 @@ pub struct ReplayCtx {
     ring: Option<VecDeque<WakeEvent>>,
     recorder: Option<Recorder>,
     replayer: Option<Replayer>,
+    /// `QN_WAKE_DEBUG`: trace deliveries to stderr.
+    debug: bool,
+    /// A divergence was already reported; skip the unconsumed-events warning on drop.
+    diverged: bool,
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -225,6 +240,7 @@ impl ReplayCtx {
             return Ok(ReplayCtx::default());
         }
         let mut ctx = ReplayCtx::default();
+        ctx.debug = env_flag("QN_WAKE_DEBUG");
         if env_flag("QN_WAKE_LOG") {
             ctx.ring = Some(VecDeque::with_capacity(RING_CAP));
         }
@@ -239,7 +255,9 @@ impl ReplayCtx {
             if g.pending.is_none() {
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| format!("QN_WAKE_REPLAY: cannot read {}: {e}", path.display()))?;
-                g.pending = Some(parse_log(&text, crate::tuning::step_batch())?);
+                let sections = parse_log(&text, crate::tuning::step_batch())?;
+                g.total = sections.len();
+                g.pending = Some(sections);
             }
             let section = g
                 .pending
@@ -251,9 +269,12 @@ impl ReplayCtx {
                      the recording process drove the scheduler fewer times"
                         .to_string()
                 })?;
+            g.claimed += 1;
             ctx.replayer = Some(Replayer {
                 events: section,
                 pos: 0,
+                run_index: g.claimed,
+                run_total: g.total,
             });
         }
         Ok(ctx)
@@ -325,9 +346,26 @@ impl ReplayCtx {
         }
     }
 
-    pub fn divergence_msg(&self, what: &str) -> String {
-        let pos = self.replayer.as_ref().map_or(0, |r| r.pos);
-        format!("wake-log replay divergence at event {pos}: {what}")
+    /// `QN_WAKE_DEBUG`: trace deliveries to stderr.
+    pub fn debugging(&self) -> bool {
+        self.debug
+    }
+
+    /// Build a divergence report (naming the driver run and event position) and mark
+    /// the context diverged, so the drop-time unconsumed-events warning stays quiet —
+    /// the report already says the run ended early.
+    pub fn divergence_msg(&mut self, what: &str) -> String {
+        self.diverged = true;
+        let (run, total, pos) = self
+            .replayer
+            .as_ref()
+            .map_or((0, 0, 0), |r| (r.run_index, r.run_total, r.pos));
+        format!(
+            "wake-log replay divergence (driver run {run}/{total}, event {pos}): {what}. \
+             Replay re-performs real I/O and forces its order — a program whose external \
+             inputs are timing-dependent (sockets, subprocesses, extensions) is beyond \
+             what the wake log alone can pin; QN_WAKE_DEBUG=1 traces deliveries."
+        )
     }
 
     /// Dump the diagnostic ring to stderr (the `QN_WAKE_LOG` consumer — called when
@@ -368,10 +406,12 @@ impl Drop for ReplayCtx {
         }
         if let Some(rep) = &self.replayer {
             let left = rep.events.len() - rep.pos;
-            if left > 0 {
+            // After a reported divergence the shortfall is expected — stay quiet.
+            if left > 0 && !self.diverged {
                 eprintln!(
-                    "QN_WAKE_REPLAY: driver run ended with {left} log events unconsumed \
-                     (the recorded run went further)"
+                    "QN_WAKE_REPLAY: driver run {}/{} ended with {left} log events \
+                     unconsumed (the recorded run went further)",
+                    rep.run_index, rep.run_total
                 );
             }
         }
