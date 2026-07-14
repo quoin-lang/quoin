@@ -72,8 +72,10 @@ var thrown = { c.boom; 'no-error' }.catch:{ |e| e.s };
 var mnu = { c.frobnicate; 'no-error' }.catch:{ |e| e.s };
 (mnu.contains?:'frobnicate').else:{ ok = false };
 
-"* a non-portable argument refuses without occupying the service
-var badArg = { c.add:{ 1 }; 'sent' }.catch:{ |e| 'refused' };
+"* a non-portable argument (a block writing a capture) refuses without
+"* occupying the service
+var w = 0;
+var badArg = { c.add:{ w = 1 }; 'sent' }.catch:{ |e| 'refused' };
 (badArg == 'refused').else:{ ok = false };
 ((c.total) == 12).else:{ ok = false };
 
@@ -199,4 +201,88 @@ fn service_hosts_returned_objects() {
 fn service_hosts_returned_objects_process() {
     let script = HOSTED_OBJECTS_SCRIPT.replace("@BACKING@", "process");
     assert_service_script_passes("hosted_proc", &script, &[("pool.qn", POOL_UNIT)]);
+}
+
+/// Portable-block arguments (ACTOR_OBJECTS.md §3a): a block argument to a
+/// THREAD-backed service ships as a capture snapshot and runs worker-side —
+/// one crossing however many times the hosted method invokes it. Unportable
+/// blocks refuse at the encode seam (before the token); a block whose
+/// captures reference a global the worker lacks errors clearly at rebuild.
+const RUNNER_UNIT: &str = r#"
+Runner <- { |@stash|
+    init -> { @stash = nil };
+    double: -> { |n| n * 2 };
+    apply:to: -> { |blk n| blk.value:n };
+    sumOver:with: -> { |items blk|
+        var t = 0;
+        items.each:{ |i| t = t + (blk.value:i) };
+        t
+    };
+    stash: -> { |blk| @stash = blk; 'stashed' };
+    runStash: -> { |n| @stash.value:n }
+};
+"#;
+
+#[test]
+fn service_block_args() {
+    let script = r#"
+GHelper <- { twice: -> { |n| n * 2 } };
+var ok = true;
+var r = WorkerService.host:'@runner.qn@' class:'Runner';
+
+"* a portable block ships and runs worker-side
+((r.apply:{ |n| n * 3 } to:14) == 42).else:{ ok = false; 'FAIL: apply'.print };
+
+"* captures snapshot — including a block capturing a block
+var base = 100;
+var inner = { |n| n + base };
+var outer = { |n| inner.value:(n * 2) };
+((r.apply:outer to:5) == 110).else:{ ok = false; 'FAIL: capture'.print };
+
+"* invoked N times worker-side off one crossing
+((r.sumOver:#( 1 2 3 4 ) with:{ |i| i * i }) == 30)
+    .else:{ ok = false; 'FAIL: sumOver'.print };
+
+"* a stored block stays live for later dispatches
+r.stash:{ |n| n + 1 };
+((r.runStash:9) == 10).else:{ ok = false; 'FAIL: stash'.print };
+
+"* an unportable block (writes a capture) refuses at the seam, naming the
+"* argument; the service stays usable
+var w = 0;
+var bad = { r.apply:{ |n| w = n } to:1; 'sent' }.catch:{ |e| e.s };
+(bad.contains?:'argument 1').else:{ ok = false; ('FAIL bad: ' + bad).print };
+((r.runStash:1) == 2).else:{ ok = false; 'FAIL: usable after refusal'.print };
+
+"* a capture chain reaching a global the worker lacks errors at rebuild,
+"* catchably, naming the worker
+var glob = { |n| GHelper.twice:n };
+var miss = { r.apply:glob to:0; 'no-error' }.catch:{ |e| e.s };
+(miss.contains?:'not defined in the worker')
+    .else:{ ok = false; ('FAIL miss: ' + miss).print };
+
+r.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("block_args", script, &[("runner.qn", RUNNER_UNIT)]);
+}
+
+#[test]
+fn service_block_args_process_refuse() {
+    let script = r#"
+var ok = true;
+var r = WorkerService.host:'@runner.qn@' class:'Runner' backing:'process';
+
+"* blocks refuse at the encode seam for process backing, pointing at thread
+var msg = { r.apply:{ |n| n } to:1; 'sent' }.catch:{ |e| e.s };
+((msg.contains?:'process boundary') && (msg.contains?:'thread backing'))
+    .else:{ ok = false; ('FAIL msg: ' + msg).print };
+
+"* data arguments still cross fine afterwards
+((r.double:21) == 42).else:{ ok = false; 'FAIL: double'.print };
+
+r.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("block_args_proc", script, &[("runner.qn", RUNNER_UNIT)]);
 }

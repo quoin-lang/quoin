@@ -462,6 +462,16 @@ pub fn spawn_worker_process(
                         }
                     }
                     ConvReq::Dispatch(req) => {
+                        // The encode seam refuses blocks for process backing, so a
+                        // shipped-block sidecar can never reach the socket — but the
+                        // wire must never silently drop one either.
+                        if !req.blocks.is_empty() {
+                            let _ = req.reply.send_blocking(Msg::CallReturnError {
+                                message: "blocks cannot cross a process boundary".to_string(),
+                                remote_stack: String::new(),
+                            });
+                            continue;
+                        }
                         if write_msg_frame(&mut sock, &req.frame).is_err() {
                             break;
                         }
@@ -642,6 +652,7 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
                     if dispatch_tx
                         .send_blocking(DispatchReq {
                             frame,
+                            blocks: Vec::new(),
                             reply: reply_tx,
                         })
                         .is_err()

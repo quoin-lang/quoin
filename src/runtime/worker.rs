@@ -29,7 +29,7 @@ use crate::runtime::extension::{value_to_wire, wire_to_value};
 use crate::value::ObjectPayload;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::worker::{
-    WorkerMsg, note_message, rebuild_portable_value, snapshot_block, spawn_worker,
+    PortableBlock, WorkerMsg, note_message, rebuild_portable_value, snapshot_block, spawn_worker,
     spawn_worker_block,
 };
 
@@ -64,33 +64,42 @@ unsafe impl<'gc> Collect<'gc> for NativeWorkerHandle {
     const NEEDS_TRACE: bool = false;
 }
 
+/// What `snapshot_block` needs from a block value: its template and capture env.
+pub(crate) type BlockParts<'gc> = (
+    std::sync::Arc<crate::instruction::StaticBlock>,
+    Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
+);
+
+/// The template + capture env of a block value, `None` for anything else —
+/// the "is this a block, and what ships" probe shared by the lane send seam
+/// and the hosted-dispatch argument encoder.
+pub(crate) fn block_parts<'gc>(v: Value<'gc>) -> Option<BlockParts<'gc>> {
+    if let Value::Object(obj) = v {
+        let borrowed = obj.borrow();
+        if let ObjectPayload::Block(b) = &borrowed.payload {
+            return Some((b.template.clone(), b.parent_env));
+        }
+    }
+    None
+}
+
 /// Copy a guest value into a cross-worker message. A BLOCK value ships as
 /// a portable block (template + capture snapshot — same rules as
 /// `Worker.start:`); everything else takes the wire walkers, whose
 /// taxonomy still refuses symbols/instances/resources — and blocks nested
 /// INSIDE data structures.
 fn to_message<'gc>(v: Value<'gc>, allow_blocks: bool) -> Result<WorkerMsg, QuoinError> {
-    if let Value::Object(obj) = v {
-        let block_parts = {
-            let borrowed = obj.borrow();
-            if let ObjectPayload::Block(b) = &borrowed.payload {
-                Some((b.template.clone(), b.parent_env))
-            } else {
-                None
-            }
-        };
-        if let Some((template, parent_env)) = block_parts {
-            if !allow_blocks {
-                return Err(QuoinError::Other(
-                    "blocks cannot cross a process boundary (templates are \
-                     in-process references) — send data, or use thread backing"
-                        .into(),
-                ));
-            }
-            let pb = snapshot_block(template, parent_env, 0)?;
-            note_message();
-            return Ok(WorkerMsg::Block(pb));
+    if let Some((template, parent_env)) = block_parts(v) {
+        if !allow_blocks {
+            return Err(QuoinError::Other(
+                "blocks cannot cross a process boundary (templates are \
+                 in-process references) — send data, or use thread backing"
+                    .into(),
+            ));
         }
+        let pb = snapshot_block(template, parent_env, 0)?;
+        note_message();
+        return Ok(WorkerMsg::Block(pb));
     }
     let dv = value_to_wire(v, None)?;
     note_message();
@@ -157,12 +166,17 @@ fn wrap_handle<'gc>(
 /// `CallReturnResource`, the parent wraps it as a sub-proxy) — objects are
 /// addressed, values are copied; a raise becomes `CallReturnError` carrying the
 /// worker's rendered stack segment (`ex.remoteStack` at the call site).
+/// `blocks` is the request's shipped-block sidecar (§3a): each pair rebuilds
+/// as a live closure in THIS arena and takes its argument position, so the
+/// hosted method calls it locally — one boundary crossing however many times
+/// it runs.
 fn dispatch_hosted<'gc>(
     vm: &mut crate::vm::VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     op: &str,
     recv: u64,
     method_args: &[quoin_ext_proto::Arg],
+    blocks: &[(usize, PortableBlock)],
 ) -> quoin_ext_proto::Msg {
     use quoin_ext_proto::{Arg, Msg};
     let err = |message: String| Msg::CallReturnError {
@@ -174,6 +188,13 @@ fn dispatch_hosted<'gc>(
     };
     let mut argv = Vec::with_capacity(method_args.len());
     for (i, a) in method_args.iter().enumerate() {
+        if let Some((_, pb)) = blocks.iter().find(|(pos, _)| *pos == i) {
+            match rebuild_portable_value(vm, mc, pb) {
+                Ok(v) => argv.push(v),
+                Err(e) => return err(format!("hosted call '{op}': argument {}: {e}", i + 1)),
+            }
+            continue;
+        }
         let v = match a {
             Arg::Data(dv) => match wire_to_value(vm, mc, dv, None) {
                 Ok(v) => v,
@@ -279,6 +300,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                         )));
                     }
                 };
+                let blocks = req.blocks;
                 let quoin_ext_proto::Msg::Call {
                     op,
                     recv,
@@ -304,7 +326,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     break;
                 }
                 note_message();
-                let reply = dispatch_hosted(vm, mc, &op, recv, &method_args);
+                let reply = dispatch_hosted(vm, mc, &op, recv, &method_args, &blocks);
                 let _ = req.reply.try_send(reply);
             }
             vm.hosted.clear();

@@ -48,10 +48,14 @@ use quoin_ext_proto::{Arg, DataValue as WireData, Msg};
 use crate::error::QuoinError;
 use crate::io_backend::{IoRequest, IoResult};
 use crate::runtime::extension::{truncate_blob, value_to_wire, wire_to_value};
+use crate::runtime::worker::block_parts;
 use crate::symbol::Symbol;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
-use crate::worker::{DispatchReq, OP_STOP, WorkerMsg, note_message, spawn_worker_service};
+use crate::worker::{
+    DispatchReq, OP_STOP, PortableBlock, WorkerMsg, note_message, snapshot_block,
+    spawn_worker_service,
+};
 
 /// Proxy-side state: the worker's dispatch lane plus this proxy's hosted-object
 /// id. Everything worker-wide (lanes, token, stop flag, reap queue) is shared by
@@ -72,6 +76,10 @@ pub struct NativeServiceState {
     object_id: u64,
     /// The hosted object's class name — routes the dispatch worker-side.
     class_name: String,
+    /// True for process backing: block arguments refuse at the encode seam
+    /// (templates are in-process references; no source-shipping yet —
+    /// ACTOR_OBJECTS.md §3a).
+    process: bool,
 }
 
 impl Drop for NativeServiceState {
@@ -105,6 +113,7 @@ struct CallCtx {
     reap: Rc<RefCell<Vec<u64>>>,
     object_id: u64,
     class_name: String,
+    process: bool,
 }
 
 fn snapshot(s: &NativeServiceState) -> CallCtx {
@@ -117,6 +126,7 @@ fn snapshot(s: &NativeServiceState) -> CallCtx {
         reap: s.reap.clone(),
         object_id: s.object_id,
         class_name: s.class_name.clone(),
+        process: s.process,
     }
 }
 
@@ -166,8 +176,13 @@ fn service_call<'gc>(
         )));
     }
     // Encode BEFORE taking the token: a refused argument shouldn't occupy the
-    // service. A proxy of the SAME worker travels as a live reference.
+    // service. A proxy of the SAME worker travels as a live reference; a
+    // portable BLOCK ships to a thread peer as a capture snapshot riding the
+    // dispatch request out-of-band (§3a — the in-memory lane's
+    // richer-than-wire allowance), with a Null placeholder holding its
+    // position in the frame.
     let mut method_args = Vec::with_capacity(args.len());
+    let mut blocks: Vec<(usize, PortableBlock)> = Vec::new();
     for (i, a) in args.iter().enumerate() {
         let same_worker_id = a
             .with_native_state::<NativeServiceState, _, _>(|s| {
@@ -175,16 +190,38 @@ fn service_call<'gc>(
             })
             .ok()
             .flatten();
-        match same_worker_id {
-            Some(id) => method_args.push(Arg::Resource(id)),
-            None => method_args.push(Arg::Data(value_to_wire(*a, None).map_err(|e| {
+        if let Some(id) = same_worker_id {
+            method_args.push(Arg::Resource(id));
+            continue;
+        }
+        if let Some((template, parent_env)) = block_parts(*a) {
+            if ctx.process {
+                return Err(QuoinError::Other(format!(
+                    "service call '{}': argument {} is a block — blocks cannot cross \
+                     a process boundary (templates are in-process references); use \
+                     thread backing",
+                    selector.as_str(),
+                    i + 1
+                )));
+            }
+            let pb = snapshot_block(template, parent_env, 0).map_err(|e| {
                 QuoinError::Other(format!(
-                    "service call '{}': argument {} is not portable: {e}",
+                    "service call '{}': argument {}: {e}",
                     selector.as_str(),
                     i + 1
                 ))
-            })?)),
+            })?;
+            blocks.push((i, pb));
+            method_args.push(Arg::Data(WireData::Null));
+            continue;
         }
+        method_args.push(Arg::Data(value_to_wire(*a, None).map_err(|e| {
+            QuoinError::Other(format!(
+                "service call '{}': argument {} is not portable: {e}",
+                selector.as_str(),
+                i + 1
+            ))
+        })?));
     }
 
     // Serialize: take the token (parks fairly behind other callers).
@@ -205,6 +242,7 @@ fn service_call<'gc>(
         .dispatch_tx
         .try_send(DispatchReq {
             frame,
+            blocks,
             reply: reply_tx,
         })
         .is_err()
@@ -266,6 +304,7 @@ fn interpret_terminal<'gc>(
                     reap: ctx.reap.clone(),
                     object_id: resource,
                     class_name,
+                    process: ctx.process,
                 },
             ))
         }
@@ -344,6 +383,7 @@ fn host<'gc>(
             reap: Rc::new(RefCell::new(Vec::new())),
             object_id: 1,
             class_name,
+            process: backing == "process",
         },
     ))
 }
@@ -371,7 +411,10 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
              access -- an actor, effectively. Portable arguments and returns deep-copy; \
              a method that returns a NON-portable object HOSTS it -- the answer is a \
              sub-proxy addressing it, usable like any receiver (including as an argument \
-             to further calls on the same service). Errors in the hosted method raise \
+             to further calls on the same service). A portable BLOCK argument ships to a \
+             thread-backed service and runs worker-side -- one crossing however many \
+             times the method invokes it (unportable blocks, and any block to a \
+             process-backed service, refuse with a clear error). Errors in the hosted method raise \
              catchably at the call site, with the worker's stack as `ex.remoteStack`; \
              one call runs at a time (concurrent callers queue fairly).\n\n\
              ```\n\
@@ -430,6 +473,7 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
                 .dispatch_tx
                 .try_send(DispatchReq {
                     frame,
+                    blocks: Vec::new(),
                     reply: reply_tx,
                 })
                 .is_ok()

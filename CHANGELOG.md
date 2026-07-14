@@ -47,6 +47,14 @@ under **Changed**, with the migration.
   proxy's object is released on the next call). Hosted errors now surface with the
   worker's rendered stack as `ex.remoteStack`, and an unknown selector raises
   MessageNotUnderstood naming it. `serviceStop` is now explicitly worker-wide.
+- `WorkerService` (experimental): **portable-block arguments** to a thread-backed
+  service. A block that passes the portability scan ships as a capture snapshot and
+  runs *inside* the worker — one boundary crossing however many times the hosted
+  method invokes it, and the method may keep it for later calls (the batch-API
+  answer to chatty proxies; `docs/internal/ACTOR_OBJECTS.md` §3a). An unportable
+  block refuses naming the argument and why, without occupying the service; blocks
+  to a process-backed service refuse pointing at thread backing (no source-shipping
+  yet).
 - Workers (experimental): the process-worker wire now speaks the **extension
   protocol's frames** instead of a bespoke envelope — one remote-peer protocol
   (`docs/internal/ACTOR_OBJECTS.md`). Two sockets per process worker: a conversation

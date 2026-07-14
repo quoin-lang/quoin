@@ -87,6 +87,41 @@ until then process peers fall back to the handle path). An unportable block also
 back to the handle path — same semantics, more round trips, never an error. Decision
 rule: *portable + Quoin peer → ship; otherwise → handle.*
 
+**As built (slice 6 v1, 2026-07-14) — ship path only; the fallback is an error, not
+handles yet.** A block argument to a THREAD-backed service snapshots at the encode
+seam (`service_call`, before the token — a refused argument never occupies the
+service) and rides the dispatch request as an out-of-band sidecar:
+`DispatchReq.blocks: Vec<(position, PortableBlock)>`, with a Null placeholder holding
+the frame's `method_args` position. Deliberately NOT an `Arg` variant: `Arg` is the
+wire protocol, and a `PortableBlock` (an `Arc` template) is only meaningful
+in-process — when source-shipping lands, the wire form will be source/bytecode
+inline, a different shape. The sidecar is the same richer-than-wire-taxonomy
+allowance the plain lane already uses for `WorkerMsg::Block`. Worker-side,
+`dispatch_hosted` rebuilds each sidecar entry via `rebuild_portable_value` (global
+references verified against the worker — a missing user global is a clear catchable
+error) into a live closure the hosted method invokes locally, N runs per one
+crossing, storable across dispatches (rooted via the hosted table while reachable).
+**The v1 decision rule is *portable + thread peer → ship; otherwise → clear error*:**
+unportable blocks name the argument and the scanner's why; process backing refuses at
+the seam pointing at thread backing (and the conversation pump defensively refuses a
+non-empty sidecar rather than ever silently dropping blocks at the socket).
+
+*To continue slice 6 → the doc-rule "never an error" (recorded, not started):*
+1. **The handle fallback** (unportable blocks + process peers degrade to
+   `Arg::Handle` + `InvokeBlock` round-trips) is blocked on gap-list item 1 — worker
+   peers have no host-op loop to drive a parent-held block. No collision with the
+   sidecar when it lands: handles ride `method_args` proper, the sidecar stays the
+   thread ship-path carrier.
+2. **Process shipping** is blocked on source/bytecode shipping (its wire form
+   replaces the sidecar for that backing).
+3. **Blocks nested inside data-structure arguments** still refuse (the wire walkers
+   own that taxonomy — same rule as plain lane messages).
+4. **Block RETURNS** from hosted methods currently fall into the non-portable-object
+   path and come back as sub-proxies (semantics untested — `value:` on such a proxy
+   dispatches remotely); the symmetric ship-back needs a reply-side sidecar.
+5. **`Worker.host:{...}` block form** still waits — remote evaluation, not just
+   transport.
+
 **b. Structured stacks.** Quoin-to-Quoin errors need not be opaque: the `remote_stack`
 blob carries the worker's real rendered trace initially (day one, free via PR #11's
 field), with a structured-trace upgrade (frames as data, uniformly steppable) as a
@@ -322,7 +357,11 @@ injection wrapper, which feeds recorded results instead of re-performing.
    machinery is already generalized; the lock-ordering discipline gets settled and
    tested here.
 6. **Portable-block arguments** for Quoin peers (thread first; process blocked on
-   source-shipping and falls back to handles).
+   source-shipping and falls back to handles). v1 DONE (2026-07-14): the ship path
+   for thread backing — snapshot at the encode seam, `DispatchReq.blocks` sidecar,
+   worker-side rebuild; unportable blocks and process backing get clear errors
+   rather than the handle fallback (blocked on gap-item-1 host-ops). The full
+   continuation list is in §3a's as-built note.
 7. **Cross-isolate channels** (thread peers first — pure lane relay; process peers via
    the socket).
 8. `WorkerService` reimplemented as sugar over `Worker.host:` (or deprecated into it).
@@ -351,5 +390,9 @@ Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, 
   independent language feature — QUOIN_TODO — not the load-bearing mechanism here.
 - Should plain `Worker.send:`/`receive` mailboxes be re-expressed as a cross-isolate
   channel pair once §6 lands (one concept fewer)?
+- Block RETURNS from hosted methods (noticed during slice 6): today they take the
+  hosted-resource path and come back as sub-proxies — is remote `value:` dispatch on
+  a block sub-proxy the semantics we want, or should a portable block ship back
+  symmetrically (needs a reply-side sidecar)?
 - Structured (non-blob) Quoin-to-Quoin stack frames — format, and whether the debugger
   can step across the boundary.

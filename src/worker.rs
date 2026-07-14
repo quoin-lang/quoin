@@ -76,6 +76,13 @@ pub enum ControlKind {
 #[derive(Clone, Debug)]
 pub struct DispatchReq {
     pub frame: quoin_ext_proto::Msg,
+    /// Shipped portable-block arguments, out-of-band of the wire frame
+    /// (ACTOR_OBJECTS.md §3a): `(argument position, snapshot)` pairs; the
+    /// frame's `method_args` holds a Null placeholder at each position. Only
+    /// the in-memory thread lane may carry these — the same
+    /// richer-than-wire-taxonomy allowance as `WorkerMsg::Block`; the
+    /// process path refuses blocks before a request is ever built.
+    pub blocks: Vec<(usize, PortableBlock)>,
     pub reply: async_channel::Sender<quoin_ext_proto::Msg>,
 }
 
