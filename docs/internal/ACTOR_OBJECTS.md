@@ -234,6 +234,20 @@ points. Known out-of-log inputs to document, not chase: wall-clock reads
 (`Timestamp.now` etc.), `[OS]Env`, the `ps`-collection deadline — replay either stubs
 them from the log later (full replayer, arc 4) or names them as divergence points.
 
+**As built (slice 1, `src/replay.rs` + `tests/wake_replay.rs`):** three streams, not
+two — the yield-boundary *preempt decision* (`Rotate`) is logged at every cooperative
+yield as well, which is what lets replay know where the yields fell without consulting
+the stress rng, and makes the log self-delimiting (a pick with no preceding rotate =
+the previous task parked). Two learnings: (a) a process drives the scheduler more than
+once (the stdlib load drives before the program; the REPL drives per line), so the log
+carries one `RUN` section per driver run, paired up in process order; (b) the yield
+cadence (`QN_BATCH`, forced to 1 by the stress modes) determines where boundaries fall,
+so the header records it and replay validates the match. Slice-1 replay re-performs
+real I/O and forces delivery *order* (payloads content-hashed so divergence is
+reported); injecting logged results is the arc-4 replayer. Env surface:
+`QN_WAKE_RECORD=<path>`, `QN_WAKE_REPLAY=<path>`, `QN_WAKE_LOG=1` (diagnostic ring,
+dumped on global deadlock). Worker VMs stay unlogged until convergence names them.
+
 ## 9. Slicing (proposed)
 
 1. **Replay hooks + divergence test** (small, first — everything after must stay logged).

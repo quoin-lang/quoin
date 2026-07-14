@@ -10,6 +10,12 @@ under **Changed**, with the migration.
 
 ### Added
 
+- Scheduler (experimental): **wake-log record/replay hooks**. `QN_WAKE_RECORD=<path>`
+  records the scheduler's decision stream (ready-picks, yield preemptions, I/O delivery
+  order); `QN_WAKE_REPLAY=<path>` re-runs the program forcing those decisions,
+  reproducing a recorded concurrent execution exactly — the groundwork for deterministic
+  replay debugging (`docs/internal/ACTOR_OBJECTS.md` §8). `QN_WAKE_LOG=1` keeps a ring
+  of recent wake events and dumps it when the scheduler reports a global deadlock.
 - Extensions (experimental): **cross-process stack traces**. A failed extension call now
   carries an opaque stack blob — a Python extension sends its real traceback, a Rust one
   its error chain under a dispatch-frame line, and failures that cross the boundary

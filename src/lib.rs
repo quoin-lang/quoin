@@ -37,6 +37,8 @@ pub mod registry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod repl_complete;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod replay;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
 pub mod runner_core;
 #[cfg(not(target_arch = "wasm32"))]
