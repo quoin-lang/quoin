@@ -43,6 +43,10 @@ name = "ext_handles"
 path = "tests/fixtures/ext_handles.rs"
 
 [[bin]]
+name = "ext_lanes"
+path = "tests/fixtures/ext_lanes.rs"
+
+[[bin]]
 name = "ext_resources"
 path = "tests/fixtures/ext_resources.rs"
 

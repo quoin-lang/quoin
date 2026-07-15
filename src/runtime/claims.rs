@@ -290,6 +290,20 @@ impl PeerClaims {
         if let Some(o) = self.objects.get_mut(&object_id) {
             o.waiters.retain(|w| w.task != task);
         }
+        self.gc_object(object_id);
+    }
+
+    /// Drop a fully idle object entry — no owner, no waiters, not reserved.
+    /// Keeps the map bounded when object ids are minted per call (extension
+    /// class-side pseudo-objects); a live id just re-enters via `touch_label`.
+    fn gc_object(&mut self, object_id: u64) {
+        if self
+            .objects
+            .get(&object_id)
+            .is_some_and(|o| o.owner.is_none() && o.waiters.is_empty() && !o.reserved)
+        {
+            self.objects.remove(&object_id);
+        }
     }
 
     /// End one call on an object: the outermost release frees the claim and,
@@ -320,6 +334,7 @@ impl PeerClaims {
         if let Some(lane) = lane {
             self.release_lane(lane, live, &mut grants);
         }
+        self.gc_object(object_id);
         grants
     }
 

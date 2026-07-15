@@ -51,7 +51,7 @@
 
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::rc::Rc;
@@ -67,18 +67,18 @@ use quoin_ext_proto::{
 
 use crate::arg;
 use crate::error::QuoinError;
-use crate::fiber::YieldReason;
 use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::array::{self, ArrayDType};
 use crate::runtime::big_decimal::NativeBigDecimal;
 use crate::runtime::big_integer::NativeBigInteger;
+use crate::runtime::claims::{PeerClaims, WaitKind};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::runtime::eval_string;
+use crate::runtime::worker_service::{claim_peer_object, end_peer_call_and_wake};
 use crate::symbol::Symbol;
 use crate::value::{AnyCollect, Class, NamespacedName, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
-use crate::vm_scheduler::{TaskId, Wake};
 
 /// Resolve a name in the host's global table to its `Value` (a class is a class-valued global).
 /// The name is parsed as a `NamespacedName`, so a namespaced class such as `[ADBC]Database` resolves
@@ -361,45 +361,49 @@ pub(crate) fn record_boundary_row(
     );
 }
 
-/// Native state behind an `Extension` value: the registered stream id for the UDS, the child
-/// process, its socket path (for cleanup), the shared fd-reap queue, whether the extension has
-/// been observed dead, and the queue of ext-side resource ids dropped by the host (flushed to
-/// the extension as `Call.releases`).
+/// Native state behind an `Extension` value: the lane sockets to the child process, its socket
+/// path (for cleanup), the shared fd-reap queue, whether the extension has been observed dead,
+/// the queue of ext-side resource ids dropped by the host (flushed as `Call.releases`), and the
+/// §5.1 claim state that arbitrates the lanes.
 #[derive(Debug)]
 pub struct NativeExtension {
-    id: StreamId,
+    /// The lane sockets, in connect order (index 0 carried the manifest handshake). Each is a
+    /// request/response stream with no request ids, so a conversation pins one socket for its
+    /// whole LIFO duration; the manifest's `lanes` declaration is how many exist.
+    socks: Vec<StreamId>,
+    /// The idle lane sockets. The lane tokens in `claims` bound concurrent conversations to
+    /// `socks.len()`, so a granted top-level call always finds a socket here — the token is
+    /// the right to pop one.
+    free_socks: Vec<StreamId>,
+    /// Open conversations by task id: the lane socket each is pinned to and its LIFO depth
+    /// (1 = a plain call; >1 = re-entrant nesting — the same task calling back in from inside
+    /// a block the extension is invoking; the nested call's frames ride the SAME socket,
+    /// the extension servicing them while awaiting its own host-op reply). Capped by
+    /// [`MAX_CALL_DEPTH`] so mutual host<->extension recursion dies loudly.
+    convs: HashMap<usize, ExtConv>,
+    /// §5.1 claims for this peer: per-resource mailboxes plus the lane pool (`claims.rs`, the
+    /// same machinery hosted services run). Registered in `vm.io.claim_peers`, so extension
+    /// claims appear in `VM.claims`/`VM.claimsReport` and the cross-peer deadlock walk.
+    claims: Rc<RefCell<PeerClaims>>,
+    /// Mints the pseudo-object id for each class-side/generic call: unique per call and
+    /// high-bit-tagged (clear of real resource ids), so those calls contend only on lanes —
+    /// parallel constructors are the point of declaring lanes (§5.1 rule 5's lane-only claim,
+    /// expressed as a fresh never-contended object riding the ordinary joint acquisition).
+    next_pseudo: u64,
     /// A process-unique, never-reused id for this extension; tags the host-value handles it mints
     /// so they can be bulk-released when it dies or is dropped (`HandleTable::release_for_ext`).
     ext_id: u64,
     child: Child,
     sock_path: String,
-    /// Shared clone of `VmState::socket_reap`; `Drop` enqueues `id` so the driver closes the
-    /// host-side UDS fd (the reactor can't be touched from `Drop`). Mirrors `NativeSocket`.
+    /// Shared clone of `VmState::socket_reap`; `Drop` enqueues every lane socket so the driver
+    /// closes the host-side UDS fds (the reactor can't be touched from `Drop`). Mirrors
+    /// `NativeSocket`.
     reap: Rc<RefCell<Vec<StreamId>>>,
     /// Shared clone of `VmState::ext_handle_reap`; `Drop` enqueues `ext_id` so the driver
     /// bulk-releases this extension's host-value handles (a GC `Drop` can't touch the table).
     handle_reap: Rc<RefCell<Vec<u64>>>,
     /// Set once the child has been observed exited, so further calls fail fast (crash isolation).
     dead: bool,
-    /// The task whose top-level call owns this connection (from the moment the call opens
-    /// until its reply — including the whole re-entrant host-reach conversation, which parks
-    /// on the socket). The transport is a single request/response stream with no request ids,
-    /// so a second top-level call while one is live would interleave frames and desync the
-    /// connection. A DIFFERENT task's call parks in `call_waiters` and is handed the claim
-    /// FIFO by `ext_end_call`. The SAME task re-entering (calling this extension from inside
-    /// a block it is invoking) NESTS instead: the nested call's frames ride the same stream
-    /// strictly LIFO — the extension services the nested `Call` while awaiting its own
-    /// host-op reply — tracked by `depth`. Guarded in `ext_prelude`.
-    owner: Option<TaskId>,
-    /// How many conversations the owner task has open on this connection (1 = a plain
-    /// call; >1 = re-entrant nesting). The claim is handed on / released only when the
-    /// OUTERMOST call ends (`depth` back to 0). Capped so mutual host<->extension
-    /// recursion dies loudly instead of exhausting both processes.
-    depth: u32,
-    /// Tasks parked waiting for the connection claim, FIFO, each stamped with its
-    /// `park_epoch` so a cancelled waiter's ghost entry is skipped on pop — the exact
-    /// channel park model (`channel.rs`).
-    call_waiters: VecDeque<(TaskId, u64)>,
     /// Ext-side resource ids whose host `ExtResource` was dropped, awaiting flush to the
     /// extension as `Call.releases`. Cloned into each `ExtResource` this extension hands out so
     /// its `Drop` can enqueue here (a GC `Drop` can't send a frame; mirrors the fd-reap pattern).
@@ -413,6 +417,18 @@ pub struct NativeExtension {
     /// Boundary-profiling counters (shared with `vm.io.ext_stats`, which outlives us).
     stats: Rc<RefCell<BoundaryStats>>,
 }
+
+/// One open conversation, pinned to a lane socket (keyed by task in
+/// [`NativeExtension::convs`]).
+#[derive(Debug)]
+struct ExtConv {
+    sock: StreamId,
+    depth: u32,
+}
+
+/// The tag bit for per-call pseudo-object ids (class-side and generic calls), keeping them
+/// clear of extension-assigned resource ids (which count up from 1).
+const PSEUDO_OBJECT_BASE: u64 = 1 << 63;
 
 /// Native state behind an `ExtResource` value: an opaque token for a resource that lives in the
 /// extension process. Holds the extension-assigned id and a clone of that extension's
@@ -484,9 +500,9 @@ impl AnyCollect for NativeExtension {
 
 impl Drop for NativeExtension {
     fn drop(&mut self) {
-        // Best-effort teardown: enqueue the host-side fd and this extension's handles for the
+        // Best-effort teardown: enqueue every lane fd and this extension's handles for the
         // driver to reap, kill + reap the child, and remove the socket file.
-        self.reap.borrow_mut().push(self.id);
+        self.reap.borrow_mut().extend(self.socks.iter().copied());
         self.handle_reap.borrow_mut().push(self.ext_id);
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -1185,7 +1201,10 @@ fn finish_outcome<'gc>(
 
 /// The per-call context peeked from an `Extension`'s native state.
 struct ExtCall {
+    /// The lane socket this call's conversation is pinned to.
     id: StreamId,
+    /// The claimed object: an ext resource id, or a per-call pseudo id (class-side/generic).
+    object_id: u64,
     ext_id: u64,
     dead: bool,
     /// Shared reap queue — to flush dropped-resource releases and to clone into a returned resource.
@@ -1195,166 +1214,137 @@ struct ExtCall {
     releases: Vec<u64>,
     /// The peer's boundary-profiling table (shared; the call folds itself in when it ends).
     stats: Rc<RefCell<BoundaryStats>>,
-    /// How long this call parked waiting for the connection claim (0 on the uncontended path).
+    /// How long this call parked waiting for its claim (0 on the uncontended path).
     claim_wait_micros: u64,
 }
 
-/// One attempt to claim the connection for the current task.
-enum Claim {
-    /// Claimed — outermost or nested — with the `ExtCall` context, releases drained.
-    Granted(ExtCall),
-    /// The owner task tried to nest past [`MAX_CALL_DEPTH`].
-    TooDeep,
-    /// Another task's call is in flight; the current task was appended to `call_waiters`.
-    Queued,
+/// What a call claims: the receiver's resource id, or a fresh per-call pseudo-object
+/// (class-side constructors/methods and the generic `call:with:` path — no instance to
+/// serialize on, so the call contends only on lanes).
+enum ExtClaimKey {
+    Resource(u64),
+    PerCall,
 }
 
-/// Build the per-call context under an already-held claim (releases drained here, once).
-fn ext_call_ctx(e: &mut NativeExtension) -> ExtCall {
-    ExtCall {
-        id: e.id,
-        ext_id: e.ext_id,
-        dead: e.dead,
-        resource_reap: e.resource_reap.clone(),
-        releases: e.resource_reap.borrow_mut().drain(..).collect(),
-        stats: e.stats.clone(),
-        claim_wait_micros: 0,
-    }
-}
-
-/// The most deeply the owner task may nest conversations on one connection (a host block
+/// The most deeply one task may nest conversations on one lane socket (a host block
 /// calling back into the extension that is invoking it, recursively). Both processes spend
 /// real stack per level; past this, mutual host<->extension recursion is a bug — die loudly
 /// and catchably rather than exhausting either side.
 const MAX_CALL_DEPTH: u32 = 16;
 
-/// Peek at the extension's native state and drain its pending dropped-resource releases (one peek
-/// per call), shared by the generic `call:with:` path and extension-backed-class dispatch. Also
-/// claims the connection for this top-level call: the transport is a single request/response
-/// stream, so one call runs at a time — a concurrent call from ANOTHER task parks FIFO and is
-/// handed the claim when the in-flight call finishes (`ext_end_call`), so `Async.gather:` over
-/// one connection just works. The OWNER task re-entering (from inside a block the extension is
-/// invoking) NESTS: its frames ride the same stream strictly LIFO, the extension servicing the
-/// nested call while awaiting its own host-op reply. The caller must release the claim
-/// (`ext_end_call`) once the call completes — nested or not.
+/// Open one call on the extension, shared by the generic `call:with:` path and
+/// extension-backed-class dispatch: claim the target object under §5.1 (per-resource
+/// mailboxes + the lane pool — `claim_peer_object`, the exact machinery hosted services
+/// run), then pin the conversation to a lane socket and drain the pending dropped-resource
+/// releases. A top-level call takes a joint (object, lane) claim and pops a free socket
+/// (the lane token guarantees one); the SAME task re-entering (from inside a block the
+/// extension is invoking) NESTS — object-only claim, frames riding its existing socket
+/// strictly LIFO. Calls to different instances overlap up to the lane count; calls to one
+/// instance serialize FIFO. The caller must close the call (`ext_end_call`) once it
+/// completes — nested or not.
 fn ext_prelude<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
+    key: ExtClaimKey,
+    object_label: &str,
+    what: &str,
 ) -> Result<ExtCall, QuoinError> {
     let me = vm.sched.current_task;
-    let epoch = vm.current_park_epoch();
-    let claim = receiver
-        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| match e.owner {
-            Some(owner) if owner == me => {
-                if e.depth >= MAX_CALL_DEPTH {
-                    Claim::TooDeep
-                } else {
-                    e.depth += 1;
-                    Claim::Granted(ext_call_ctx(e))
+    // Peek: mint the object id, find whether this task already has a conversation open
+    // (→ nested), and take the claims handle. The depth cap is checked here, before the
+    // claim, so an over-deep nest never holds a fresh object claim it would have to undo.
+    let (object_id, conv_depth, claims) = receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+            let object_id = match key {
+                ExtClaimKey::Resource(id) => id,
+                ExtClaimKey::PerCall => {
+                    e.next_pseudo += 1;
+                    PSEUDO_OBJECT_BASE | e.next_pseudo
                 }
-            }
-            Some(_) => {
-                e.call_waiters.push_back((me, epoch));
-                Claim::Queued
-            }
-            None => {
-                e.owner = Some(me);
-                e.depth = 1;
-                Claim::Granted(ext_call_ctx(e))
-            }
+            };
+            let conv_depth = e.convs.get(&me.0).map(|c| c.depth);
+            (object_id, conv_depth, e.claims.clone())
         })
         .map_err(QuoinError::Other)?;
-    match claim {
-        Claim::Granted(call) => Ok(call),
-        Claim::TooDeep => Err(QuoinError::Other(format!(
+    if conv_depth.is_some_and(|d| d >= MAX_CALL_DEPTH) {
+        return Err(QuoinError::Other(format!(
             "extension call nested {MAX_CALL_DEPTH} levels deep on one connection — \
              mutual host<->extension recursion? (each level is a live call frame in \
              both processes)"
-        ))),
-        Claim::Queued => {
-            // Park until the in-flight call HANDS us the claim (fair FIFO, no re-race
-            // with running tasks) — the channel park model verbatim. The wait is
-            // boundary-profiled separately from the call itself: mailbox contention
-            // is its own diagnosis (`ACTOR_OBJECTS.md` §7).
-            let queued_at = Instant::now();
-            if let Some(t) = vm.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
-                t.parked_on_channel = true;
-            }
-            vm.set_park_info("extension call".to_string(), Some(receiver));
-            if let Some(yielder) = unsafe { vm.get_yielder() } {
-                yielder.suspend(YieldReason::ChannelPark);
-            } else {
-                return Err(QuoinError::Other(
-                    "extension call queued outside the VM scheduler".to_string(),
-                ));
-            }
-            // On resume: if the claim was already handed to us and a cancel raced in,
-            // pass it onward (mirrors channel_redeliver) — never strand the queue.
-            let handed = matches!(vm.sched.wake.take(), Some(Wake::ExtClaim));
-            if vm.sched.cancel_current {
-                if handed {
-                    ext_end_call(vm, mc, receiver);
-                }
-                return Err(vm.take_cancellation());
-            }
-            if !handed {
-                return Err(QuoinError::Other(
-                    "extension claim park resumed without the claim".to_string(),
-                ));
-            }
-            // Ownership was transferred by `ext_end_call`; build the context under it.
-            receiver
-                .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
-                    debug_assert_eq!(e.owner, Some(me));
-                    let mut ctx = ext_call_ctx(e);
-                    ctx.claim_wait_micros = queued_at.elapsed().as_micros() as u64;
-                    ctx
-                })
-                .map_err(QuoinError::Other)
-        }
+        )));
     }
+    let kind = if conv_depth.is_some() {
+        WaitKind::Nested
+    } else {
+        WaitKind::TopLevel
+    };
+    let claim_wait_micros = claim_peer_object(
+        vm,
+        receiver,
+        &claims,
+        object_id,
+        object_label,
+        what,
+        kind,
+        "extension claim",
+    )?;
+    // Claimed: pin the conversation to a lane socket and build the call context (releases
+    // drained here, once per call).
+    receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+            if !e.convs.contains_key(&me.0) {
+                let sock = e
+                    .free_socks
+                    .pop()
+                    .expect("extension lane token granted with no free socket");
+                e.convs.insert(me.0, ExtConv { sock, depth: 0 });
+            }
+            let conv = e.convs.get_mut(&me.0).expect("inserted above");
+            conv.depth += 1;
+            ExtCall {
+                id: conv.sock,
+                object_id,
+                ext_id: e.ext_id,
+                dead: e.dead,
+                resource_reap: e.resource_reap.clone(),
+                releases: e.resource_reap.borrow_mut().drain(..).collect(),
+                stats: e.stats.clone(),
+                claim_wait_micros,
+            }
+        })
+        .map_err(QuoinError::Other)
 }
 
-/// Release the claim taken by [`ext_prelude`] once a call has finished (whether it succeeded,
-/// errored, or the extension died). A NESTED call's end only pops one depth level — the owner
-/// task still has the outer conversation open. The OUTERMOST end hands the claim to the front
-/// LIVE waiter — stale (cancelled) entries are skipped by park-epoch identity, exactly as in
-/// `channel.rs` — or clears it when no one waits. Never touches state when the extension is
-/// gone from the table.
-fn ext_end_call<'gc>(vm: &mut VmState<'gc>, mc: &gc_arena::Mutation<'gc>, receiver: Value<'gc>) {
-    let still_nested = receiver
+/// Close the call opened by [`ext_prelude`] (whether it succeeded, errored, or the
+/// extension died): pop one conversation level — the outermost pop returns the lane socket
+/// to the pool — then release the object claim, waking FIFO handoffs (stale cancelled
+/// waiters skipped by park-epoch identity, exactly as in `channel.rs`). Never touches
+/// state when the extension is gone from the table.
+fn ext_end_call<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    object_id: u64,
+) {
+    let me = vm.sched.current_task;
+    let claims = receiver
         .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
-            e.depth = e.depth.saturating_sub(1);
-            e.depth > 0
-        })
-        .unwrap_or(false);
-    if still_nested {
-        return;
-    }
-    loop {
-        let next = receiver
-            .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
-                match e.call_waiters.pop_front() {
-                    Some(waiter) => {
-                        // Tentatively assign; confirmed below iff the waiter is live.
-                        e.owner = Some(waiter.0);
-                        e.depth = 1;
-                        Some(waiter)
-                    }
-                    None => {
-                        e.owner = None;
-                        None
-                    }
+            if let Some(conv) = e.convs.get_mut(&me.0) {
+                conv.depth = conv.depth.saturating_sub(1);
+                if conv.depth == 0 {
+                    let sock = conv.sock;
+                    e.convs.remove(&me.0);
+                    // Returned BEFORE the grants are delivered below: a woken top-level
+                    // waiter pops its socket when it actually resumes.
+                    e.free_socks.push(sock);
                 }
-            })
-            .unwrap_or(None);
-        let Some((id, epoch)) = next else { return };
-        if vm.channel_waiter_live(id, epoch) {
-            vm.wake_channel_task(id, Wake::ExtClaim);
-            return;
-        }
-        // Ghost (cancelled while queued): skip it and try the next waiter.
+            }
+            e.claims.clone()
+        })
+        .ok();
+    if let Some(claims) = claims {
+        end_peer_call_and_wake(vm, &claims, object_id, me.0);
     }
 }
 
@@ -1371,9 +1361,12 @@ fn run_extension_method<'gc>(
     args: Vec<Value<'gc>>,
     data_arg: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
-    let ctx = ext_prelude(vm, mc, receiver)?;
+    // The generic path has no receiver instance: each call claims a fresh pseudo-object,
+    // so generic calls serialize only on lane availability.
+    let what = format!("extension call '{op}'");
+    let ctx = ext_prelude(vm, mc, receiver, ExtClaimKey::PerCall, &op, &what)?;
     if ctx.dead {
-        ext_end_call(vm, mc, receiver);
+        ext_end_call(vm, mc, receiver, ctx.object_id);
         return Err(extension_dead_error("already exited"));
     }
     // Serialize the optional structured-value payload before opening the call (this extension's
@@ -1383,7 +1376,7 @@ fn run_extension_method<'gc>(
         Some(value) => match value_to_wire(value, Some(&ctx.resource_reap)) {
             Ok(d) => Some(d),
             Err(e) => {
-                ext_end_call(vm, mc, receiver);
+                ext_end_call(vm, mc, receiver, ctx.object_id);
                 return Err(e);
             }
         },
@@ -1416,7 +1409,7 @@ fn run_extension_method<'gc>(
         ctx.claim_wait_micros,
         outcome.is_err(),
     );
-    ext_end_call(vm, mc, receiver);
+    ext_end_call(vm, mc, receiver, ctx.object_id);
     finish_outcome(vm, mc, receiver, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
@@ -1461,9 +1454,19 @@ pub fn dispatch_ext_method<'gc>(
     // both `[Ns]Name` (loadPackage) and a verbatim bare name (spawn:).
     let class_name = class_obj.borrow().name.name.clone();
 
-    let ctx = ext_prelude(vm, mc, ext)?;
+    // An instance send claims ITS resource — the per-object mailbox, so calls to one
+    // instance serialize while calls to different instances overlap up to the lane count.
+    // A class-side send (recv 0) claims a fresh pseudo-object: constructors contend only
+    // on lanes (parallel `connect`s are the point of a DB extension declaring lanes).
+    let key = if recv == 0 {
+        ExtClaimKey::PerCall
+    } else {
+        ExtClaimKey::Resource(recv)
+    };
+    let what = format!("extension call '{}.{}'", class_name, selector.as_str());
+    let ctx = ext_prelude(vm, mc, ext, key, &class_name, &what)?;
     if ctx.dead {
-        ext_end_call(vm, mc, ext);
+        ext_end_call(vm, mc, ext, ctx.object_id);
         return Err(extension_dead_error("already exited"));
     }
     // The method arguments are routed by `extension_call` (ext-class mode) into the ordered
@@ -1494,7 +1497,7 @@ pub fn dispatch_ext_method<'gc>(
         ctx.claim_wait_micros,
         outcome.is_err(),
     );
-    ext_end_call(vm, mc, ext);
+    ext_end_call(vm, mc, ext, ctx.object_id);
     finish_outcome(vm, mc, ext, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
@@ -1557,8 +1560,12 @@ fn read_reply_frame_timed<'gc>(
 /// generic `call:with:` extensions stay backward-compatible. The read is time-bounded so a silent
 /// extension fails the spawn instead of hanging the VM. This exchange is also the protocol-version
 /// handshake — an SDK speaking a different version is refused here, with both versions named,
-/// before any other frame is interpreted.
-fn fetch_manifest<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<ClassDecl>, QuoinError> {
+/// before any other frame is interpreted. Also returns the manifest's declared lane count,
+/// normalized: 0/absent (a pre-lanes SDK) means 1, and the cap matches the worker surface's.
+fn fetch_manifest<'gc>(
+    vm: &mut VmState<'gc>,
+    id: StreamId,
+) -> Result<(Vec<ClassDecl>, u32), QuoinError> {
     write_msg(
         vm,
         id,
@@ -1571,7 +1578,9 @@ fn fetch_manifest<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<ClassD
         .map_err(|e| QuoinError::Other(format!("Extension manifest: malformed frame: {e}")))?
     {
         Msg::ManifestReturn {
-            classes, version, ..
+            classes,
+            version,
+            lanes,
         } => {
             if version != PROTOCOL_VERSION {
                 return Err(QuoinError::Other(format!(
@@ -1579,7 +1588,7 @@ fn fetch_manifest<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<ClassD
                      this host speaks {PROTOCOL_VERSION} — update the older side"
                 )));
             }
-            Ok(classes)
+            Ok((classes, lanes.clamp(1, 1024)))
         }
         other => Err(QuoinError::Other(format!(
             "Extension manifest: expected ManifestReturn, got {other:?}"
@@ -1625,32 +1634,17 @@ fn spawn_and_connect<'gc>(
     // The child binds the socket asynchronously after exec, so retry the connect briefly until it's
     // listening (each attempt parks the fiber).
     //
-    // Both SDKs unlink the path as soon as they accept, so a healthy extension leaves nothing
-    // behind. The failure arms below still remove it: a child that binds and then dies before it
-    // can accept -- or a third-party SDK that never unlinks -- would otherwise strand the file,
-    // and we are the last party that knows the path.
-    let mut attempts = 0u32;
-    let id = loop {
-        match vm.await_io(IoRequest::ConnectUnix {
-            path: sock_path.clone(),
-        })? {
-            IoResult::Connected(id) => break id,
-            IoResult::Err(_) if attempts < 100 => {
-                attempts += 1;
-                vm.await_io(IoRequest::Sleep { ms: 5 })?;
-            }
-            IoResult::Err(e) => {
-                let _ = child.kill();
-                let _ = std::fs::remove_file(&sock_path);
-                return Err(QuoinError::from_io_error(&e));
-            }
-            other => {
-                let _ = child.kill();
-                let _ = std::fs::remove_file(&sock_path);
-                return Err(QuoinError::Other(format!(
-                    "Extension: unexpected connect result {other:?}"
-                )));
-            }
+    // A single-lane SDK unlinks the path as soon as it accepts; a multi-lane one keeps it until
+    // its accept loop finishes (the extra lanes below connect to this same path). Either way a
+    // healthy extension leaves nothing behind. The failure arms below still remove it: a child
+    // that binds and then dies before it can accept -- or a third-party SDK that never unlinks --
+    // would otherwise strand the file, and we are the last party that knows the path.
+    let id = match connect_ext_lane(vm, &sock_path) {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = std::fs::remove_file(&sock_path);
+            return Err(e);
         }
     };
 
@@ -1658,7 +1652,7 @@ fn spawn_and_connect<'gc>(
     // point), so no GC value may be held across it. A generic extension returns an empty manifest.
     // On any handshake failure (including the timeout) the child isn't owned by an `Extension` value
     // yet, so kill it here rather than orphan it.
-    let manifest = match fetch_manifest(vm, id) {
+    let (manifest, lanes) = match fetch_manifest(vm, id) {
         Ok(m) => m,
         Err(e) => {
             let _ = child.kill();
@@ -1667,8 +1661,27 @@ fn spawn_and_connect<'gc>(
         }
     };
 
+    // The manifest declared its lane count: open the remaining lane connections to the same
+    // path (the SDK's accept loop is serving them each on its own thread). One conversation
+    // runs per lane; the §5.1 claim state below is what arbitrates them.
+    let mut socks = vec![id];
+    for _ in 1..lanes {
+        match connect_ext_lane(vm, &sock_path) {
+            Ok(lane_id) => socks.push(lane_id),
+            Err(e) => {
+                // The fds already connected are not yet owned by an `Extension` value;
+                // enqueue them for the driver to close rather than leak them.
+                vm.io.socket_reap.borrow_mut().extend(socks.iter().copied());
+                let _ = child.kill();
+                let _ = std::fs::remove_file(&sock_path);
+                return Err(e);
+            }
+        }
+    }
+
     // Boundary profiling: one table per peer, registered globally so `VM.boundaryStats`
-    // can enumerate it — and keep it after the extension dies or is dropped.
+    // can enumerate it — and keep it after the extension dies or is dropped. The claim
+    // state registers beside it for `VM.claims`, under the same peer label.
     let peer = namespace.clone().unwrap_or_else(|| {
         Path::new(command)
             .file_name()
@@ -1676,32 +1689,59 @@ fn spawn_and_connect<'gc>(
             .unwrap_or_else(|| command.to_string())
     });
     let stats = Rc::new(RefCell::new(BoundaryStats {
-        peer,
+        peer: peer.clone(),
         rows: HashMap::new(),
     }));
     vm.io.ext_stats.borrow_mut().push(stats.clone());
+    let claims = Rc::new(RefCell::new(PeerClaims::new(peer, lanes)));
+    vm.io.claim_peers.borrow_mut().push(claims.clone());
 
     let class = vm.get_or_create_builtin_class(mc, "Extension");
     let ext_val = vm.new_native_state(
         mc,
         class,
         NativeExtension {
-            id,
+            free_socks: socks.clone(),
+            socks,
+            convs: HashMap::new(),
+            claims,
+            next_pseudo: 0,
             ext_id: unique_ext_id(),
             child,
             sock_path,
             reap: vm.io.socket_reap.clone(),
             handle_reap: vm.io.ext_handle_reap.clone(),
             dead: false,
-            owner: None,
-            depth: 0,
-            call_waiters: VecDeque::new(),
             resource_reap: Rc::new(RefCell::new(Vec::new())),
             namespace,
             stats,
         },
     );
     Ok((ext_val, manifest))
+}
+
+/// Connect one lane to the extension's socket path, retrying briefly (each attempt parks
+/// the fiber): the child binds asynchronously after exec, and the extra lanes race its
+/// accept loop.
+fn connect_ext_lane<'gc>(vm: &mut VmState<'gc>, sock_path: &str) -> Result<StreamId, QuoinError> {
+    let mut attempts = 0u32;
+    loop {
+        match vm.await_io(IoRequest::ConnectUnix {
+            path: sock_path.to_string(),
+        })? {
+            IoResult::Connected(id) => return Ok(id),
+            IoResult::Err(_) if attempts < 100 => {
+                attempts += 1;
+                vm.await_io(IoRequest::Sleep { ms: 5 })?;
+            }
+            IoResult::Err(e) => return Err(QuoinError::from_io_error(&e)),
+            other => {
+                return Err(QuoinError::Other(format!(
+                    "Extension: unexpected connect result {other:?}"
+                )));
+            }
+        }
+    }
 }
 
 /// The launch + identity spec parsed from a package's `quoin.toml` (`EXT_PACKAGING.md` §3).

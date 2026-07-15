@@ -206,12 +206,9 @@ pub enum Wake<'gc> {
         #[collect(require_static)]
         message: String,
     },
-    /// A task queued for an extension connection was HANDED the in-flight claim by the
-    /// finishing call (`extension.rs` fair queuing): on resume it proceeds directly into
-    /// its call — ownership already transferred, no re-race with running tasks.
-    ExtClaim,
-    /// A task queued for a hosted object's claim was HANDED it by the finishing call
-    /// (`claims.rs`, ACTOR_OBJECTS.md §5.1): ownership already transferred. `lane` is
+    /// A task queued for a hosted object's or extension's claim was HANDED it by the
+    /// finishing call (`claims.rs`, ACTOR_OBJECTS.md §5.1): ownership already
+    /// transferred. `lane` is
     /// the jointly-granted lane for a top-level send, `None` for a nested grant (rides
     /// its bound lane) or a `serviceStop` drain wake.
     ServiceClaim {
