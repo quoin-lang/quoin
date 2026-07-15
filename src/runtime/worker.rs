@@ -772,36 +772,9 @@ pub fn build_worker_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Worker", Some("Object"))
         .construct_with("use Worker.spawn: / Worker.start:")
         // ---- worker side: the hosted-object serve loop (ACTOR_OBJECTS.md §2/§5.1).
-        // Invoked by the synthesized lines a service spawn appends to the unit
-        // (`Worker.hostRoot:'Class'` then a gather of `Worker.hostServeLane`
+        // Invoked by the synthesized lines a hosting spawn appends to the unit
+        // (`Worker.hostBlockRoot` then a gather of `Worker.hostServeLane`
         // thunks, one fiber per lane); not really a user-facing surface.
-        .class_method("hostRoot:", |vm, mc, _receiver, args| {
-            let class_name = args[0].as_string().ok_or_else(|| {
-                QuoinError::Other("Worker.hostRoot: expects a String class name".into())
-            })?;
-            let outbox_tx = match &vm.worker_link {
-                Some(link) => link.outbox_tx.clone(),
-                None => {
-                    return Err(QuoinError::Other(
-                        "Worker.hostRoot: only runs inside a worker".into(),
-                    ));
-                }
-            };
-            let class_val =
-                crate::runtime::extension::resolve_global(vm, &class_name).ok_or_else(|| {
-                    QuoinError::Other(format!("Worker.hostRoot: no class named '{class_name}'"))
-                })?;
-            // The root hosted object (id 1): instantiation failures propagate
-            // to the done lane exactly as any unit error does.
-            let root = vm.call_method(mc, class_val, "new", Vec::new())?;
-            announce_root(vm, root, class_val, &class_name, &outbox_tx);
-            Ok(Value::Nil)
-        })
-        .doc(
-            "Worker side of a hosted service (used by the synthesized service unit): \
-             instantiate the named class, root it in the hosted-object table, and \
-             report ready. Not meant to be called directly.",
-        )
         .class_method("hostBlockRoot", |vm, mc, _receiver, _args| {
             let outbox_tx = match &vm.worker_link {
                 Some(link) => link.outbox_tx.clone(),
@@ -1253,66 +1226,6 @@ pub fn build_worker_class() -> NativeClassBuilder {
         )
         // ---- hosting (ACTOR_OBJECTS.md §2): worker-resident objects behind
         // real installed proxy classes.
-        .class_method("host:class:", |vm, mc, receiver, args| {
-            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
-            let class_name = crate::runtime::worker_service::string_arg(args[1], "the class name")?;
-            crate::runtime::worker_service::host_class(
-                vm, mc, receiver, path, class_name, "thread", 1,
-            )
-        })
-        .doc(
-            "Host an object in a dedicated worker isolate: spawn a worker running the \
-             unit, instantiate the named class in it (`TheClass.new`), and answer a \
-             PROXY -- a real class installed from the worker's manifest, whose method \
-             sends park and cross the boundary. Sticky state, serialized per object: \
-             an actor. Errors raise catchably with the worker's stack as \
-             `ex.remoteStack`; `serviceStop` ends the worker.\n\n\
-             ```\n\
-             var index = Worker.host:'search/index.qn' class:'SearchIndex';\n\
-             index.add:doc;\n\
-             var hits = index.query:'quoin'\n\
-             ```",
-        )
-        .class_method("host:class:lanes:", |vm, mc, receiver, args| {
-            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
-            let class_name = crate::runtime::worker_service::string_arg(args[1], "the class name")?;
-            let lanes = crate::runtime::worker_service::lanes_arg(args[2])?;
-            crate::runtime::worker_service::host_class(
-                vm, mc, receiver, path, class_name, "thread", lanes,
-            )
-        })
-        .doc(
-            "As `host:class:` with N concurrent lanes (docs/internal/ACTOR_OBJECTS.md \
-             section 5): calls to DIFFERENT hosted objects overlap, up to N in flight; \
-             calls to one object still serialize (its mailbox). Worker-side, each lane \
-             is a cooperative fiber.",
-        )
-        .class_method("host:class:backing:", |vm, mc, receiver, args| {
-            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
-            let class_name = crate::runtime::worker_service::string_arg(args[1], "the class name")?;
-            let backing = crate::runtime::worker_service::backing_arg(args[2])?;
-            crate::runtime::worker_service::host_class(
-                vm, mc, receiver, path, class_name, backing, 1,
-            )
-        })
-        .doc(
-            "As `host:class:`, choosing the backing: 'thread' (the default) or 'process' \
-             (a child qn process -- the escape from the in-process thread ceiling).",
-        )
-        .class_method("host:class:backing:lanes:", |vm, mc, receiver, args| {
-            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
-            let class_name = crate::runtime::worker_service::string_arg(args[1], "the class name")?;
-            let backing = crate::runtime::worker_service::backing_arg(args[2])?;
-            let lanes = crate::runtime::worker_service::lanes_arg(args[3])?;
-            crate::runtime::worker_service::host_class(
-                vm, mc, receiver, path, class_name, backing, lanes,
-            )
-        })
-        .doc(
-            "Backing and lanes together: N concurrent lanes on either backing, with \
-             identical semantics -- calls to one object serialize, calls to different \
-             objects overlap.",
-        )
         .class_method("host:with:", |vm, mc, receiver, args| {
             let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
             crate::runtime::worker_service::host_block(

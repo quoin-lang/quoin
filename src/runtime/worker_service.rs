@@ -1,10 +1,11 @@
-//! `WorkerService` — hosted objects on the peer protocol (docs/internal/ACTOR_OBJECTS.md
-//! §2; the L4 of docs/internal/CONCURRENCY_ARCH.md §10, converged): host a class in a
-//! dedicated worker isolate and get a PROXY whose ordinary method sends become
-//! peer-protocol `Call` frames. Sticky state, serialized access — an actor.
+//! Hosted objects on the peer protocol (docs/internal/ACTOR_OBJECTS.md §2; the
+//! L4 of docs/internal/CONCURRENCY_ARCH.md §10, converged): a block evaluates
+//! in a dedicated worker isolate, the object it answers is hosted, and the
+//! caller gets a PROXY whose ordinary method sends become peer-protocol
+//! `Call` frames. Sticky state, serialized access — an actor.
 //!
 //! ```text
-//! var index = WorkerService.host:'search/index.qn' class:'SearchIndex';
+//! var index = Worker.host:'search/index.qn' with:{ SearchIndex.new };
 //! index.add:doc;
 //! var hits = index.query:'quoin';
 //! ```
@@ -81,7 +82,6 @@ use crate::vm::VmState;
 use crate::vm::scheduler::{TaskId, Wake};
 use crate::worker::{
     DispatchReq, OP_STOP, PortableBlock, note_message, rebuild_portable_value, snapshot_block,
-    spawn_worker_service,
 };
 
 /// Proxy-side state: the worker's dispatch lane plus this proxy's hosted-object
@@ -884,54 +884,6 @@ fn sub_proxy<'gc>(
     )
 }
 
-/// `Worker.host:'unit.qn' class:'Pool'` (+ backing/lanes variants): spawn a
-/// worker running the unit, instantiate the named class in it, host the
-/// instance, and answer the root proxy.
-pub(crate) fn host_class<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &gc_arena::Mutation<'gc>,
-    receiver: Value<'gc>,
-    path: String,
-    class_name: String,
-    backing: &'static str,
-    lanes: u32,
-) -> Result<Value<'gc>, QuoinError> {
-    let Value::Class(_) = receiver else {
-        return Err(QuoinError::Other("Worker.host: bad receiver".into()));
-    };
-    let (ch, pid) = match backing {
-        "process" => {
-            let (ch, pid, _grip) = crate::worker::spawn_worker_process(
-                Some(path.clone()),
-                crate::worker::ProcessBody::Class(class_name.clone()),
-                lanes,
-            )
-            .map_err(QuoinError::Other)?;
-            (ch, Some(pid))
-        }
-        _ => (
-            spawn_worker_service(path.clone(), class_name.clone(), lanes),
-            None,
-        ),
-    };
-    let chan_link = crate::runtime::channel_relay::register_chan_link(
-        vm,
-        ch.chan_tx.clone(),
-        ch.chan_rx.clone(),
-    );
-    finish_host(
-        vm,
-        mc,
-        ch,
-        pid,
-        backing,
-        lanes,
-        &path,
-        Some(class_name),
-        chan_link,
-    )
-}
-
 /// The block forms — `Worker.host:'unit.qn' with:{ Pool.new:cfg }` and the
 /// unit-less `Worker.with:{ Timer.new }`: the PORTABLE block ships to the
 /// worker, runs there after its unit loads, and the object it answers is
@@ -1012,17 +964,7 @@ pub(crate) fn host_block<'gc>(
         })?;
         let _ = ch.inbox_tx.try_send(msg);
     }
-    finish_host(
-        vm,
-        mc,
-        ch,
-        pid,
-        backing,
-        lanes,
-        &label_path,
-        None,
-        chan_link,
-    )
+    finish_host(vm, mc, ch, pid, backing, lanes, &label_path, chan_link)
 }
 
 /// Classify one spawn-time `args:` element into its crossing form: a channel
@@ -1055,9 +997,9 @@ pub(crate) fn spawn_arg<'gc>(
 
 /// The shared back half of hosting: registry rows, the ready/manifest
 /// handshake, claim + boundary + relay registration, and the installed-class
-/// two-step that mints the root proxy. `class_name_hint` is the class form's
-/// argument; the block form learns the class from the ready message.
-#[allow(clippy::too_many_arguments)] // the two host forms thread their full spawn context
+/// two-step that mints the root proxy. The hosted class is whatever the
+/// ready message names — the block's answer.
+#[allow(clippy::too_many_arguments)] // hosting threads its full spawn context
 fn finish_host<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -1066,7 +1008,6 @@ fn finish_host<'gc>(
     backing: &'static str,
     lanes: u32,
     path: &str,
-    class_name_hint: Option<String>,
     chan_link: usize,
 ) -> Result<Value<'gc>, QuoinError> {
     // Disambiguate the display label when several services host the same
@@ -1119,7 +1060,7 @@ fn finish_host<'gc>(
                 )));
             }
         };
-    let class_name = match class_name_hint.or(ready_class) {
+    let class_name = match ready_class {
         Some(n) => n,
         None => {
             return Err(QuoinError::Other(

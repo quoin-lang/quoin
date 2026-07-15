@@ -923,12 +923,12 @@ impl VmRunner {
             }
             VmRunnerMode::WorkerServe => {
                 let Some(sock) = self.options.target_path.clone() else {
-                    eprintln!("usage: qn worker-serve <sock> <unit> [<serviceClass> [<lanes>]]");
+                    eprintln!("usage: qn worker-serve <sock> <unit|@none> [@block|@job [<lanes>]]");
                     exit(2);
                 };
                 let args = &self.options.vm_options.arguments;
                 let Some(unit) = args.first() else {
-                    eprintln!("usage: qn worker-serve <sock> <unit> [<serviceClass> [<lanes>]]");
+                    eprintln!("usage: qn worker-serve <sock> <unit|@none> [@block|@job [<lanes>]]");
                     exit(2);
                 };
                 let service = args.get(1).map(|s| s.as_str());

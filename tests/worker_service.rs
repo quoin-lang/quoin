@@ -58,7 +58,7 @@ fn service_state_errors_and_stop() {
     let script = r#"
 Marker <- { x -> { 1 } };
 var ok = true;
-var c = Worker.host:'@counter.qn@' class:'Counter';
+var c = Worker.host:'@counter.qn@' with:{ Counter.new };
 
 "* sticky state across ordinary sends
 ((c.add:5) == 5).else:{ ok = false };
@@ -98,7 +98,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_serializes_concurrent_callers() {
     let script = r#"
 var ok = true;
-var c = Worker.host:'@counter.qn@' class:'Counter';
+var c = Worker.host:'@counter.qn@' with:{ Counter.new };
 var outs = Async.gather:#(
     { c.slowAdd:1 } { c.slowAdd:1 } { c.slowAdd:1 } { c.slowAdd:1 }
     { c.slowAdd:1 } { c.slowAdd:1 } { c.slowAdd:1 } { c.slowAdd:1 }
@@ -120,19 +120,15 @@ fn service_boot_failures_and_reserved_backing() {
     let script = r#"
 var ok = true;
 "* missing unit file: host: raises, catchable
-var miss = { Worker.host:'/nonexistent/nope.qn' class:'Counter'; 'hosted' }
+var miss = { Worker.host:'/nonexistent/nope.qn' with:{ Counter.new }; 'hosted' }
     .catch:{ |e| 'boot-error' };
 (miss == 'boot-error').else:{ ok = false };
 "* unit loads but the class doesn't exist
-var noClass = { Worker.host:'@counter.qn@' class:'NoSuchClass'; 'hosted' }
+var noClass = { Worker.host:'@counter.qn@' with:{ NoSuchClass.new }; 'hosted' }
     .catch:{ |e| 'no-class' };
 (noClass == 'no-class').else:{ ok = false };
-"* class names must be plain identifiers (they are interpolated)
-var inject = { Worker.host:'@counter.qn@' class:'X; 1.print'; 'hosted' }
-    .catch:{ |e| 'refused' };
-(inject == 'refused').else:{ ok = false };
 "* process backing is REAL now (§13): host, call, stop over the wire
-var pc = Worker.host:'@counter.qn@' class:'Counter' backing:'process';
+var pc = Worker.host:'@counter.qn@' with:{ Counter.new } backing:'process';
 ((pc.add:3) == 3).else:{ ok = false };
 pc.serviceStop;
 ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
@@ -167,7 +163,7 @@ Pool <- { |@made @stash|
 
 const HOSTED_OBJECTS_SCRIPT: &str = r#"
 var ok = true;
-var p = Worker.host:'@pool.qn@' class:'Pool' backing:'@BACKING@';
+var p = Worker.host:'@pool.qn@' with:{ Pool.new } backing:'@BACKING@';
 
 "* a non-portable return is HOSTED: the answer is a live sub-proxy
 var a = p.makeCell;
@@ -262,7 +258,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_manifest_classes() {
     let script = r#"
 var ok = true;
-var p = Worker.host:'@pool.qn@' class:'Pool';
+var p = Worker.host:'@pool.qn@' with:{ Pool.new };
 
 "* the proxy's class is a REAL class named after the hosted one, and
 "* introspection answers the manifest without any round trip
@@ -339,7 +335,7 @@ fn service_block_args() {
     let script = r#"
 GHelper <- { twice: -> { |n| n * 2 } };
 var ok = true;
-var r = Worker.host:'@runner.qn@' class:'Runner';
+var r = Worker.host:'@runner.qn@' with:{ Runner.new };
 
 "* a portable block ships and runs worker-side
 ((r.apply:{ |n| n * 3 } to:14) == 42).else:{ ok = false; 'FAIL: apply'.print };
@@ -379,7 +375,7 @@ y = 100;
     .else:{ ok = false; 'FAIL: nested'.print };
 
 "* ...and into a DIFFERENT service
-var other = Worker.host:'@runner.qn@' class:'Runner';
+var other = Worker.host:'@runner.qn@' with:{ Runner.new };
 ((r.apply:{ |n| other.double:n } to:7) == 14)
     .else:{ ok = false; 'FAIL: other service'.print };
 other.serviceStop;
@@ -419,7 +415,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_block_args_process() {
     let script = r#"
 var ok = true;
-var r = Worker.host:'@runner.qn@' class:'Runner' backing:'process';
+var r = Worker.host:'@runner.qn@' with:{ Runner.new } backing:'process';
 
 "* blocks cross a PROCESS boundary as handles: the block runs in the
 "* PARENT, driven over the socket, seeing its captures live
@@ -463,7 +459,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_lanes_overlap_and_serialize() {
     let script = r#"
 var ok = true;
-var r = Worker.host:'@runner.qn@' class:'Runner' lanes:4;
+var r = Worker.host:'@runner.qn@' with:{ Runner.new } lanes:4;
 var m = r.mate;
 
 "* two lanes genuinely overlap: a slow call on one object does not delay a
@@ -517,7 +513,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_nested_rides_bound_lane() {
     let script = r#"
 var ok = true;
-var r = Worker.host:'@runner.qn@' class:'Runner';
+var r = Worker.host:'@runner.qn@' with:{ Runner.new };
 var m = r.mate;
 ((r.apply:{ |n| m.double:n } to:9) == 18)
     .else:{ ok = false; 'FAIL: nested cross-object'.print };
@@ -535,7 +531,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_lanes_process() {
     let script = r#"
 var ok = true;
-var r = Worker.host:'@runner.qn@' class:'Runner' backing:'process' lanes:3;
+var r = Worker.host:'@runner.qn@' with:{ Runner.new } backing:'process' lanes:3;
 var m = r.mate;
 
 "* two lanes genuinely overlap over the socket pair
@@ -578,7 +574,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_mutual_call_deadlock_detected_process() {
     let script = r#"
 var ok = true;
-var r = Worker.host:'@runner.qn@' class:'Runner' backing:'process' lanes:2;
+var r = Worker.host:'@runner.qn@' with:{ Runner.new } backing:'process' lanes:2;
 var a = r.mate;
 var b = r.mate;
 var ta = Task.spawn:{ { (a.apply:{ |n| Async.sleep:80; b.double:n } to:1).s }.catch:{ |e| e.s } };
@@ -604,7 +600,7 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 fn service_mutual_call_deadlock_detected() {
     let script = r#"
 var ok = true;
-var r = Worker.host:'@runner.qn@' class:'Runner' lanes:2;
+var r = Worker.host:'@runner.qn@' with:{ Runner.new } lanes:2;
 var a = r.mate;
 var b = r.mate;
 

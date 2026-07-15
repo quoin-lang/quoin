@@ -62,20 +62,31 @@ under **Changed**, with the migration.
   cycle through extensions (even mixed with hosted services) raises the same
   catchable deadlock error at the task that closes it, instead of hanging.
   Extensions declaring nothing keep exactly the old one-connection behavior.
-- **`WorkerService` is removed; hosting lives on `Worker`** (experimental,
-  breaking). The class-form constructor moved verbatim — write
-  `Worker.host:'unit.qn' class:'Pool'` (plus the `backing:`/`lanes:` variants)
-  where `WorkerService.host:class:` used to be — and hosting gained **block
-  forms**: `Worker.host:'unit.qn' with:{ Pool.new:cfg }` runs the portable block
-  *in* the worker after its unit loads and hosts the object it answers (real
-  constructor arguments, at last), and bare `Worker.with:{ … }` is the unit-less
-  version (qnlib classes only; block forms are thread-backed only). Proxies are
-  now **real installed classes** built from a manifest the worker sends at
+- **`WorkerService` is removed; hosting lives on `Worker`, and a block is the
+  only constructor** (experimental, breaking). `Worker.host:'unit.qn'
+  with:{ Pool.new:cfg }` runs the portable block *in* the worker after its
+  unit loads and hosts the object it answers — the block is the constructor
+  call site, so there is no separate class-name form (Quoin constructors are
+  keyword selectors; a "default constructor with args" spelling would fit
+  nothing). Bare `Worker.with:{ … }` is the unit-less version (qnlib classes
+  only). Both work on either backing: on `backing:'process'` the block
+  crosses as its **source text** plus a snapshot of its captures and is
+  compiled in the child against its own unit (so it must come from source,
+  not runtime assembly). `args:` fills the block's parameters at spawn —
+  arity checked before anything ships; portable values snapshot, a portable
+  block crosses as a callable, and a **Channel arrives as a live endpoint**
+  in the worker (a channel *capture* still refuses: parameters are the honest
+  spelling for live things). `Worker.start:` joins the family with
+  `start:args:` and real `backing:'process'` (the job ships as source and
+  `join` carries its value home). Proxies are
+  **real installed classes** built from a manifest the worker sends at
   ready: introspection (`can?:`, `class.name`) answers locally, an unknown
   selector raises an honest MessageNotUnderstood instead of a round trip,
   class-side selectors dispatch to the hosted class, `==` compares hosted-object
   identity, and classes appearing for the first time in a return install
   themselves lazily — even a returned Block works, with remote `value:`.
+  Worker processes whose parent dies now exit immediately instead of
+  lingering as orphans.
 - `WorkerService` (experimental): hosted services now speak the peer protocol and
   gained **hosted object returns** — a hosted method that returns a non-portable
   object no longer refuses: the object is kept in the worker and the caller gets a

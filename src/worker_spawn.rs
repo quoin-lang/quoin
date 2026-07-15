@@ -76,26 +76,6 @@ fn spawn_worker_with(
     }
 }
 
-/// Synthesize the hosting lines appended to a hosted unit's source
-/// (src/runtime/worker.rs): `Worker.hostRoot:` instantiates the class, roots
-/// it in the worker's hosted-object table, and reports ready; then a gather
-/// of `Worker.hostServeLane` thunks serves peer-protocol `Call` dispatches —
-/// one fiber per lane, all consuming the shared dispatch channel — until the
-/// reserved stop op (one per lane) or the lane closing ends them
-/// (ACTOR_OBJECTS.md §5.1).
-fn service_loop_qn(class_name: &str, lanes: u32) -> String {
-    let thunks = "{ Worker.hostServeLane } ".repeat(lanes.max(1) as usize);
-    format!("\nWorker.hostRoot:'{class_name}';\nAsync.gather:#( {thunks});\n")
-}
-
-/// Spawn a SERVICE worker: the unit at `path` (which defines `class_name`)
-/// plus the generic serve loop, compiled as one program. `lanes` fibers serve
-/// concurrently (the parent's claim machinery bounds in-flight conversations
-/// to the same number).
-pub fn spawn_worker_service(path: String, class_name: String, lanes: u32) -> WorkerChannels {
-    spawn_worker_with(move |link| run_worker_service(&path, &class_name, lanes, link))
-}
-
 /// Spawn a hosted-BLOCK worker (`Worker.host:'unit.qn' with:{ … }` /
 /// `Worker.with:{ … }`): boot, load the unit if any, then run the shipped
 /// block via `Worker.hostBlockRoot` and host the object it answers.
@@ -220,31 +200,6 @@ fn portable_block_from_wire(w: &WireData) -> Result<PortableBlock, String> {
         captures,
         globals,
     })
-}
-
-pub(crate) fn run_worker_service(
-    path: &str,
-    class_name: &str,
-    lanes: u32,
-    link: WorkerLink,
-) -> Result<WireData, String> {
-    // The class name is interpolated into synthesized source — insist on a
-    // plain class identifier so a hostile string can't smuggle code.
-    if class_name.is_empty()
-        || !class_name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase())
-        || !class_name.chars().all(|c| c.is_ascii_alphanumeric())
-    {
-        return Err(format!(
-            "WorkerService: '{class_name}' is not a plain class name"
-        ));
-    }
-    let unit_source = std::fs::read_to_string(PathBuf::from(path))
-        .map_err(|e| format!("service unit {path}: {e}"))?;
-    let source = format!("{unit_source}\n{}", service_loop_qn(class_name, lanes));
-    run_worker_source(path, &source, link)
 }
 
 /// The worker thread body: boot a fresh VM (builtins + full qnlib prelude,
@@ -684,10 +639,6 @@ pub fn spawn_worker_process(
         .arg(unit.as_deref().unwrap_or("@none"));
     match &body {
         ProcessBody::Plain => {}
-        ProcessBody::Class(class) => {
-            cmd.arg(class);
-            cmd.arg(lanes.to_string());
-        }
         ProcessBody::Block(_) => {
             cmd.arg("@block");
             cmd.arg(lanes.to_string());
@@ -1342,7 +1293,9 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
             }
             (Some(payload), _) => portable_block_from_wire(&payload)
                 .and_then(|pb| run_worker_hosted_block(unit_opt, pb, lanes, link)),
-            (None, Some(class)) => run_worker_service(unit, class, lanes, link),
+            (None, Some(other)) => Err(format!(
+                "worker-serve: unknown mode '{other}' (mixed qn binaries?)"
+            )),
             (None, None) => run_worker_unit(unit, link),
         }
     }))

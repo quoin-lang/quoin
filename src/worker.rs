@@ -733,7 +733,7 @@ mod worker_spawn;
 #[cfg(not(target_arch = "wasm32"))]
 pub use worker_spawn::{
     spawn_worker, spawn_worker_block, spawn_worker_hosted_block, spawn_worker_process,
-    spawn_worker_service, worker_serve_main,
+    worker_serve_main,
 };
 
 /// What a spawned worker PROCESS runs, beyond its unit: nothing (a plain
@@ -743,7 +743,6 @@ pub use worker_spawn::{
 #[derive(Clone, Debug)]
 pub enum ProcessBody {
     Plain,
-    Class(String),
     Block(WireData),
     /// A plain JOB block (`Worker.start:` on process backing): same shipping
     /// as `Block`, but the child runs it as its whole life and the done
@@ -781,11 +780,6 @@ pub fn spawn_worker(_path: String) -> WorkerChannels {
 
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_worker_block(_job: PortableBlock) -> WorkerChannels {
-    dead_letter_channels()
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn spawn_worker_service(_path: String, _class_name: String, _lanes: u32) -> WorkerChannels {
     dead_letter_channels()
 }
 
