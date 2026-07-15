@@ -390,3 +390,67 @@ Notifier <- { |@out|
 "#;
     assert_passes("chanrecipe", script, &[("notifier.qn", notifier)], true);
 }
+
+#[test]
+fn extension_restart_after_mid_call_crash() {
+    // Slice 2b: `Extension.restart` refuses while running, and after a
+    // mid-call crash (which the EOF-races-try_wait hardening must type even
+    // before the exit is reap-visible) re-runs the frozen spawn recipe and
+    // rebinds the handle in place — the same installed surface keeps working.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
+    let script = format!(
+        r#"
+var e = Extension.spawn:'{ext_bin}';
+var ok = true;
+((e.call:'ping' with:'') == 'pong').else:{{ ok = false; 'e1'.print }};
+var early = {{ e.restart; 'no' }}.catch:{{ |x| 'refused-running' }};
+(early == 'refused-running').else:{{ ok = false; 'e2'.print }};
+var crashed = {{ e.call:'crash' with:'' }}.catch:{{ |x:PeerDiedError| 'died' }};
+(crashed == 'died').else:{{ ok = false; 'e3'.print }};
+e.restart;
+((e.call:'ping' with:'') == 'pong').else:{{ ok = false; 'e4'.print }};
+var one = nil;
+var two = nil;
+VM.peers.each:{{ |p| ((p.at:'kind') == 'extension').if:{{
+    ((p.at:'incarnation') == 1).if:{{ one = p.at:'status' }};
+    ((p.at:'incarnation') == 2).if:{{ two = p.at:'status' }} }} }};
+((one == 'died') && (two == 'running')).else:{{ ok = false; 'e5'.print }};
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_passes("extrestart", &script, &[], false);
+}
+
+#[test]
+fn extension_restart_stales_the_dead_incarnations_instances() {
+    // Rule 6 for extension-backed classes: an instance minted by the dead
+    // incarnation raises #staleIncarnation after the restart (its reap-queue
+    // identity no longer matches); fresh instances work. The death is an
+    // IDLE kill observed by the exit watch — nobody calls between death and
+    // the events delivery.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+var e = Extension.spawn:'{ext_bin}';
+var ok = true;
+var v = Vector.ofFloats:#( 1.0 2.0 );
+(v.sum == 3).else:{{ ok = false; 'e1'.print }};
+var pid = nil;
+VM.peers.each:{{ |p| ((p.at:'kind') == 'extension').if:{{ pid = p.at:'pid' }} }};
+[IO]File.write:pid.s to:'@pidfile@';
+var ev = e.events;
+ev.receive;
+((ev.receive.at:'kind') == 'died').else:{{ ok = false; 'e2'.print }};
+var t1 = {{ v.sum }}.catch:{{ |x:PeerDiedError| 'typed-dead' }};
+(t1 == 'typed-dead').else:{{ ok = false; 'e3'.print }};
+e.restart;
+var t2 = {{ v.sum }}.catch:{{ |x:PeerDiedError|
+    (x.reason == #staleIncarnation).if:{{ 'stale' }} else:{{ 'wrong-reason' }} }};
+(t2 == 'stale').else:{{ ok = false; ('e4 ' + t2).print }};
+var v2 = Vector.ofFloats:#( 3.0 4.0 );
+(v2.sum == 7).else:{{ ok = false; 'e5'.print }};
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_passes("extstale", &script, &[], true);
+}

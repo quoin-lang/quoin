@@ -141,8 +141,9 @@ pub(crate) fn value_to_wire(
                     }),
                     None => Err(QuoinError::Other(
                         "extension: cannot send this extension-backed instance here — it \
-                         belongs to a different extension (or this channel carries plain \
-                         data only)"
+                         belongs to a different extension or to a DEAD INCARNATION of this \
+                         one (a restarted extension cannot accept the old incarnation's \
+                         instances; re-create them), or this channel carries plain data only"
                             .to_string(),
                     )),
                 };
@@ -419,9 +420,28 @@ pub struct NativeExtension {
     /// Lifecycle sink (shared with `vm.io.lives`; SUPERVISION.md slice 1):
     /// the death seams below emit through it — single source, first terminal
     /// wins, so the exit watch and the lazy detection never double-report.
+    /// Swapped for a fresh sink at each `restart`.
     life: std::sync::Arc<crate::runtime::lifecycle::LifeSink>,
     /// Its index in `vm.io.lives` — what `events` hands the pump and watch.
     life_idx: usize,
+    /// The frozen respawn recipe (SUPERVISION.md slice 2): the spawn command
+    /// line plus the ORIGINAL manifest — the rule-9 equality gate a restarted
+    /// child must match, selector for selector, lane for lane.
+    recipe: Rc<ExtRecipe>,
+    /// The current incarnation (bumped by a successful `restart`); stale
+    /// resources name it in their error.
+    incarnation: u64,
+}
+
+/// An extension's frozen respawn recipe (SUPERVISION.md slice 2, rule 2):
+/// exactly the spawn inputs, plus the first manifest as the equality gate.
+#[derive(Debug)]
+struct ExtRecipe {
+    command: String,
+    args: Vec<String>,
+    cwd: Option<std::path::PathBuf>,
+    manifest: Vec<ClassDecl>,
+    lanes: u32,
 }
 
 /// One open conversation, pinned to a lane socket (keyed by task in
@@ -576,8 +596,11 @@ fn read_reply_frame<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<u8>,
     while buf.len() < 4 {
         let chunk = read_chunk(vm, id)?;
         if chunk.is_empty() {
-            return Err(QuoinError::Other(
-                "Extension call: connection closed before reply".to_string(),
+            // Typed as transport I/O so `finish_outcome` can classify it as a
+            // death (§2) even when the child's exit isn't reap-visible yet.
+            return Err(QuoinError::io(
+                crate::error::IoErrorKind::UnexpectedEof,
+                "Extension call: connection closed before reply",
             ));
         }
         buf.extend_from_slice(&chunk);
@@ -1222,6 +1245,26 @@ fn finish_outcome<'gc>(
                         .unwrap_or_else(|_| "extension".to_string());
                     Err(extension_dead_error(&peer, &detail))
                 }
+                // A LANE transport failure under a call is a death by §2
+                // ("its connection closed under a call") even before the exit
+                // is reap-visible — the EOF races `try_wait`. The framing is
+                // desynced either way, so the peer is unusable: tear it down
+                // like the cancel path does. User/callback errors never
+                // travel this path (they cross as reply frames), so `Io`
+                // here can only be the lane.
+                None if matches!(e.innermost(), QuoinError::Io { .. }) => {
+                    let peer = ext_receiver
+                        .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| {
+                            ext.kill_now();
+                            ext.stats.borrow().peer.clone()
+                        })
+                        .unwrap_or_else(|_| "extension".to_string());
+                    vm.handle_table.release_for_ext(ext_id);
+                    Err(extension_dead_error(
+                        &peer,
+                        "its connection failed mid-call",
+                    ))
+                }
                 None => Err(e),
             }
         }
@@ -1462,14 +1505,38 @@ pub fn dispatch_ext_method<'gc>(
         Value::Class(c) => (c, 0u64),
         Value::Object(o) => {
             let class = o.borrow().class;
-            let resource_id = receiver
-                .with_native_state::<NativeExtResource, _, _>(|r| r.resource_id)
+            let (resource_id, res_reap) = receiver
+                .with_native_state::<NativeExtResource, _, _>(|r| (r.resource_id, r.reap.clone()))
                 .map_err(|_| {
                     QuoinError::Other(format!(
                         "'{}' is not an extension-backed instance",
                         selector.as_str()
                     ))
                 })?;
+            // Rule-6 staleness (SUPERVISION.md slice 2): a resource minted by
+            // a dead incarnation holds ITS reap queue — a restarted extension
+            // swapped in a fresh one, so identity mismatch = permanently
+            // stale. (The argument path refuses the same way via the
+            // value_to_wire ownership check.)
+            let stale = ext
+                .with_native_state::<NativeExtension, _, _>(|e| {
+                    (!Rc::ptr_eq(&e.resource_reap, &res_reap))
+                        .then(|| (e.incarnation, e.stats.borrow().peer.clone()))
+                })
+                .ok()
+                .flatten();
+            if let Some((inc, peer)) = stale {
+                return Err(QuoinError::peer_died(
+                    peer.clone(),
+                    crate::error::PeerDeathReason::StaleIncarnation,
+                    format!(
+                        "extension call '{}': this instance belongs to a dead incarnation \
+                         of `{peer}` (the extension is now incarnation {inc}) — re-create \
+                         it from the current one",
+                        selector.as_str()
+                    ),
+                ));
+            }
             (class, resource_id)
         }
         _ => {
@@ -1652,6 +1719,41 @@ fn spawn_and_connect<'gc>(
     cwd: Option<&Path>,
     namespace: Option<String>,
 ) -> Result<(Value<'gc>, Vec<ClassDecl>), QuoinError> {
+    let spawned = spawn_ext_process(vm, command, args, cwd)?;
+    finish_ext_spawn(vm, mc, command, args, cwd, namespace, spawned)
+}
+
+/// The spawn/connect/handshake front half — plain parts, no `Extension` value
+/// yet — shared by the original spawn and `restart` (which GATES the manifest
+/// against the recipe instead of installing it).
+struct SpawnedExt {
+    child: Child,
+    sock_path: String,
+    socks: Vec<StreamId>,
+    manifest: Vec<ClassDecl>,
+    lanes: u32,
+}
+
+impl SpawnedExt {
+    /// Tear a spawned-but-unadopted child down (a failed restart gate): kill
+    /// it, drop its socket file, and reap the connected fds.
+    fn abandon(mut self, vm: &VmState<'_>) {
+        vm.io
+            .socket_reap
+            .borrow_mut()
+            .extend(self.socks.iter().copied());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.sock_path);
+    }
+}
+
+fn spawn_ext_process<'gc>(
+    vm: &mut VmState<'gc>,
+    command: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+) -> Result<SpawnedExt, QuoinError> {
     let sock_path = unique_sock_path();
     let mut cmd = Command::new(command);
     cmd.args(args).arg(&sock_path);
@@ -1709,7 +1811,33 @@ fn spawn_and_connect<'gc>(
             }
         }
     }
+    Ok(SpawnedExt {
+        child,
+        sock_path,
+        socks,
+        manifest,
+        lanes,
+    })
+}
 
+/// The back half of the original spawn: registry rows, the recipe, and the
+/// `Extension` value.
+fn finish_ext_spawn<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    command: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    namespace: Option<String>,
+    spawned: SpawnedExt,
+) -> Result<(Value<'gc>, Vec<ClassDecl>), QuoinError> {
+    let SpawnedExt {
+        child,
+        sock_path,
+        socks,
+        manifest,
+        lanes,
+    } = spawned;
     // Boundary profiling: one table per peer, registered globally so `VM.boundaryStats`
     // can enumerate it — and keep it after the extension dies or is dropped. The claim
     // state registers beside it for `VM.claims`, under the same peer label.
@@ -1758,6 +1886,14 @@ fn spawn_and_connect<'gc>(
             stats,
             life,
             life_idx,
+            recipe: Rc::new(ExtRecipe {
+                command: command.to_string(),
+                args: args.to_vec(),
+                cwd: cwd.map(|p| p.to_path_buf()),
+                manifest: manifest.clone(),
+                lanes,
+            }),
+            incarnation: 1,
         },
     );
     Ok((ext_val, manifest))
@@ -2049,6 +2185,108 @@ pub fn build_extension_class() -> NativeClassBuilder {
              so an idle crash surfaces here without anyone calling the extension; the \
              channel closes after the terminal event, history is kept from spawn time, and \
              asking twice answers the same channel.",
+        )
+        .instance_method("restart", |vm, mc, receiver, _args| {
+            // Catch up lazy detection, then gate on status: restart only
+            // follows a DEATH (SUPERVISION.md §2 — stop means stop).
+            let (recipe, life_idx, old_ext_id, inc, peer) = receiver
+                .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+                    let _ = e.note_if_exited();
+                    (
+                        e.recipe.clone(),
+                        e.life_idx,
+                        e.ext_id,
+                        e.incarnation,
+                        e.stats.borrow().peer.clone(),
+                    )
+                })
+                .map_err(QuoinError::Other)?;
+            let status = vm.io.lives.borrow().get(life_idx).map(|l| l.status());
+            match status {
+                Some(crate::runtime::lifecycle::LifeStatus::Died { .. }) => {}
+                Some(crate::runtime::lifecycle::LifeStatus::Stopped(_)) => {
+                    return Err(QuoinError::Other(format!(
+                        "Extension.restart: `{peer}` was STOPPED, not died — stop means \
+                         stop (SUPERVISION.md §2)"
+                    )));
+                }
+                _ => {
+                    return Err(QuoinError::Other(format!(
+                        "Extension.restart: `{peer}` is running — restart only follows a \
+                         death"
+                    )));
+                }
+            }
+            // Respawn from the frozen recipe; gate the manifest (rule 9) —
+            // the installed classes must stay truthful, selector for
+            // selector, lane for lane.
+            let spawned =
+                spawn_ext_process(vm, &recipe.command, &recipe.args, recipe.cwd.as_deref())?;
+            if spawned.manifest != recipe.manifest || spawned.lanes != recipe.lanes {
+                spawned.abandon(vm);
+                return Err(QuoinError::Other(format!(
+                    "Extension.restart: the new incarnation's manifest does not match the \
+                     installed classes of `{peer}` — the extension changed underfoot; \
+                     refusing to rebind (SUPERVISION.md §4 rule 9)"
+                )));
+            }
+            // The dead incarnation's residue: release its host-value handles
+            // (an idle death had no failing call to do it).
+            vm.handle_table.release_for_ext(old_ext_id);
+            // Per-incarnation rows: fresh claims and a fresh lifecycle sink
+            // (`e.events` re-asked answers the new incarnation's stream).
+            let next = inc + 1;
+            let label = format!("{peer} (incarnation {next})");
+            let claims = Rc::new(RefCell::new(PeerClaims::new(label, recipe.lanes)));
+            vm.io.claim_peers.borrow_mut().push(claims.clone());
+            let life = crate::runtime::lifecycle::LifeSink::new(
+                peer,
+                "extension",
+                "process",
+                Some(spawned.child.id()),
+            );
+            life.incarnation
+                .store(next, std::sync::atomic::Ordering::Relaxed);
+            let new_life_idx = {
+                let lives = vm.io.lives.clone();
+                let mut lives = lives.borrow_mut();
+                lives.push(life.clone());
+                lives.len() - 1
+            };
+            // Rebind IN PLACE: same value, same installed classes, fresh
+            // transport. The old reap queue is the dead incarnation's
+            // identity — its resources go #staleIncarnation by pointer
+            // mismatch; the old lane fds reap; the old socket file goes.
+            receiver
+                .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+                    let old_socks = std::mem::replace(&mut e.socks, spawned.socks.clone());
+                    e.reap.borrow_mut().extend(old_socks);
+                    let _ = std::fs::remove_file(&e.sock_path);
+                    e.free_socks = spawned.socks;
+                    e.convs.clear();
+                    e.claims = claims;
+                    e.next_pseudo = 0;
+                    e.ext_id = unique_ext_id();
+                    e.child = spawned.child;
+                    e.sock_path = spawned.sock_path;
+                    e.dead = false;
+                    e.resource_reap = Rc::new(RefCell::new(Vec::new()));
+                    e.life = life;
+                    e.life_idx = new_life_idx;
+                    e.incarnation = next;
+                })
+                .map_err(QuoinError::Other)?;
+            Ok(vm.new_nil(mc))
+        })
+        .doc(
+            "Restart a DEAD extension from its frozen spawn recipe (SUPERVISION.md slice 2) \
+             and rebind this handle in place: the same installed classes keep working, new \
+             calls reach the fresh process. Refuses while running or stopped (stop means \
+             stop), and refuses -- leaving the extension dead but retryable -- if the new \
+             process's manifest differs from the installed classes. Instances minted by \
+             the dead incarnation are permanently stale (`PeerDiedError` with reason \
+             `#staleIncarnation`); recreate them from the current incarnation. \
+             `events` re-asked after a restart answers the new incarnation's stream.",
         )
         // `Extension loadPackage: '<dir>'` -> load an extension *package* (a folder with an
         // `quoin.toml` launch/identity spec + an optional `init.qn` of Quoin-side glue;

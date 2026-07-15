@@ -47,6 +47,12 @@ under **Changed**, with the migration.
   Per-incarnation bookkeeping: fresh claims and lifecycle rows (`VM.peers` rows
   carry an `incarnation` number; `serviceEvents` after a restart answers the
   fresh incarnation's stream), merged boundary-profiling rows.
+  **Extensions restart too**: `e.restart` re-runs the frozen spawn recipe and
+  rebinds the handle in place — the installed classes keep working; instances
+  minted by the dead incarnation are permanently `#staleIncarnation`. Same
+  death-only and manifest-equality rules. And a hardening the work surfaced: an
+  extension connection failing *under* a call is now always the typed death,
+  even in the window where the child's exit is not yet reap-visible.
 
 - **Peer lifecycle events + `VM.peers`** (SUPERVISION.md slice 1). Every spawned
   peer — hosted worker, plain worker, extension — now has a lifecycle stream:

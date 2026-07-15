@@ -368,6 +368,32 @@ record/replay run containing a supervised death + restart.
    by panic, which nothing can script); restart under record/replay sits
    behind the same external-timing boundary as deaths; the formal permanent
    `gaveUp` state waits for slice 3's attempt-counting.
+   **AS BUILT, extensions half (2026-07-15).** `ExtRecipe` freezes the spawn
+   inputs (command/args/cwd) plus the FIRST manifest — the rule-9 gate:
+   `Extension.restart` re-runs `spawn_ext_process` (the spawn/connect/
+   handshake front half, factored out of the original spawn) and refuses to
+   rebind — abandoning the fresh child — unless the new manifest matches,
+   class for class, lane for lane. On success the handle rebinds IN PLACE
+   (fresh sockets/claims/sink/ext id, old lane fds reaped, old socket file
+   removed, the dead incarnation's host-value handles released — the idle
+   death path never had a failing call to do it) and the same installed
+   classes keep working. Staleness rides the reap-queue identity — a restart
+   swaps `resource_reap`, so an old instance's `Rc` no longer matches: the
+   class-dispatch receiver path raises `#staleIncarnation` naming the
+   incarnation, and the generic `args:` path refuses through the existing
+   ownership check (message widened to name the dead-incarnation
+   possibility — a typed error there is residue). Hardening forced by
+   construction: a lane transport failure UNDER a call is now typed as the
+   death directly in `finish_outcome` (kill_now + `PeerDiedError`), because
+   the socket EOF races `try_wait` — the child can close its socket
+   milliseconds before its exit is reap-visible, and slice 0's typed
+   conversion silently lost that race (user/callback errors never travel
+   that path, so `Io` there can only be the lane). Residues: extension
+   restart-window sends fail fast typed rather than park (the service gate
+   has no extension twin yet — slice 3 material if the policy wants it);
+   `loadPackage:` extensions restart via the handle only (`init.qn` is NOT
+   re-run — glue is installed classes, state is the process's, and
+   availability-not-state says fresh).
 3. **Policy:** the `Supervise` value + `supervise:` options + `quoin.toml`
    `[extension]` keys + backoff/intensity/give-up automation over slices 1+2.
 4. *(adjacency, not this arc unless pulled)*: `WorkerPool` crash-respawn
