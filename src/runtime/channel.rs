@@ -3,7 +3,7 @@ use crate::error::QuoinError;
 use crate::fiber::YieldReason;
 use crate::value::{AnyCollect, Block, NativeClassBuilder, Value};
 use crate::vm::VmState;
-use crate::vm_scheduler::{TaskId, Wake};
+use crate::vm::scheduler::{TaskId, Wake};
 
 use gc_arena::Gc;
 use gc_arena::Mutation;

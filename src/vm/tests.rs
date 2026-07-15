@@ -377,7 +377,7 @@ fn test_channel_buffered_values_survive_collection() {
     // values and each parked sender's pending value. Both are reachable only through
     // the channel, so `NativeChannelState::trace_gc` must trace them or a collection
     // while values sit in the channel (the run loop collects between steps) frees them.
-    use crate::vm_scheduler::TaskId;
+    use crate::vm::scheduler::TaskId;
 
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc, VmOptions::default());

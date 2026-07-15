@@ -274,7 +274,7 @@ pub(crate) fn ps_data<'gc>(vm: &VmState<'gc>) -> PsData {
 
 pub(crate) fn ps_data_with_current<'gc>(
     vm: &VmState<'gc>,
-    current: Option<crate::vm_scheduler::TaskId>,
+    current: Option<crate::vm::scheduler::TaskId>,
 ) -> PsData {
     let mut tasks = Vec::new();
     let mut io_in_flight = 0;
