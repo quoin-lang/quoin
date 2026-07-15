@@ -81,6 +81,7 @@ impl Compiler {
                 self.compile_unary_operator(op, bytecode)?;
             }
             NodeValue::Block(block) => {
+                self.next_block_is_expression = true;
                 self.compile_block(block, bytecode)?;
                 // B3a: a block LITERAL is a block-template candidate (method
                 // bodies are collected as Method candidates at their def site).
@@ -806,6 +807,9 @@ impl Compiler {
         // `X.new:{ … }` argument) before anything can reset it; nested blocks compiled
         // within read it as `false`.
         let is_init = std::mem::take(&mut self.next_block_is_init);
+        // Consume the expression-literal flag likewise: nested literals set it
+        // for themselves; definition bodies arrive with it unset.
+        let is_expression = std::mem::take(&mut self.next_block_is_expression);
         // Phase 3c: a guard arm's narrowing, installed into this block's scope below. Taken here
         // (one-shot) so nested blocks don't inherit it.
         let block_narrowing = std::mem::take(&mut self.next_block_narrowing);
@@ -1040,7 +1044,7 @@ impl Compiler {
         let template = Arc::new(static_block);
         // Boundary warning + (opted-in) IDE classification — here, after
         // `pop_scope`, so capture names resolve in the ENCLOSING scope.
-        self.classify_block_literal(block as *const BlockNode as usize, &template);
+        self.classify_block_literal(block as *const BlockNode as usize, &template, is_expression);
         bytecode.push(Instruction::Push(Constant::Block(template)));
         self.inline_carets = saved_inline;
         Ok(())

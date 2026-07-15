@@ -165,6 +165,13 @@ pub struct Compiler {
     collect_portability: bool,
     /// The collected classifications, span-keyed, in compile order.
     block_portability: Vec<BlockPortability>,
+    /// One-shot: the next `compile_block` compiles an EXPRESSION-position
+    /// literal (a block VALUE — set at the `NodeValue::Block` arm). Method,
+    /// class, and guard-decl bodies also flow through `compile_block` but are
+    /// not shippable values, so only expression literals classify for
+    /// portability (an all-italic class file would be exactly the noise the
+    /// whole-block tint is meant to avoid).
+    next_block_is_expression: bool,
     /// Block literals in the shipped position of a boundary send
     /// (`Worker.with:`/`host:with:`/`start:`), keyed by `BlockNode` address —
     /// registered by `note_boundary_send`, consumed by `classify_block_literal`
@@ -276,6 +283,7 @@ impl Compiler {
             block_ret_harvest: Vec::new(),
             collect_portability: false,
             block_portability: Vec::new(),
+            next_block_is_expression: false,
             boundary_block_literals: HashMap::new(),
             next_block_capture: None,
             captured_arm_exit: None,
@@ -540,6 +548,7 @@ impl Compiler {
             block_ret_harvest: Vec::new(),
             collect_portability: false,
             block_portability: Vec::new(),
+            next_block_is_expression: false,
             boundary_block_literals: HashMap::new(),
             next_block_capture: None,
             captured_arm_exit: None,

@@ -133,9 +133,17 @@ impl Compiler {
     ///   scan's reason — the ship-time error, moved to edit time.
     /// - Classification (under [`Compiler::with_portability`] only): the
     ///   three-state verdict for the IDE, span-keyed.
-    pub(super) fn classify_block_literal(&mut self, node_key: usize, template: &Arc<StaticBlock>) {
+    pub(super) fn classify_block_literal(
+        &mut self,
+        node_key: usize,
+        template: &Arc<StaticBlock>,
+        is_expression: bool,
+    ) {
         let boundary_selector = self.boundary_block_literals.remove(&node_key);
-        if boundary_selector.is_none() && !self.collect_portability {
+        // Only EXPRESSION-position literals classify — a method/class body is
+        // not a shippable value, and tinting every simple method body would
+        // drown the signal. (Boundary literals are always expressions.)
+        if boundary_selector.is_none() && !(self.collect_portability && is_expression) {
             return;
         }
         let scan = crate::worker::scan_portable(template);
@@ -149,7 +157,7 @@ impl Compiler {
                 template.source_info.as_ref(),
             );
         }
-        if !self.collect_portability {
+        if !(self.collect_portability && is_expression) {
             return;
         }
         let Some(si) = template.source_info.as_ref() else {

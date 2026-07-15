@@ -3024,6 +3024,14 @@ fn block_portability_classification() {
         bp.iter().all(|b| b.state == Portability::Portable),
         "{bp:?}"
     );
+
+    // DEFINITION bodies are not shippable values: the class body, its method
+    // bodies, and `.meta` bodies classify nothing — only the expression
+    // literal inside a method does. (An all-italic class file is exactly the
+    // noise the whole-block tint must avoid.)
+    let bp = classify("Foo <- { plain -> { 41 }; maker -> { var n = 1; { n + 1 } } }");
+    assert_eq!(bp.len(), 1, "{bp:?}");
+    assert_eq!(bp[0].state, Portability::Portable);
 }
 
 #[test]
