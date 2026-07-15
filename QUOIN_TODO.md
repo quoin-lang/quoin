@@ -21,6 +21,16 @@ This document outlines the language features, compiler updates, and VM modificat
   `qn doc` (a corpus file that parks forever — hit via the VM repo's own tree in an e2e); a
   per-unit load timeout or `--exclude` would bound it.
 
+- [ ] **`doesNotUnderstand:` as a language protocol.** Promote the dispatch miss path to one
+  generic protocol: on lookup miss, if the receiver's class defines `doesNotUnderstand:` (with
+  a reified message — selector + args), send it; otherwise raise MNU as today. Makes proxies,
+  mocks, delegators, and lazy loaders ordinary user-space code, and retires the last reason
+  for feature-specific hooks in `vm.rs`'s miss branches (the WorkerService proxy hook — whose
+  own exit is manifest-installed classes, see ACTOR_OBJECTS.md §10). Design surface: the
+  message reification value, `super` interaction, sealed-class rules, and how the gradual
+  checker treats DNU classes (open-ended selector sets). Deliberately NOT the load-bearing
+  mechanism for hosted objects/extensions — those have enumerable selectors and install real
+  method nodes; DNU is for genuinely dynamic receivers.
 - [ ] **`qn doc` for COMMANDS, not just classes/methods.** A `[CLI]Spec`-based tool is an API
   too — its flags, options, positionals, and subcommands deserve a generated doc page (roughly:
   the `-h` help, as publishable HTML/Markdown, next to the tool's library classes). Blocked on
@@ -750,6 +760,18 @@ deferred `Mirror` in `## REPL`.
   deadlines, detached spawn+join — `docs/internal/ASYNC_ARCH.md` Stage 2b).
 
 ## Bugs/Odd Behavior
+- [ ] **Teardown abort (`fatal runtime error: failed to initiate panic, error 3`) when the
+  driver errors out deep in a run.** Found via wake-log replay of `qn test qnlib/tests`
+  (2026-07-13): a mid-suite `QuoinError` exit from `drive_to_completion` sometimes aborts
+  the process during teardown, AFTER the error prints correctly. Not replay-specific — the
+  replay divergence error is just an easy way to stop the driver at an arbitrary point.
+  Suspected: dropping a task whose coroutine is suspended inside an AOT/Cranelift frame
+  forces an unwind through code with no unwind info (corosensei force-unwind on drop).
+  Divergence early in the suite (interpreter-only frames live) exits cleanly; the same
+  error at a deep point aborts. Repro: record the suite (`QN_WAKE_RECORD`), replay it
+  (`QN_WAKE_REPLAY`) — the divergence at the first random-content op aborts on teardown.
+  Needs: identify the suspended frame kind at the abort, then either skip force-unwind for
+  frames that can't unwind or leak-and-exit on the error path.
 - [x] **`qn fmt` internal error: multi-line `#( … )` as `%`'s right operand inside a parenthesized
   argument.** The self-verification caught it (aborted, no corruption), but the file couldn't be
   formatted — `ParseError.throw:('… %1 …' % #(\n a\n b\n ))` lost the outer closing `)`. Root

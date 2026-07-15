@@ -194,6 +194,18 @@ pub enum IoRequest {
     /// Park until the worker's done lane reports (its unit finished or
     /// failed); resolving the lane closed means the worker vanished.
     WorkerJoin(async_channel::Receiver<Result<quoin_ext_proto::DataValue, String>>),
+    /// Park until the next hosted-object dispatch request lands on this lane —
+    /// the worker-side serve loop's wait (`Worker.hostServe:`). `None` means
+    /// the lane closed (the parent side is gone).
+    DispatchRecv(async_channel::Receiver<crate::worker::DispatchReq>),
+    /// Park until a peer-protocol frame arrives on this lane — a hosted call's
+    /// reply terminal on the proxy side. `None` means the lane closed (the
+    /// serving side is gone).
+    FrameRecv(async_channel::Receiver<quoin_ext_proto::Msg>),
+    /// Park until a channel-relay frame arrives on this link's inbound lane —
+    /// the relay agent's wait (`Channel.relayAgent:`, ACTOR_OBJECTS.md §6).
+    /// `None` means the link closed (the counterpart isolate is gone).
+    ChanRecv(async_channel::Receiver<crate::worker::ChanFrame>),
     /// Close and deregister the stream.
     Close { id: StreamId },
     /// Upgrade the stream at `id` to TLS *in place*: take it out of the registry, run
@@ -334,6 +346,13 @@ pub enum IoResult {
     /// A worker's terminal report: its unit's outcome, or an `Err` for the
     /// lane closing unreported (the worker vanished).
     WorkerDone(Result<quoin_ext_proto::DataValue, String>),
+    /// The next hosted-object dispatch request (`None` = lane closed).
+    /// Boxed: a `Msg` is large, and `IoResult` travels the scheduler by value.
+    DispatchMsg(Option<Box<crate::worker::DispatchReq>>),
+    /// The next peer-protocol frame on a reply lane (`None` = lane closed).
+    FrameMsg(Option<Box<quoin_ext_proto::Msg>>),
+    /// The next channel-relay frame on a link (`None` = link closed).
+    ChanFrame(Option<Box<crate::worker::ChanFrame>>),
     Wrote(usize),
     Closed,
     /// A `RunProcess` finished: exit code (`None` when signal-terminated — then
@@ -383,6 +402,9 @@ impl IoRequest {
             IoRequest::Write { .. } => "io: write".to_string(),
             IoRequest::Compute(job) => format!("compute: {}", job.label),
             IoRequest::WorkerRecv(_) => "worker receive".to_string(),
+            IoRequest::DispatchRecv(_) => "hosted serve".to_string(),
+            IoRequest::FrameRecv(_) => "hosted call".to_string(),
+            IoRequest::ChanRecv(_) => "channel relay".to_string(),
             IoRequest::WorkerRecvTimed { ms, .. } => {
                 format!("worker receive (timeout {ms}ms)")
             }
@@ -525,6 +547,9 @@ impl IoBackend for MockBackend {
             IoRequest::Compute(job) => IoResult::Computed(job.run()),
             IoRequest::WorkerRecv(rx) => IoResult::WorkerMsg(rx.try_recv().ok()),
             IoRequest::WorkerRecvTimed { rx, .. } => IoResult::WorkerMsg(rx.try_recv().ok()),
+            IoRequest::DispatchRecv(rx) => IoResult::DispatchMsg(rx.try_recv().ok().map(Box::new)),
+            IoRequest::FrameRecv(rx) => IoResult::FrameMsg(rx.try_recv().ok().map(Box::new)),
+            IoRequest::ChanRecv(rx) => IoResult::ChanFrame(rx.try_recv().ok().map(Box::new)),
             IoRequest::WorkerJoin(rx) => {
                 IoResult::WorkerDone(rx.try_recv().unwrap_or_else(|_| {
                     Err("worker vanished without reporting a result".to_string())

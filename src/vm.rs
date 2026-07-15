@@ -484,6 +484,24 @@ pub struct Io {
     /// teardown), awaiting a synchronous `IoBackend::reap_child` (kill if running + deregister).
     /// A non-GC queue mirroring `socket_reap`; a shared `Rc` clone lives in each Process handle.
     pub child_reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+    /// Boundary-profiling tables, one per spawned extension peer (`ACTOR_OBJECTS.md` §7),
+    /// registered at spawn and read by `VM.boundaryStats`. Entries deliberately outlive
+    /// their extension — a dead peer's numbers are the post-mortem.
+    pub ext_stats: std::rc::Rc<
+        std::cell::RefCell<
+            Vec<std::rc::Rc<std::cell::RefCell<crate::runtime::extension::BoundaryStats>>>,
+        >,
+    >,
+    /// Claim state, one entry per hosted-service peer (`ACTOR_OBJECTS.md`
+    /// §5.1), registered at host and read by `VM.claims` and the cross-peer
+    /// deadlock walk. Entries outlive their peer — counters are the
+    /// post-mortem.
+    pub claim_peers: crate::runtime::claims::ClaimRegistry,
+    /// Channel-relay state, one entry per worker link that this VM talks to
+    /// (`ACTOR_OBJECTS.md` §6): the relay lanes, pending ops, and reap. A
+    /// worker VM's entry 0 is its parent link; a parent VM gains one entry
+    /// per spawned worker (registered when the handle/proxy is minted).
+    pub chan_links: Vec<crate::worker::ChanLink>,
 }
 
 /// Per-instruction instrumentation hooks, grouped out of `VmState`. Both `None` on a normal run, so
@@ -507,6 +525,17 @@ pub struct ClassMeta {
     /// above a reopen documents the extension; for a native class this is where its qnlib
     /// class doc lives.
     pub extensions: Vec<SourceInfo>,
+}
+
+/// One installed hosted-service class (see `VmState::service_classes`).
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct ServiceClassEntry<'gc> {
+    #[collect(require_static)]
+    pub link: usize,
+    #[collect(require_static)]
+    pub name: String,
+    pub class: Value<'gc>,
 }
 
 #[derive(Collect)]
@@ -685,6 +714,17 @@ pub struct VmState<'gc> {
     /// channel ends back to the parent. `None` on the main VM.
     #[collect(require_static)]
     pub worker_link: Option<crate::worker::WorkerLink>,
+    /// WORKER-side: the conversation each serve task is currently inside
+    /// (ACTOR_OBJECTS.md §3a) — how a `HostBlock` invocation finds its way
+    /// back to the parent. Keyed by task so the per-object-lane world (§5.1)
+    /// works unchanged; entries live only for the span of a dispatch.
+    #[collect(require_static)]
+    pub worker_convs: std::collections::HashMap<usize, crate::worker::ConvHandles>,
+    /// WORKER-side: this VM's `chan_links` index for its PARENT link — where
+    /// channels crossing plain lanes or dispatches relay (§6). `None` on the
+    /// main VM and before boot registration.
+    #[collect(require_static)]
+    pub parent_chan_link: Option<usize>,
     /// The ENTRY unit this VM was booted to run (canonicalized), `None` for
     /// REPL/eval. "What program is this?" — `Worker.spawn:(VM.unit)` runs
     /// another copy of the current program (the same-unit provisioning
@@ -704,6 +744,29 @@ pub struct VmState<'gc> {
     /// single bool load on the hot path) unless extensions are in use. See
     /// `src/handle_table.rs` / `docs/internal/FUTURE_EXT_ARCH.md` §2.
     pub handle_table: crate::handle_table::HandleTable<'gc>,
+
+    /// WORKER-side hosted-object table (`ACTOR_OBJECTS.md` §2): the objects this
+    /// worker hosts for its parent, keyed by the id in `Call.recv` /
+    /// `CallReturnResource.resource` (index + 1; 0 is never issued). A GC root set,
+    /// like `handle_table` — a hosted object lives until the parent's proxy drop
+    /// releases it (`Call.releases`) or the serve loop ends. Always empty outside
+    /// `Worker.hostServe:`.
+    pub hosted: Vec<Option<Value<'gc>>>,
+    /// Installed hosted-service classes (ACTOR_OBJECTS.md §2 manifests), keyed
+    /// by (worker link, class name) — deliberately unbound as globals; this
+    /// registry is their GC root (and, through their method nodes, the
+    /// services' root).
+    pub service_classes: Vec<ServiceClassEntry<'gc>>,
+    /// WORKER-side: the shipped block a `Worker.host:with:` / `Worker.with:`
+    /// spawn carries — taken by `Worker.hostBlockRoot` once the unit (if any)
+    /// has loaded, so the block's global references resolve against it.
+    #[collect(require_static)]
+    pub pending_host_block: Option<crate::worker::PortableBlock>,
+    /// WORKER-side: hosted class names whose selector manifests this worker
+    /// has already sent (the ready message or a `CallReturnResourceDecl`);
+    /// later returns of the same class carry only the name.
+    #[collect(require_static)]
+    pub hosted_announced: std::collections::HashSet<String>,
 }
 
 pub enum VmStatus<'gc> {
@@ -839,6 +902,8 @@ impl<'gc> VmState<'gc> {
             // Epoch starts at 1 so the epoch-0 empty slots never spuriously match.
             dispatch_epoch: 1,
             worker_link: None,
+            worker_convs: std::collections::HashMap::new(),
+            parent_chan_link: None,
             unit_path: None,
             worker_registry: Vec::new(),
             io: Io {
@@ -846,6 +911,9 @@ impl<'gc> VmState<'gc> {
                 socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 ext_handle_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 child_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                ext_stats: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                claim_peers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                chan_links: Vec::new(),
             },
             instrumentation: Instrumentation {
                 debug: None,
@@ -853,6 +921,10 @@ impl<'gc> VmState<'gc> {
             },
             options,
             handle_table: crate::handle_table::HandleTable::new(),
+            hosted: Vec::new(),
+            service_classes: Vec::new(),
+            pending_host_block: None,
+            hosted_announced: std::collections::HashSet::new(),
         }
     }
 
@@ -1609,6 +1681,118 @@ impl<'gc> VmState<'gc> {
         crate::codegen::bump_redef_epoch();
     }
 
+    /// A hosted-service dispatch node (ACTOR_OBJECTS.md §2 manifests): the
+    /// selector forwards to the worker behind the receiver; `service` (the
+    /// root proxy) rides along for class-side sends and roots the service
+    /// through the method table, mirroring `new_ext_method`.
+    pub fn new_service_method(
+        &self,
+        mc: &Mutation<'gc>,
+        selector: String,
+        service: Value<'gc>,
+    ) -> Value<'gc> {
+        let class = self.get_or_create_builtin_class(mc, "Method");
+        let state = NativeMethodState::new_service(selector, service);
+        let boxed_state: Box<dyn AnyCollect> = Box::new(state);
+        Value::Object(gcl!(
+            mc,
+            Object {
+                class,
+                fields: Fields::default(),
+                payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
+            }
+        ))
+    }
+
+    /// A plain native-method node (for the proxy-owned selectors installed on
+    /// service classes — `serviceStop`, `==:`).
+    pub fn new_native_method_value(
+        &self,
+        mc: &Mutation<'gc>,
+        selector: &str,
+        func: crate::value::LegacyNativeFn,
+    ) -> Value<'gc> {
+        let class = self.get_or_create_builtin_class(mc, "Method");
+        let state = NativeMethodState::new_native(
+            selector.to_string(),
+            crate::value::NativeFunc::new(func),
+            None,
+            None,
+            None,
+        );
+        let boxed_state: Box<dyn AnyCollect> = Box::new(state);
+        Value::Object(gcl!(
+            mc,
+            Object {
+                class,
+                fields: Fields::default(),
+                payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
+            }
+        ))
+    }
+
+    /// An EMPTY class shell for a hosted-service class, deliberately NOT bound
+    /// as a global (the parent's own class of the same name is untouched; the
+    /// value lives in `service_classes`). Populated in place once the root
+    /// proxy exists — the method nodes carry the proxy, and the proxy is an
+    /// instance of this class, so creation is two-step by construction.
+    pub fn make_service_class_shell(
+        &mut self,
+        mc: &Mutation<'gc>,
+        name: &str,
+    ) -> Gc<'gc, RefLock<Class<'gc>>> {
+        let parent = self.get_or_create_builtin_class(mc, "Object");
+        gcl!(
+            mc,
+            Class {
+                name: NamespacedName::parse(name),
+                parent: Some(parent),
+                instance_vars: Vec::new(),
+                instance_methods: FxHashMap::default(),
+                class_methods: FxHashMap::default(),
+                mixin_classes: Vec::new(),
+                field_slots: FxHashMap::default(),
+                init_plan: None,
+                is_eigenclass: false,
+                is_sealed: false,
+                is_abstract: false,
+                native_new_refusal: None,
+            }
+        )
+    }
+
+    /// Fill a service class shell from its manifest: every declared selector
+    /// becomes a `ServiceDispatch` node carrying `service` (the root proxy),
+    /// and the proxy-owned selectors (`serviceStop`, `==:`) are installed
+    /// last, shadowing same-named hosted methods by design.
+    pub fn populate_service_class(
+        &mut self,
+        mc: &Mutation<'gc>,
+        shell: Gc<'gc, RefLock<Class<'gc>>>,
+        service: Value<'gc>,
+        instance_selectors: &[String],
+        class_selectors: &[String],
+        owned: &[(&str, crate::value::LegacyNativeFn)],
+    ) {
+        {
+            let mut class = shell.borrow_mut(mc);
+            for sel in instance_selectors {
+                let node = self.new_service_method(mc, sel.clone(), service);
+                class.instance_methods.insert(Symbol::intern(sel), node);
+            }
+            for sel in class_selectors {
+                let node = self.new_service_method(mc, sel.clone(), service);
+                class.class_methods.insert(Symbol::intern(sel), node);
+            }
+            for (sel, func) in owned {
+                let node = self.new_native_method_value(mc, sel, *func);
+                class.instance_methods.insert(Symbol::intern(sel), node);
+            }
+        }
+        self.invalidate_method_cache();
+        crate::codegen::bump_redef_epoch();
+    }
+
     /// The memoized instantiation recipe for `class` (see [`InitPlan`]),
     /// rebuilt whenever the dispatch epoch has moved — every method-table,
     /// mixin, or extension mutation bumps it (including `mix:`, fixed
@@ -1960,6 +2144,70 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Insert a value into the worker-side hosted-object table (`hosted`),
+    /// answering its id: index + 1, so 0 is never issued (`Call.recv: 0` stays
+    /// free to mean "class-side" when hosted manifests arrive).
+    pub fn hosted_insert(&mut self, v: Value<'gc>) -> u64 {
+        // Dedupe by identity: hosting the same object twice must answer the
+        // same id (proxy `==` and release refcounts both depend on it).
+        if let Value::Object(obj) = v {
+            for (i, slot) in self.hosted.iter().enumerate() {
+                if let Some(Value::Object(existing)) = slot
+                    && Gc::ptr_eq(*existing, obj)
+                {
+                    return (i + 1) as u64;
+                }
+            }
+        }
+        for (i, slot) in self.hosted.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(v);
+                return (i + 1) as u64;
+            }
+        }
+        self.hosted.push(Some(v));
+        self.hosted.len() as u64
+    }
+
+    pub fn hosted_get(&self, id: u64) -> Option<Value<'gc>> {
+        self.hosted
+            .get((id as usize).checked_sub(1)?)
+            .copied()
+            .flatten()
+    }
+
+    pub fn hosted_release(&mut self, id: u64) {
+        if let Some(slot) = (id as usize)
+            .checked_sub(1)
+            .and_then(|i| self.hosted.get_mut(i))
+        {
+            *slot = None;
+        }
+    }
+
+    /// Like [`Self::call_method`], but a lookup miss raises `MessageNotUnderstood`
+    /// instead of answering nil. Remote dispatch (hosted objects; anything
+    /// forwarding a real SEND) wants send semantics; `call_method`'s nil-on-miss
+    /// is hook semantics ("call it if it's there").
+    pub fn call_method_mnu(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        selector: &str,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        let sel = Symbol::intern(selector);
+        if self.lookup_method(mc, receiver, sel, &args)?.is_none() {
+            return Err(QuoinError::MessageNotUnderstood {
+                receiver: format!("{receiver}"),
+                selector: selector.to_string(),
+                args: args.iter().map(|a| format!("{a}")).collect(),
+                candidates: Vec::new(),
+            });
+        }
+        self.call_method(mc, receiver, selector, args)
+    }
+
     pub fn call_method(
         &mut self,
         mc: &Mutation<'gc>,
@@ -2090,6 +2338,11 @@ impl<'gc> VmState<'gc> {
                         if let Some(ext) = method_state.ext_dispatch() {
                             Some(Callable::ExtMethod {
                                 ext,
+                                selector: Symbol::intern(selector),
+                            })
+                        } else if let Some(service) = method_state.service_dispatch() {
+                            Some(Callable::ServiceMethod {
+                                service,
                                 selector: Symbol::intern(selector),
                             })
                         } else if let Some(func) = method_state.native_func() {
@@ -4371,16 +4624,6 @@ impl<'gc> VmState<'gc> {
                 Ok(self.pop()?)
             }
         } else {
-            // Same service-proxy forwarding as exec_send's miss branch —
-            // compiled callers reach proxies through this outcall arm.
-            if let Some(res) = crate::runtime::worker_service::try_service_call(
-                self, mc, receiver, selector, &args,
-            ) {
-                if res.is_err() {
-                    self.exceptions.last_send_args = args;
-                }
-                return res;
-            }
             // No method: raise EXACTLY what the interpreted send raises
             // (candidates included). This arm returned nil since the first
             // outcall shell, which made a warm compiled outcall silently
@@ -4894,24 +5137,6 @@ impl<'gc> VmState<'gc> {
             );
             self.dispatch_send_rooted(mc, callable, receiver, args, selector, recv_start)
         } else {
-            // A WorkerService proxy forwards any selector its class doesn't
-            // define (docs/internal/CONCURRENCY_ARCH.md §10 L4) — the hook sits on
-            // this lookup-miss branch, so the hot path never pays for it.
-            if let Some(res) = crate::runtime::worker_service::try_service_call(
-                self, mc, receiver, selector, &args,
-            ) {
-                self.stack.truncate(recv_start);
-                return match res {
-                    Ok(v) => {
-                        self.push(v);
-                        Ok(VmStatus::Running)
-                    }
-                    Err(e) => {
-                        self.exceptions.last_send_args = args;
-                        Err(e)
-                    }
-                };
-            }
             // The selector may still exist with non-matching signatures; surface those
             // filtered-out variants as a hint.
             let candidates = self

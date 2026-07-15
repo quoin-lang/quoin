@@ -1,0 +1,11 @@
+"* Cross-isolate channel relay boot (docs/internal/ACTOR_OBJECTS.md 6, internal).
+"* Native code cannot mint a task directly — a task always runs a Quoin block —
+"* so this is that block: the first time a channel crosses a worker link, the
+"* VM calls `ChannelRelayBoot.spawn:` and the spawned task runs the native
+"* relay-agent loop (`Channel.relayAgent:`) until the link closes. Not a
+"* user-facing surface.
+ChannelRelayBoot <- {
+    .meta <-- {
+        spawn: -> { |link:Integer| Task.spawn:{ Channel.relayAgent:link }; nil }
+    }
+}

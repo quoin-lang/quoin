@@ -67,13 +67,237 @@ pub enum ControlKind {
     PsTree,
 }
 
+/// One hosted-object dispatch request crossing to a worker
+/// (docs/internal/ACTOR_OBJECTS.md §2): a peer-protocol `Call` frame plus the
+/// CONVERSATION's two lanes. For thread backing the request IS the transport
+/// (owned `Msg` values over in-memory lanes — the §1 "same protocol, cheaper
+/// carrier" row); for process backing the conversation pumps relay the same
+/// frames over the socket.
+///
+/// A conversation is strictly LIFO (the extension protocol's shape): frames
+/// worker→parent ride `reply` — zero or more host-op `Call`s (a parent-held
+/// handle driven from worker code), then the terminal `CallReturn*` — and
+/// frames parent→worker ride `hostops` — each host-op's reply, or a NESTED
+/// parent→worker `Call` riding the bound conversation (§5.1 rule 3).
+#[derive(Clone, Debug)]
+pub struct DispatchReq {
+    pub frame: quoin_ext_proto::Msg,
+    /// Shipped portable-block arguments, out-of-band of the wire frame
+    /// (ACTOR_OBJECTS.md §3a): `(argument position, snapshot)` pairs; the
+    /// frame's `method_args` holds a Null placeholder at each position. Only
+    /// the in-memory thread lane may carry these — the same
+    /// richer-than-wire-taxonomy allowance as `WorkerMsg::Block`; unportable
+    /// blocks and process peers take the handle path instead.
+    pub blocks: Vec<(usize, PortableBlock)>,
+    pub reply: async_channel::Sender<quoin_ext_proto::Msg>,
+    /// Parent→worker frames for this conversation (host-op replies and
+    /// nested calls). A closed lane means the caller abandoned the
+    /// conversation (cancellation) — the worker surfaces that as a catchable
+    /// error in the invoking code.
+    pub hostops: async_channel::Receiver<quoin_ext_proto::Msg>,
+    /// The worker stamps its handler time here (µs) — the boundary-profiling
+    /// decomposition (§7) for thread backing, where no wire exists to carry
+    /// `ReplyMeta`. Process backing leaves it 0 until the pumps carry meta.
+    pub handler_micros: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// The worker-side handles of the conversation a serve task is currently
+/// inside, keyed by task in `VmState::worker_convs`: host-op `Call`s go up
+/// `reply_tx`, their answers (and nested parent→worker calls) arrive on
+/// `hostops_rx`. `depth` counts open host-op conversations (capped as
+/// extensions cap theirs).
+#[derive(Clone, Debug)]
+pub struct ConvHandles {
+    pub reply_tx: async_channel::Sender<quoin_ext_proto::Msg>,
+    pub hostops_rx: async_channel::Receiver<quoin_ext_proto::Msg>,
+    pub depth: u32,
+}
+
+/// One channel-relay event crossing a worker link (docs/internal/ACTOR_OBJECTS.md
+/// §6): the frames of a shipped channel's protocol. NOT conversational — wakes
+/// arrive in any order, so ops carry correlation ids (`corr`) instead of riding
+/// the LIFO conversation shape. `chan` is the id the OWNER side rooted the
+/// channel under in its `vm.hosted` table. Thread links carry these as owned
+/// values (the richer-than-wire allowance); the wire encoding is the process
+/// slice.
+#[derive(Clone, Debug)]
+pub enum ChanFrame {
+    /// endpoint → owner: send `value`; answered by `Ack` (accepted), or
+    /// `ClosedFor` (channel closed — the send raises).
+    Send {
+        chan: u64,
+        corr: u64,
+        value: WireData,
+    },
+    /// owner → endpoint: the send with this correlation was accepted.
+    Ack { corr: u64 },
+    /// endpoint → owner: receive a value; answered by `Value`, `ClosedFor`
+    /// (closed and drained — nil / end of `each:`), or `RecvError`.
+    Recv { chan: u64, corr: u64 },
+    /// owner → endpoint: the receive's value.
+    Value { corr: u64, value: WireData },
+    /// owner → endpoint: the pending op's channel is closed (a receiver
+    /// observes closed-and-drained; a sender raises).
+    ClosedFor { corr: u64 },
+    /// owner → endpoint: the receive failed (a buffered value that predates
+    /// shipping turned out not to be portable).
+    RecvError { corr: u64, message: String },
+    /// endpoint → owner: close the channel (propagates; idempotent).
+    Close { chan: u64 },
+    /// endpoint → owner: retract a pending op (its task was cancelled).
+    Cancel { chan: u64, corr: u64 },
+    /// endpoint → owner: a relay endpoint was dropped (refcounted release).
+    Release { chan: u64 },
+    /// endpoint → owner: a value delivered to a since-cancelled receiver,
+    /// going home for redelivery (the send already reported success — the
+    /// value must not vanish).
+    Return { chan: u64, value: WireData },
+}
+
+// `ChanFrame`'s wire discriminants (`Msg::Chan.kind`, docs/internal/ACTOR_OBJECTS.md
+// §6): stable, append-only — the relay socket's whole vocabulary. Native-only,
+// like the socket pumps that speak them (thread links move `ChanFrame` values).
+#[cfg(not(target_arch = "wasm32"))]
+const CK_SEND: u8 = 0;
+#[cfg(not(target_arch = "wasm32"))]
+const CK_ACK: u8 = 1;
+#[cfg(not(target_arch = "wasm32"))]
+const CK_RECV: u8 = 2;
+#[cfg(not(target_arch = "wasm32"))]
+const CK_VALUE: u8 = 3;
+#[cfg(not(target_arch = "wasm32"))]
+const CK_CLOSED_FOR: u8 = 4;
+#[cfg(not(target_arch = "wasm32"))]
+const CK_RECV_ERROR: u8 = 5;
+#[cfg(not(target_arch = "wasm32"))]
+const CK_CLOSE: u8 = 6;
+#[cfg(not(target_arch = "wasm32"))]
+const CK_CANCEL: u8 = 7;
+#[cfg(not(target_arch = "wasm32"))]
+const CK_RELEASE: u8 = 8;
+#[cfg(not(target_arch = "wasm32"))]
+const CK_RETURN: u8 = 9;
+
+/// Encode one relay event as its wire frame (`Msg::Chan`) — the process
+/// links' transport; thread links move `ChanFrame` values directly.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn chan_frame_to_msg(f: ChanFrame) -> quoin_ext_proto::Msg {
+    use quoin_ext_proto::Msg;
+    let (kind, chan, corr, value, message) = match f {
+        ChanFrame::Send { chan, corr, value } => (CK_SEND, chan, corr, Some(value), String::new()),
+        ChanFrame::Ack { corr } => (CK_ACK, 0, corr, None, String::new()),
+        ChanFrame::Recv { chan, corr } => (CK_RECV, chan, corr, None, String::new()),
+        ChanFrame::Value { corr, value } => (CK_VALUE, 0, corr, Some(value), String::new()),
+        ChanFrame::ClosedFor { corr } => (CK_CLOSED_FOR, 0, corr, None, String::new()),
+        ChanFrame::RecvError { corr, message } => (CK_RECV_ERROR, 0, corr, None, message),
+        ChanFrame::Close { chan } => (CK_CLOSE, chan, 0, None, String::new()),
+        ChanFrame::Cancel { chan, corr } => (CK_CANCEL, chan, corr, None, String::new()),
+        ChanFrame::Release { chan } => (CK_RELEASE, chan, 0, None, String::new()),
+        ChanFrame::Return { chan, value } => (CK_RETURN, chan, 0, Some(value), String::new()),
+    };
+    Msg::Chan {
+        kind,
+        chan,
+        corr,
+        value,
+        message,
+    }
+}
+
+/// Decode a wire frame back into a relay event; `None` for a frame that is
+/// not a `Msg::Chan` or carries an unknown kind (skipped, append-only rule).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn msg_to_chan_frame(m: quoin_ext_proto::Msg) -> Option<ChanFrame> {
+    let quoin_ext_proto::Msg::Chan {
+        kind,
+        chan,
+        corr,
+        value,
+        message,
+    } = m
+    else {
+        return None;
+    };
+    let value_or_null = || value.clone().unwrap_or(WireData::Null);
+    Some(match kind {
+        CK_SEND => ChanFrame::Send {
+            chan,
+            corr,
+            value: value_or_null(),
+        },
+        CK_ACK => ChanFrame::Ack { corr },
+        CK_RECV => ChanFrame::Recv { chan, corr },
+        CK_VALUE => ChanFrame::Value {
+            corr,
+            value: value_or_null(),
+        },
+        CK_CLOSED_FOR => ChanFrame::ClosedFor { corr },
+        CK_RECV_ERROR => ChanFrame::RecvError { corr, message },
+        CK_CLOSE => ChanFrame::Close { chan },
+        CK_CANCEL => ChanFrame::Cancel { chan, corr },
+        CK_RELEASE => ChanFrame::Release { chan },
+        CK_RETURN => ChanFrame::Return {
+            chan,
+            value: value_or_null(),
+        },
+        _ => return None,
+    })
+}
+
+/// One worker link's channel-relay state, registered in `vm.io.chan_links`
+/// (each side of a link has one): the outbound lane, the inbound lane (drained
+/// by this side's relay-agent task), the pending ops this side has in flight,
+/// and the reap of dropped endpoints awaiting `Release`.
+#[derive(Debug)]
+pub struct ChanLink {
+    pub out: async_channel::Sender<ChanFrame>,
+    pub inbound: async_channel::Receiver<ChanFrame>,
+    /// The relay agent (`Channel.relayAgent:`) has been spawned for this link.
+    pub agent_running: bool,
+    /// Correlation-id source for this side's pending ops.
+    pub next_corr: u64,
+    /// corr → the parked task awaiting the op's answer (park-epoch identity,
+    /// the channel.rs ghost rule) and the channel it targets (for `Return`).
+    pub pending: std::collections::HashMap<u64, PendingChanOp>,
+    /// Dropped-endpoint channel ids awaiting a `Release` frame (a GC `Drop`
+    /// can't send one; flushed by the agent and by relay ops).
+    pub reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PendingChanOp {
+    pub task: usize,
+    pub epoch: u64,
+    pub chan: u64,
+}
+
+/// The worker link's reserved ops on the `Call` frame (`class_name` routes a
+/// hosted-object dispatch; these built-ins keep it empty).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const OP_SEND: &str = "send";
+/// A channel endpoint crossing the mailbox lane (`Worker.send:` of a Channel
+/// over a process link): `recv` carries the owner-side channel id (§6).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const OP_SEND_CHAN: &str = "sendChan";
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const OP_PS_TREE: &str = "psTree";
+/// Ends the hosted serve loop (`WorkerService`'s `serviceStop`). Shadows a
+/// hosted method of the same name by design — the proxy owns the selector.
+pub(crate) const OP_STOP: &str = "serviceStop";
+
 /// The worker-side half of the lanes, injected into the worker's `VmState`
 /// at boot: `Worker.receive` parks on `inbox_rx`, `Worker.send:` pushes to
-/// `outbox_tx`; the driver services `control_rx` (§13.3).
+/// `outbox_tx`; the driver services `control_rx` (§13.3); the hosted serve
+/// loop (`Worker.hostServe:`) parks on `dispatch_rx`.
 pub struct WorkerLink {
     pub inbox_rx: async_channel::Receiver<WorkerMsg>,
     pub outbox_tx: async_channel::Sender<WorkerMsg>,
     pub control_rx: async_channel::Receiver<ControlReq>,
+    pub dispatch_rx: async_channel::Receiver<DispatchReq>,
+    /// Channel-relay lane, worker side: frames to the parent / from the
+    /// parent (§6). Registered as a `ChanLink` when the worker boots.
+    pub chan_tx: async_channel::Sender<ChanFrame>,
+    pub chan_rx: async_channel::Receiver<ChanFrame>,
     /// True inside a PROCESS-backed worker: blocks refuse at the lane
     /// (templates are `Arc` references — meaningless across a process).
     pub process: bool,
@@ -104,6 +328,13 @@ pub struct WorkerChannels {
     pub outbox_rx: async_channel::Receiver<WorkerMsg>,
     pub done_rx: async_channel::Receiver<Result<WireData, String>>,
     pub control_tx: async_channel::Sender<ControlReq>,
+    /// Hosted-object dispatch (the service proxy's lane); unused by plain
+    /// workers, whose serve loop never reads the other end.
+    pub dispatch_tx: async_channel::Sender<DispatchReq>,
+    /// Channel-relay lane, parent side (§6): frames to the worker / from the
+    /// worker. Registered as a `ChanLink` when the handle/proxy is minted.
+    pub chan_tx: async_channel::Sender<ChanFrame>,
+    pub chan_rx: async_channel::Receiver<ChanFrame>,
 }
 
 // Counters for the `VM.stats` 'workers' section. Message counts are bumped
@@ -135,6 +366,9 @@ pub fn note_message() {
 pub enum WorkerMsg {
     Data(WireData),
     Block(PortableBlock),
+    /// A shipped channel endpoint (§6): the owner-side channel id; the
+    /// receiving side wraps it as a relay endpoint on its link.
+    Channel(u64),
 }
 
 /// A block shipped across a worker boundary (docs/internal/CONCURRENCY_ARCH.md §10):
@@ -443,23 +677,27 @@ pub type ChildGrip = std::sync::Arc<std::sync::Mutex<Option<std::process::Child>
 
 // The spawn/boot machinery (worker threads boot a full runner; process backing rides a
 // Unix socket) is native-only, split into a `#[path]` child file. On wasm32 the four
-// spawn entry points still exist so the `Worker` class compiles, but every spawn is
-// stillborn: the done lane is primed with an error before the channels are returned,
+// spawn entry points still exist so the `Worker` class compiles, but every spawn is a
+// dead letter: the done lane is primed with an error before the channels are returned,
 // so `join`/`receive` surface a catchable "not supported" instead of hanging.
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "worker_spawn.rs"]
 mod worker_spawn;
 #[cfg(not(target_arch = "wasm32"))]
 pub use worker_spawn::{
-    spawn_worker, spawn_worker_block, spawn_worker_process, spawn_worker_service, worker_serve_main,
+    spawn_worker, spawn_worker_block, spawn_worker_hosted_block, spawn_worker_process,
+    spawn_worker_service, worker_serve_main,
 };
 
 #[cfg(target_arch = "wasm32")]
-fn stillborn_channels() -> WorkerChannels {
+fn dead_letter_channels() -> WorkerChannels {
     let (inbox_tx, _inbox_rx) = async_channel::unbounded();
     let (_outbox_tx, outbox_rx) = async_channel::unbounded();
     let (done_tx, done_rx) = async_channel::bounded(1);
     let (control_tx, _control_rx) = async_channel::unbounded();
+    let (dispatch_tx, _dispatch_rx) = async_channel::unbounded();
+    let (chan_tx, _chan_inert_rx) = async_channel::unbounded();
+    let (_chan_inert_tx, chan_rx) = async_channel::unbounded();
     // `try_send` (send_blocking is compiled out on wasm): the lane is a fresh
     // bounded(1), so the one slot is guaranteed free.
     let _ = done_tx.try_send(Err("workers are not supported on this platform".to_string()));
@@ -468,28 +706,41 @@ fn stillborn_channels() -> WorkerChannels {
         outbox_rx,
         done_rx,
         control_tx,
+        dispatch_tx,
+        chan_tx,
+        chan_rx,
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_worker(_path: String) -> WorkerChannels {
-    stillborn_channels()
+    dead_letter_channels()
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_worker_block(_job: PortableBlock) -> WorkerChannels {
-    stillborn_channels()
+    dead_letter_channels()
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn spawn_worker_service(_path: String, _class_name: String) -> WorkerChannels {
-    stillborn_channels()
+pub fn spawn_worker_service(_path: String, _class_name: String, _lanes: u32) -> WorkerChannels {
+    dead_letter_channels()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn spawn_worker_hosted_block(
+    _path: Option<String>,
+    _pb: PortableBlock,
+    _lanes: u32,
+) -> WorkerChannels {
+    dead_letter_channels()
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_worker_process(
     _unit: String,
     _service: Option<String>,
+    _lanes: u32,
 ) -> Result<(WorkerChannels, u32, ChildGrip), String> {
     Err("workers are not supported on this platform".to_string())
 }

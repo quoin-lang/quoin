@@ -177,11 +177,13 @@ fn call_data_some_null_collapses_to_none() {
 #[test]
 fn extra_trailing_fields_are_skipped() {
     // Append-only evolution: a newer peer may add fields; this decoder must skip them.
-    // Hand-build `[T_CALL_RETURN, "x", nil, [1, {"k": 2}]]` (two unknown extras).
+    // Hand-build `[T_CALL_RETURN, "x", 5, nil, [1, {"k": 2}]]` — a `handler_micros`
+    // (the claimed first appended position) followed by two unknown extras.
     let frame = vec![
-        0x94, // array of 4
+        0x95, // array of 5
         0x01, // T_CALL_RETURN
         0xa1, b'x', // "x"
+        0x05, // handler_micros: 5
         0xc0, // extra: nil
         0x92, 0x01, 0x81, 0xa1, b'k', 0x02, // extra: [1, {"k": 2}]
     ];
@@ -234,8 +236,10 @@ fn deep_datavalue_is_rejected_not_overflowed() {
     let err = decode_frame(&frame).expect_err("deep value must be rejected");
     assert!(err.contains("nesting"), "unexpected error: {err}");
 
-    // Same nest smuggled in as an unknown extra field: `[T_CALL_RETURN, "x", <deep>]`.
-    let mut frame = vec![0x93, 0x01, 0xa1, b'x'];
+    // Same nest smuggled in as an UNKNOWN extra field — one past `handler_micros`
+    // (the first appended position is claimed and typed u64 now):
+    // `[T_CALL_RETURN, "x", 7, <deep>]`.
+    let mut frame = vec![0x94, 0x01, 0xa1, b'x', 0x07];
     frame.extend_from_slice(&pack_dv(&dv));
     let err = decode_frame(&frame).expect_err("deep extra must be rejected");
     assert!(err.contains("nesting"), "unexpected error: {err}");
@@ -355,4 +359,69 @@ fn resource_values_round_trip() {
     let short = vec![0xc7, 0x03, 0x03, 0x01, 0x02, 0x03]; // ext8, len 3, type 3
     let err = unpack_dv(&short).expect_err("short Resource must be rejected");
     assert!(err.contains("Resource"), "unexpected error: {err}");
+}
+
+#[test]
+fn reply_meta_rides_call_terminals() {
+    use crate::{ReplyMeta, decode_frame_with_meta, encode_with_meta};
+    let meta = ReplyMeta {
+        handler_micros: 12_345,
+    };
+    let terminals = vec![
+        Msg::CallReturn {
+            result: "ok".into(),
+        },
+        Msg::CallReturnError {
+            message: "boom".into(),
+            remote_stack: "trace".into(),
+        },
+        Msg::CallReturnResource {
+            resource: 9,
+            class_name: "Vector".into(),
+        },
+        Msg::CallReturnArray {
+            array: ArrowArray {
+                dtype: ArrowDType::Float64,
+                length: 1,
+                data: vec![0; 8],
+            },
+        },
+        Msg::CallReturnData { value: Dv::Int(1) },
+        Msg::CallReturnHandle { handle: 3 },
+    ];
+    for msg in terminals {
+        // With meta: both the message and the appended field round-trip.
+        let frame = encode_with_meta(&msg, Some(&meta));
+        assert_eq!(
+            decode_frame_with_meta(&frame).unwrap(),
+            (msg.clone(), meta),
+            "meta round trip failed"
+        );
+        // Old producer (plain encode): the field is absent, meta defaults to 0.
+        let old = encode(&msg);
+        assert_eq!(
+            decode_frame_with_meta(&old).unwrap(),
+            (msg.clone(), ReplyMeta::default()),
+            "old-frame default failed"
+        );
+        // Old consumer (plain decode_frame): the appended field is skipped cleanly.
+        assert_eq!(
+            decode_frame(&frame).unwrap(),
+            msg,
+            "old-decoder skip failed"
+        );
+    }
+}
+
+#[test]
+fn reply_meta_ignored_on_non_terminals() {
+    use crate::{ReplyMeta, decode_frame_with_meta, encode_with_meta};
+    let msg = Msg::GetManifest { version: 2 };
+    let frame = encode_with_meta(&msg, Some(&ReplyMeta { handler_micros: 7 }));
+    // Not a Call terminal: nothing is appended, and decode reports the default.
+    assert_eq!(frame, encode(&msg));
+    assert_eq!(
+        decode_frame_with_meta(&frame).unwrap(),
+        (msg, ReplyMeta::default())
+    );
 }

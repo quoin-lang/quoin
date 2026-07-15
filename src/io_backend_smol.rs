@@ -633,6 +633,15 @@ impl IoBackend for SmolBackend {
             IoRequest::WorkerRecv(rx) => {
                 Box::pin(async move { IoResult::WorkerMsg(rx.recv().await.ok()) })
             }
+            IoRequest::DispatchRecv(rx) => {
+                Box::pin(async move { IoResult::DispatchMsg(rx.recv().await.ok().map(Box::new)) })
+            }
+            IoRequest::FrameRecv(rx) => {
+                Box::pin(async move { IoResult::FrameMsg(rx.recv().await.ok().map(Box::new)) })
+            }
+            IoRequest::ChanRecv(rx) => {
+                Box::pin(async move { IoResult::ChanFrame(rx.recv().await.ok().map(Box::new)) })
+            }
             IoRequest::WorkerRecvTimed { rx, ms } => Box::pin(async move {
                 let recv = async { rx.recv().await.ok() };
                 let deadline = async {

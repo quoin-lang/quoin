@@ -126,7 +126,7 @@ Counter <- { |@total|
 fn process_backed_service_state_errors_and_stop() {
     let script = r#"
 var ok = true;
-var c = WorkerService.host:'@counter.qn@' class:'Counter' backing:'process';
+var c = Worker.host:'@counter.qn@' class:'Counter' backing:'process';
 ((c.add:5) == 5).else:{ ok = false };
 ((c.add:7) == 12).else:{ ok = false };
 var thrown = { c.boom; 'no-error' }.catch:{ |e| e.s };
@@ -150,7 +150,7 @@ var j = { (Worker.spawn:'/nonexistent/nope.qn' backing:'process').join; 'ran' }
     .catch:{ |e| (e.s.contains?:'nope.qn').if:{ 'named' } else:{ e.s } };
 (j == 'named').else:{ ok = false };
 "* services handshake at host:, so THEY raise there
-var h = { WorkerService.host:'/nonexistent/nope.qn' class:'X' backing:'process'; 'hosted' }
+var h = { Worker.host:'/nonexistent/nope.qn' class:'X' backing:'process'; 'hosted' }
     .catch:{ |e| (e.s.contains?:'nope.qn').if:{ 'named' } else:{ e.s } };
 (h == 'named').else:{ ok = false };
 "* start: with process backing points at the unit form

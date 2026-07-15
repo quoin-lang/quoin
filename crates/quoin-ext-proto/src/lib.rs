@@ -17,7 +17,22 @@
 
 pub mod codec;
 
-pub use codec::{decode_frame, encode, pack_dv, unpack_dv};
+pub use codec::{
+    decode_frame, decode_frame_with_meta, encode, encode_with_meta, pack_dv, unpack_dv,
+};
+
+/// Appended per-frame metadata riding the `CallReturn*` terminals (append-only
+/// evolution; absent on frames from older peers). Kept OUT of [`Msg`] so the message
+/// shapes — and every construction site — stay meta-free: producers pass it to
+/// [`codec::encode_with_meta`], consumers get it from [`codec::decode_frame_with_meta`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplyMeta {
+    /// Wall time the peer spent servicing the call, in microseconds, from receiving the
+    /// `Call` to writing its terminal — INCLUDING any nested host round-trips it made.
+    /// 0 = not reported (older SDK). Boundary profiling uses it to split a call's cost
+    /// into queue-wait / transport / remote-handler shares.
+    pub handler_micros: u64,
+}
 
 /// The protocol version spoken by this crate, exchanged in [`Msg::GetManifest`] /
 /// [`Msg::ManifestReturn`] (the first frames on a fresh connection, so a mismatch is
@@ -95,6 +110,10 @@ pub enum Arg {
     Resource(u64),
     Handle(u64),
     Array(ArrowArray),
+    /// A shipped channel endpoint (Quoin worker peers only,
+    /// docs/internal/ACTOR_OBJECTS.md §6): the owner-side channel id. Foreign
+    /// extensions never receive this kind.
+    Chan(u64),
 }
 
 /// A single control-plane frame, in either direction. Encode with [`encode`]; decode a
@@ -137,6 +156,33 @@ pub enum Msg {
     /// (reaped on drop). `resource` is the extension-assigned id; `class_name` names the registered
     /// extension-backed class it's an instance of (Phase 3; empty = the opaque `ExtResource`).
     CallReturnResource { resource: u64, class_name: String },
+    /// worker -> host (Quoin peers only, docs/internal/ACTOR_OBJECTS.md §6): the call
+    /// returns a CHANNEL the answering isolate owns; `chan` is its id in that isolate's
+    /// hosted table. The receiver wraps it as a relay endpoint. Foreign extensions
+    /// never produce or receive this frame.
+    CallReturnChannel { chan: u64 },
+    /// worker -> host (Quoin peers only, docs/internal/ACTOR_OBJECTS.md §2 manifests): as
+    /// `CallReturnResource`, for a class this worker has not yet declared — the terminal
+    /// carries the class's selector manifest so the host installs a real class before
+    /// wrapping the sub-proxy. Later returns of the same class use `CallReturnResource`.
+    CallReturnResourceDecl {
+        resource: u64,
+        class_name: String,
+        instance_selectors: Vec<String>,
+        class_selectors: Vec<String>,
+    },
+    /// worker <-> host, both directions (Quoin peers only, docs/internal/ACTOR_OBJECTS.md
+    /// §6): one channel-relay event on the link's relay socket. `kind` discriminates the
+    /// event (the VM's `ChanFrame` vocabulary: send/ack/recv/value/closed/recv-error/
+    /// close/cancel/release/return); unused fields are zero/empty. Foreign extensions
+    /// never produce or receive this frame.
+    Chan {
+        kind: u8,
+        chan: u64,
+        corr: u64,
+        value: Option<DataValue>,
+        message: String,
+    },
     /// ext -> host: the call returns a bulk `Array` (the data plane).
     CallReturnArray { array: ArrowArray },
     /// ext -> host: the call returns a structured value (materialized as a nested Quoin Value).

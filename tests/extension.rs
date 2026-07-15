@@ -1162,3 +1162,107 @@ ok.if:{{ 'PASS'.print }} else:{{ ('FAIL: ' + msg).print }};
     assert_script_passes("qn_ext_version_mismatch_test.qn", &script);
     let _ = std::fs::remove_file(&fixture);
 }
+
+#[test]
+fn extension_boundary_stats() {
+    // Boundary profiling (ACTOR_OBJECTS.md §7): every extension call is counted per
+    // (peer, class, selector) — calls, errors, bytes both ways, and the cost split
+    // (wall / claim-wait / peer-reported handler time). Always on; `VM.boundaryStats`
+    // exposes the rows and `VM.boundaryReport` renders them.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+var v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+v.sum;
+v.sum;
+v.sum;
+{{ v.at:9 }}.catch:{{ |ex| nil }};
+
+var bySel = Map.new;
+VM.boundaryStats.each:{{ |r| bySel.at:((r.at:'class') + '.' + (r.at:'selector')) put:r }};
+
+var sumRow = bySel.at:'Vector.sum';
+(sumRow != nil).if:{{
+    ((sumRow.at:'calls') == 3).else:{{ ok = false; 'FAIL: sum calls'.print }};
+    ((sumRow.at:'errors') == 0).else:{{ ok = false; 'FAIL: sum errors'.print }};
+    ((sumRow.at:'wallMicros') > 0).else:{{ ok = false; 'FAIL: sum wall'.print }};
+    ((sumRow.at:'handlerMicros') > 0).else:{{ ok = false; 'FAIL: sum handler'.print }};
+    ((sumRow.at:'bytesOut') > 0).else:{{ ok = false; 'FAIL: sum bytesOut'.print }};
+    ((sumRow.at:'bytesIn') > 0).else:{{ ok = false; 'FAIL: sum bytesIn'.print }};
+    ((sumRow.at:'peer') == 'ext_vector').else:{{ ok = false; 'FAIL: peer label'.print }};
+}} else:{{ ok = false; 'FAIL: no Vector.sum row'.print }};
+
+"* the failed at:9 counts as one call AND one error (post-mortem numbers survive the raise)
+var atRow = bySel.at:'Vector.at:';
+(atRow != nil).if:{{
+    ((atRow.at:'calls') == 1).else:{{ ok = false; 'FAIL: at: calls'.print }};
+    ((atRow.at:'errors') == 1).else:{{ ok = false; 'FAIL: at: errors'.print }};
+}} else:{{ ok = false; 'FAIL: no Vector.at: row'.print }};
+
+(VM.boundaryReport.contains?:'Vector.sum').else:{{ ok = false; 'FAIL: report missing row'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_boundary_stats_test.qn", &script);
+}
+
+#[test]
+fn extension_boundary_claim_wait() {
+    // Mailbox contention is its own diagnosis: callers queued behind an in-flight call
+    // record their park time in `claimWaitMicros`, separate from the call's own wall.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_echo");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+var r = Async.gather:#(
+    {{ e.call:'slow' with:'S' }}
+    {{ e.call:'echo' with:'A' }}
+    {{ e.call:'echo' with:'B' }}
+);
+(r == #( 'S' 'A' 'B' )).else:{{ ok = false; ('FAIL gather: ' + r.s).print }};
+
+var queued = 0;
+VM.boundaryStats.each:{{ |row| ((row.at:'claimWaitMicros') > 0).if:{{ queued = queued + 1 }} }};
+(queued > 0).else:{{ ok = false; 'FAIL: no claim wait recorded under contention'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_boundary_wait_test.qn", &script);
+}
+
+#[test]
+fn extension_boundary_stats_python() {
+    // The Python SDK stamps `handler_micros` on its terminals too — the decomposition
+    // works against a Python peer (polyglot append-only field, PROTOCOL.md).
+    if !python_fixture_runnable() {
+        eprintln!("skipping extension_boundary_stats_python: python3 with `msgpack` unavailable");
+        return;
+    }
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/sdk/python/examples/ext_vector.py"
+    );
+    ensure_executable(fixture);
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{fixture}';
+var v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+v.sum;
+var found = false;
+VM.boundaryStats.each:{{ |r|
+    (((r.at:'class') == 'Vector') && ((r.at:'selector') == 'sum')).if:{{
+        found = ((r.at:'handlerMicros') > 0);
+    }};
+}};
+found.else:{{ ok = false; 'FAIL: python peer reported no handler time'.print }};
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_boundary_python_test.qn", &script);
+}

@@ -29,12 +29,12 @@ unsigned ints; `str`/`bin`/`bool`/arrays/maps are their native MessagePack forms
 | type | message | direction | fields after the type tag |
 |---|---|---|---|
 | 0 | Call | host → ext | `op:str, arg:str, handles:[u64], resources:[u64], releases:[u64], arrays:[ArrowArray], data:Value|nil, class_name:str, recv:u64, method_args:[Arg]` |
-| 1 | CallReturn | ext → host | `result:str` |
-| 2 | CallReturnError | ext → host | `message:str, remote_stack:str` |
-| 3 | CallReturnResource | ext → host | `resource:u64, class_name:str` |
-| 4 | CallReturnArray | ext → host | `array:ArrowArray` |
-| 5 | CallReturnData | ext → host | `value:Value` |
-| 6 | CallReturnHandle | ext → host | `handle:u64` |
+| 1 | CallReturn | ext → host | `result:str, handler_micros:u64`† |
+| 2 | CallReturnError | ext → host | `message:str, remote_stack:str, handler_micros:u64`† |
+| 3 | CallReturnResource | ext → host | `resource:u64, class_name:str, handler_micros:u64`† |
+| 4 | CallReturnArray | ext → host | `array:ArrowArray, handler_micros:u64`† |
+| 5 | CallReturnData | ext → host | `value:Value, handler_micros:u64`† |
+| 6 | CallReturnHandle | ext → host | `handle:u64, handler_micros:u64`† |
 | 7 | GetManifest | host → ext | `version:u32` |
 | 8 | ManifestReturn | ext → host | `version:u32, classes:[ClassDecl]` |
 | 9 | MakeString | ext → host | `value:str` |
@@ -49,6 +49,22 @@ unsigned ints; `str`/`bin`/`bool`/arrays/maps are their native MessagePack forms
 | 18 | ReadHandle | ext → host | `handle:u64` |
 | 19 | ReadHandleReturn | host → ext | `value:Value, error:str|nil, remote_stack:str` |
 | 20 | HostOpReturn | host → ext | `handle:u64, str:str|nil, error:str|nil, remote_stack:str` |
+| 21 | CallReturnChannel | worker → host | `chan:u64, handler_micros:u64`† — Quoin worker peers only (a shipped channel endpoint, docs/internal/ACTOR_OBJECTS.md §6); extensions never produce or receive it |
+| 22 | Chan | worker ↔ host | `kind:u8, chan:u64, corr:u64, value:Value|nil, message:str` — one channel-relay event on a worker link's relay socket (Quoin worker peers only, docs/internal/ACTOR_OBJECTS.md §6); extensions never produce or receive it |
+| 23 | CallReturnResourceDecl | worker → host | `resource:u64, class_name:str, instance_selectors:[str], class_selectors:[str], handler_micros:u64`† — Quoin worker peers only (first crossing of a hosted class carries its manifest, docs/internal/ACTOR_OBJECTS.md §2); extensions never produce or receive it |
+
+† `handler_micros` is an appended field (see Evolution) on every `CallReturn*`
+terminal: the wall time the peer spent servicing the call, in microseconds, from
+decoding the `Call` to writing its terminal — nested host round-trips included.
+Producers SHOULD send it (both SDKs do); a decoder treats an absent field as 0 =
+not reported. The host's boundary profiling (`VM.boundaryStats`) uses it to split
+a call's cost into queue-wait / transport / remote-handler shares. In the Rust
+crate it travels OUT-OF-BAND of `Msg` as `ReplyMeta`
+(`encode_with_meta`/`decode_frame_with_meta`), so message construction stays
+meta-free. Note the append-only consequence: the first appended position on
+these terminals is now claimed and **typed** — a frame carrying a non-uint there
+is malformed (exactly as a non-str in `CallReturnError`'s `remote_stack` position
+always was); further unknown extras after it are still skipped.
 
 Composite fields (also MessagePack arrays):
 
@@ -63,7 +79,9 @@ Composite fields (also MessagePack arrays):
   take another of the extension's objects), 2 = **Handle** (payload is a host-value
   handle for a block or other non-data host object the extension drives via
   InvokeBlock / CallMethodOnHandle), 3 = **Array** (payload is an inline ArrowArray —
-  the data plane as a method argument).
+  the data plane as a method argument), 4 = **Chan** (payload is a shipped channel's
+  owner-side id — Quoin worker peers only, docs/internal/ACTOR_OBJECTS.md §6;
+  extensions never receive this kind).
 - **ClassDecl** = `[name:str, instance_selectors:[str], class_selectors:[str]]` — one
   extension-provided class; the host installs a real Quoin class named `name` whose
   selectors dispatch over the socket (instance-side on instances, class-side on the

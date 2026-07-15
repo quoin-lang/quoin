@@ -28,6 +28,12 @@ fn spawn_worker_with(
     let (outbox_tx, outbox_rx) = async_channel::unbounded();
     let (done_tx, done_rx) = async_channel::bounded(1);
     let (control_tx, control_rx) = async_channel::unbounded();
+    // Thread backing: the dispatch lane IS the transport — owned `Msg` values,
+    // no pump, no bytes (ACTOR_OBJECTS.md §1). The channel-relay lanes (§6)
+    // likewise carry owned frames.
+    let (dispatch_tx, dispatch_rx) = async_channel::unbounded();
+    let (chan_to_worker_tx, chan_to_worker_rx) = async_channel::unbounded();
+    let (chan_to_parent_tx, chan_to_parent_rx) = async_channel::unbounded();
     let id = SPAWNED.fetch_add(1, Ordering::Relaxed);
     std::thread::Builder::new()
         .name(format!("qn-worker-{id}"))
@@ -41,6 +47,9 @@ fn spawn_worker_with(
                     inbox_rx,
                     outbox_tx,
                     control_rx,
+                    dispatch_rx,
+                    chan_tx: chan_to_parent_tx,
+                    chan_rx: chan_to_worker_rx,
                     process: false,
                 })
             }))
@@ -61,41 +70,71 @@ fn spawn_worker_with(
         outbox_rx,
         done_rx,
         control_tx,
+        dispatch_tx,
+        chan_tx: chan_to_worker_tx,
+        chan_rx: chan_to_parent_rx,
     }
 }
 
-/// The generic service loop appended to a hosted unit's source
-/// (docs/internal/CONCURRENCY_ARCH.md §10 L4): instantiate the hosted class, report
-/// ready, then serve calls forever — one at a time, actor-style. Calls are
-/// reflective sends (`perform:args:`), so a missing method raises the same
-/// MessageNotUnderstood a direct send would, and it travels back as the
-/// reply's 'err'. A nil message (serviceStop) ends the loop; the unit then
-/// completes and the done lane reports.
-const SERVICE_LOOP_QN: &str = r#"
-var svcHostInstance = @CLASS@.new;
-Worker.send:#{ 'ready': true };
-var svcHostRunning = true;
-{ svcHostRunning }.whileDo:{
-    var svcHostCall = Worker.receive;
-    (svcHostCall == nil).if:{ svcHostRunning = false }
-    else:{
-        var svcHostReply = {
-            #{ 'ret': (svcHostInstance.perform:(svcHostCall.at:'sel') args:(svcHostCall.at:'args')) }
-        }.catch:{ |e| #{ 'err': e.s } };
-        Worker.send:svcHostReply
-    }
-};
-"#;
+/// Synthesize the hosting lines appended to a hosted unit's source
+/// (src/runtime/worker.rs): `Worker.hostRoot:` instantiates the class, roots
+/// it in the worker's hosted-object table, and reports ready; then a gather
+/// of `Worker.hostServeLane` thunks serves peer-protocol `Call` dispatches —
+/// one fiber per lane, all consuming the shared dispatch channel — until the
+/// reserved stop op (one per lane) or the lane closing ends them
+/// (ACTOR_OBJECTS.md §5.1).
+fn service_loop_qn(class_name: &str, lanes: u32) -> String {
+    let thunks = "{ Worker.hostServeLane } ".repeat(lanes.max(1) as usize);
+    format!("\nWorker.hostRoot:'{class_name}';\nAsync.gather:#( {thunks});\n")
+}
 
 /// Spawn a SERVICE worker: the unit at `path` (which defines `class_name`)
-/// plus the generic serve loop, compiled as one program.
-pub fn spawn_worker_service(path: String, class_name: String) -> WorkerChannels {
-    spawn_worker_with(move |link| run_worker_service(&path, &class_name, link))
+/// plus the generic serve loop, compiled as one program. `lanes` fibers serve
+/// concurrently (the parent's claim machinery bounds in-flight conversations
+/// to the same number).
+pub fn spawn_worker_service(path: String, class_name: String, lanes: u32) -> WorkerChannels {
+    spawn_worker_with(move |link| run_worker_service(&path, &class_name, lanes, link))
+}
+
+/// Spawn a hosted-BLOCK worker (`Worker.host:'unit.qn' with:{ … }` /
+/// `Worker.with:{ … }`): boot, load the unit if any, then run the shipped
+/// block via `Worker.hostBlockRoot` and host the object it answers.
+pub fn spawn_worker_hosted_block(
+    path: Option<String>,
+    pb: PortableBlock,
+    lanes: u32,
+) -> WorkerChannels {
+    spawn_worker_with(move |link| run_worker_hosted_block(path.as_deref(), pb, lanes, link))
+}
+
+fn run_worker_hosted_block(
+    path: Option<&str>,
+    pb: PortableBlock,
+    lanes: u32,
+    link: WorkerLink,
+) -> Result<WireData, String> {
+    let unit_source = match path {
+        Some(p) => {
+            std::fs::read_to_string(PathBuf::from(p)).map_err(|e| format!("host unit {p}: {e}"))?
+        }
+        None => String::new(),
+    };
+    let thunks = "{ Worker.hostServeLane } ".repeat(lanes.max(1) as usize);
+    let source = format!(
+        "{unit_source}
+Worker.hostBlockRoot;
+Async.gather:#( {thunks});
+"
+    );
+    run_worker_source_with(path.unwrap_or("{host block}"), &source, link, move |vm| {
+        vm.pending_host_block = Some(pb);
+    })
 }
 
 pub(crate) fn run_worker_service(
     path: &str,
     class_name: &str,
+    lanes: u32,
     link: WorkerLink,
 ) -> Result<WireData, String> {
     // The class name is interpolated into synthesized source — insist on a
@@ -113,11 +152,7 @@ pub(crate) fn run_worker_service(
     }
     let unit_source = std::fs::read_to_string(PathBuf::from(path))
         .map_err(|e| format!("service unit {path}: {e}"))?;
-    let source = format!(
-        "{unit_source}
-{}",
-        SERVICE_LOOP_QN.replace("@CLASS@", class_name)
-    );
+    let source = format!("{unit_source}\n{}", service_loop_qn(class_name, lanes));
     run_worker_source(path, &source, link)
 }
 
@@ -138,6 +173,17 @@ fn canonical_unit(path: &str) -> String {
 }
 
 fn run_worker_source(path: &str, source: &str, link: WorkerLink) -> Result<WireData, String> {
+    run_worker_source_with(path, source, link, |_| {})
+}
+
+/// As `run_worker_source`, with a post-boot hook run on the fresh VM before
+/// the program starts (the hosted-block spawn stashes its shipped block here).
+fn run_worker_source_with(
+    path: &str,
+    source: &str,
+    link: WorkerLink,
+    prepare: impl FnOnce(&mut VmState<'_>),
+) -> Result<WireData, String> {
     let ast = try_parse_quoin_string_named(source, path)
         .map_err(|e| format!("worker unit {path}: parse error: {e}"))?;
     let NodeValue::Program(program_node) = &ast.value else {
@@ -145,6 +191,14 @@ fn run_worker_source(path: &str, source: &str, link: WorkerLink) -> Result<WireD
     };
 
     let mut arena = boot_worker_arena(link)?;
+    {
+        let mut prepare = Some(prepare);
+        arena.mutate_root(|_mc, vm| {
+            if let Some(p) = prepare.take() {
+                p(vm);
+            }
+        });
+    }
     let unit = canonical_unit(path);
     arena.mutate_root(|_mc, vm| vm.unit_path = Some(unit));
 
@@ -182,6 +236,15 @@ fn boot_worker_arena(link: WorkerLink) -> Result<ReplArena, String> {
     let mut arena: ReplArena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc, VmOptions::default());
         register_builtins(mc, &mut vm);
+        // Register the parent link's channel-relay lanes (§6) before the link
+        // moves into place: channels crossing plain lanes or dispatches relay
+        // through this entry.
+        let idx = crate::runtime::channel_relay::register_chan_link(
+            &mut vm,
+            link.chan_tx.clone(),
+            link.chan_rx.clone(),
+        );
+        vm.parent_chan_link = Some(idx);
         vm.worker_link = Some(link);
         vm
     });
@@ -245,45 +308,236 @@ fn run_worker_block(job: PortableBlock, link: WorkerLink) -> Result<WireData, St
 }
 
 // =====================================================================
-// Process backing (docs/internal/CONCURRENCY_ARCH.md §13.1): the SAME lanes, with a
-// PUMP on the other end — four small threads bridging the channels over a
-// unix socket (length-prefixed msgpack `DataValue` frames) to a child
-// `qn worker-serve` process, whose own pump feeds identical channels into
-// the same worker body. Everything above the lanes (handles, registry,
-// services, psTree) inherits process backing by construction.
+// Process backing (docs/internal/CONCURRENCY_ARCH.md §13.1, converged per
+// ACTOR_OBJECTS.md §1/§4): the SAME lanes, bridged to a child
+// `qn worker-serve` process over TWO unix sockets speaking the extension
+// protocol's `Msg` frames (u32-LE + msgpack, `quoin-ext-proto`) — one
+// protocol, three peer kinds; the bespoke `{t,v}` envelope is retired.
+//
+// The two sockets are two LANES with different disciplines (lanes, never
+// frame-multiplexing — the §5 rule):
+//
+// - The CONVERSATION socket: extension-protocol discipline verbatim,
+//   parent = host. Opens with the `GetManifest`/`ManifestReturn` version
+//   handshake (the gate workers previously lacked; provided classes stay
+//   empty until hosted objects). Control requests are conversations —
+//   `Call{op:"psTree"}` answered by `CallReturnData` — one at a time, so
+//   the old request-id correlation machinery is gone on both sides.
+//   Hosted-object dispatch (arc-2 slice 4) rides this socket next.
+//
+// - The MAILBOX socket: the async flows as ONE long-lived implicit
+//   conversation — the spawn is the "call". `Worker.send:` in either
+//   direction is an intermediate `Call{op:"send", data}` frame (fire and
+//   forget: an enqueue-ack from a pump thread would prove nothing;
+//   real cross-isolate backpressure is the channel-relay design), and the
+//   child's done report is the conversation's TERMINAL: `CallReturnData`
+//   with the join value, or `CallReturnError` on failure (whose
+//   `remote_stack` slot the structured-stacks work will fill).
+//
+// Everything above the lanes (handles, registry, services, psTree)
+// inherits process backing by construction, unchanged.
 // =====================================================================
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-/// One wire frame, itself a `DataValue` map:
-/// d=data, k=done-ok, e=done-err, c=control, r=control-reply.
-fn frame_write(sock: &mut UnixStream, frame: &WireData) -> std::io::Result<()> {
-    let bytes = quoin_ext_proto::codec::pack_dv(frame);
+use quoin_ext_proto::{Msg, PROTOCOL_VERSION, ReplyMeta};
+
+/// A bare `Call` frame carrying only an op and an optional data payload —
+/// the worker link's message shape.
+fn call_frame(op: &str, data: Option<WireData>) -> Msg {
+    Msg::Call {
+        op: op.to_string(),
+        arg: String::new(),
+        handles: Vec::new(),
+        resources: Vec::new(),
+        releases: Vec::new(),
+        arrays: Vec::new(),
+        data,
+        class_name: String::new(),
+        recv: 0,
+        method_args: Vec::new(),
+    }
+}
+
+fn write_msg_frame(sock: &mut UnixStream, msg: &Msg) -> std::io::Result<()> {
+    let bytes = quoin_ext_proto::encode(msg);
     sock.write_all(&(bytes.len() as u32).to_le_bytes())?;
     sock.write_all(&bytes)
 }
 
-fn frame_read(sock: &mut UnixStream) -> std::io::Result<WireData> {
+/// As `write_msg_frame`, stamping `ReplyMeta.handler_micros` on the frame —
+/// used for the frame that closes a conversation (its outer `CallReturn*`
+/// terminal), so boundary profiling gets the worker's servicing time across
+/// the process boundary (§7's out-of-band pattern; a no-op for frame kinds
+/// that carry no meta).
+fn write_msg_frame_meta(
+    sock: &mut UnixStream,
+    msg: &Msg,
+    handler_micros: u64,
+) -> std::io::Result<()> {
+    let meta = ReplyMeta { handler_micros };
+    let bytes = quoin_ext_proto::encode_with_meta(msg, Some(&meta));
+    sock.write_all(&(bytes.len() as u32).to_le_bytes())?;
+    sock.write_all(&bytes)
+}
+
+fn read_msg_frame(sock: &mut UnixStream) -> std::io::Result<Msg> {
     let mut len = [0u8; 4];
     sock.read_exact(&mut len)?;
     let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
     sock.read_exact(&mut buf)?;
-    quoin_ext_proto::codec::unpack_dv(&buf)
+    quoin_ext_proto::decode_frame(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-fn fget<'a>(pairs: &'a [(String, WireData)], key: &str) -> Option<&'a WireData> {
-    pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+/// As `read_msg_frame`, surfacing the frame's `ReplyMeta` (zeroed when the
+/// frame kind carries none, or the peer didn't stamp it).
+fn read_msg_frame_meta(sock: &mut UnixStream) -> std::io::Result<(Msg, ReplyMeta)> {
+    let mut len = [0u8; 4];
+    sock.read_exact(&mut len)?;
+    let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+    sock.read_exact(&mut buf)?;
+    quoin_ext_proto::decode_frame_with_meta(&buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// One parent-side conversation pump (one per lane socket): serves control
+/// (ps) and hosted-object dispatch requests off the shared queues, one LIFO
+/// conversation at a time — write the Call, relay to its terminal, so each
+/// reply pairs with the request it answers by shape alone. A closed queue
+/// becomes a pending future so the other keeps being served (the registry
+/// pins `control_tx` open, so the pumps live with the worker).
+fn parent_conv_pump(
+    mut sock: UnixStream,
+    control_rx: async_channel::Receiver<ControlReq>,
+    dispatch_rx: async_channel::Receiver<DispatchReq>,
+) {
+    enum ConvReq {
+        Ctl(ControlReq),
+        Dispatch(Box<DispatchReq>),
+    }
+    async fn recv_or_pending<T>(rx: &async_channel::Receiver<T>) -> T {
+        match rx.recv().await {
+            Ok(v) => v,
+            Err(_) => std::future::pending().await,
+        }
+    }
+    loop {
+        let req = futures_lite::future::block_on(futures_lite::future::or(
+            async { ConvReq::Ctl(recv_or_pending(&control_rx).await) },
+            async { ConvReq::Dispatch(Box::new(recv_or_pending(&dispatch_rx).await)) },
+        ));
+        match req {
+            ConvReq::Ctl(req) => {
+                let op = match req.kind {
+                    ControlKind::PsTree => OP_PS_TREE,
+                };
+                if write_msg_frame(&mut sock, &call_frame(op, None)).is_err() {
+                    break;
+                }
+                match read_msg_frame(&mut sock) {
+                    Ok(Msg::CallReturnData { value }) => {
+                        let _ = req.reply.send_blocking(WorkerMsg::Data(value));
+                    }
+                    // An error terminal (or unexpected frame) drops the reply;
+                    // the requester's bounded-staleness deadline reads
+                    // 'unresponsive'.
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            ConvReq::Dispatch(req) => {
+                // The encode seam routes blocks to the handle path for
+                // process backing, so a shipped-block sidecar can never
+                // reach the socket — but the wire must never silently
+                // drop one either.
+                if !req.blocks.is_empty() {
+                    let _ = req.reply.send_blocking(Msg::CallReturnError {
+                        message: "blocks cannot cross a process boundary".to_string(),
+                        remote_stack: String::new(),
+                    });
+                    continue;
+                }
+                if write_msg_frame(&mut sock, &req.frame).is_err() {
+                    break;
+                }
+                // Relay the conversation to its outer terminal (strict
+                // LIFO alternation): worker→parent frames forward up the
+                // reply lane; between them a parent→worker frame (host-op
+                // reply or nested call) comes down `hostops` and goes to
+                // the socket. `depth` counts open conversation levels — a
+                // `Call` in either direction opens one, a `CallReturn*`
+                // closes one; the worker frame that closes level 0 ends
+                // the relay, and its `ReplyMeta` carries the child's
+                // handler time (§7). A closed `hostops` lane means the
+                // caller abandoned the conversation (cancellation): pending
+                // worker requests are answered with an error so the child
+                // unwinds, and the relay still runs to the terminal so
+                // the socket stays in sync for the next dispatch.
+                let mut depth: u32 = 1;
+                let mut broken = false;
+                loop {
+                    let (up, meta) = match read_msg_frame_meta(&mut sock) {
+                        Ok(f) => f,
+                        Err(_) => {
+                            broken = true;
+                            break;
+                        }
+                    };
+                    if matches!(up, Msg::Call { .. }) {
+                        depth += 1;
+                    } else {
+                        depth = depth.saturating_sub(1);
+                    }
+                    // Stamp the handler time BEFORE forwarding the terminal:
+                    // the caller wakes on the forward and reads the stamp.
+                    if depth == 0 {
+                        req.handler_micros
+                            .store(meta.handler_micros, Ordering::Relaxed);
+                    }
+                    // A dropped reply lane (cancelled caller) must not
+                    // stop the relay — the wire has to reach its terminal.
+                    let _ = req.reply.send_blocking(up);
+                    if depth == 0 {
+                        break;
+                    }
+                    let down = match req.hostops.recv_blocking() {
+                        Ok(f) => f,
+                        Err(_) => Msg::CallReturnError {
+                            message: "the caller abandoned the conversation".to_string(),
+                            remote_stack: String::new(),
+                        },
+                    };
+                    if matches!(down, Msg::Call { .. }) {
+                        depth += 1;
+                    } else {
+                        depth = depth.saturating_sub(1);
+                    }
+                    if write_msg_frame(&mut sock, &down).is_err() {
+                        broken = true;
+                        break;
+                    }
+                }
+                if broken {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Spawn a PROCESS-backed worker running `unit` (with `service` naming a
-/// hosted class for the WorkerService form). Returns the standard channel
-/// ends plus the child's pid; the pump threads own the socket.
+/// hosted class for the WorkerService form, and `lanes` conversation sockets
+/// — §5.1: lanes, never frame multiplexing; each socket speaks the protocol
+/// unchanged, one LIFO conversation at a time). Returns the standard channel
+/// ends plus the child's pid; the pump threads own the sockets.
 pub fn spawn_worker_process(
     unit: String,
     service: Option<String>,
+    lanes: u32,
 ) -> Result<(WorkerChannels, u32, ChildGrip), String> {
+    let lanes = lanes.max(1);
     let sock_path = format!(
         "/tmp/quoin-worker-{}-{}.sock",
         std::process::id(),
@@ -297,6 +551,7 @@ pub fn spawn_worker_process(
     cmd.arg("worker-serve").arg(&sock_path).arg(&unit);
     if let Some(class) = &service {
         cmd.arg(class);
+        cmd.arg(lanes.to_string());
     }
     let child = cmd
         .spawn()
@@ -305,68 +560,153 @@ pub fn spawn_worker_process(
     let grip: ChildGrip = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
 
     // Accept with a bounded wait: poll the listener in nonblocking mode so a
-    // child that dies pre-connect becomes an error, not a hang.
+    // child that dies pre-connect becomes an error, not a hang. The child
+    // connects `lanes + 1` times, in a fixed order: every conversation
+    // socket, then the mailbox.
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("worker socket: {e}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let sock = loop {
-        match listener.accept() {
-            Ok((s, _)) => break s,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                let mut slot = grip.lock().expect("child grip");
-                if let Some(c) = slot.as_mut()
-                    && let Ok(Some(status)) = c.try_wait()
-                {
-                    let _ = std::fs::remove_file(&sock_path);
-                    return Err(format!(
-                        "worker process exited before connecting ({status})"
-                    ));
+    let accept_one = |listener: &UnixListener| -> Result<UnixStream, String> {
+        loop {
+            match listener.accept() {
+                Ok((s, _)) => {
+                    s.set_nonblocking(false).ok();
+                    return Ok(s);
                 }
-                if std::time::Instant::now() > deadline {
-                    if let Some(c) = slot.as_mut() {
-                        let _ = c.kill();
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let mut slot = grip.lock().expect("child grip");
+                    if let Some(c) = slot.as_mut()
+                        && let Ok(Some(status)) = c.try_wait()
+                    {
+                        let _ = std::fs::remove_file(&sock_path);
+                        return Err(format!(
+                            "worker process exited before connecting ({status})"
+                        ));
                     }
-                    let _ = std::fs::remove_file(&sock_path);
-                    return Err("worker process did not connect within 10s".to_string());
+                    if std::time::Instant::now() > deadline {
+                        if let Some(c) = slot.as_mut() {
+                            let _ = c.kill();
+                        }
+                        let _ = std::fs::remove_file(&sock_path);
+                        return Err("worker process did not connect within 10s".to_string());
+                    }
+                    drop(slot);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                drop(slot);
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&sock_path);
-                return Err(format!("worker socket accept: {e}"));
+                Err(e) => {
+                    let _ = std::fs::remove_file(&sock_path);
+                    return Err(format!("worker socket accept: {e}"));
+                }
             }
         }
     };
-    sock.set_nonblocking(false).ok();
+    let mut conv_socks = Vec::with_capacity(lanes as usize);
+    for _ in 0..lanes {
+        conv_socks.push(accept_one(&listener)?);
+    }
+    let mail_sock = accept_one(&listener)?;
+    let chan_sock = accept_one(&listener)?;
     let _ = std::fs::remove_file(&sock_path);
+
+    // The manifest handshake — the version gate (mirrors the extension spawn:
+    // this side enforces; a mismatched child is killed, never misdecoded).
+    // Bounded, so a wedged child is an error rather than a hang. One gate per
+    // worker: it runs on the FIRST conversation socket only (all lanes are
+    // the same binary).
+    let fail = |grip: &ChildGrip, msg: String| -> String {
+        if let Some(c) = grip.lock().expect("child grip").as_mut() {
+            let _ = c.kill();
+        }
+        msg
+    };
+    let conv_sock = &mut conv_socks[0];
+    conv_sock
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .ok();
+    write_msg_frame(
+        conv_sock,
+        &Msg::GetManifest {
+            version: PROTOCOL_VERSION,
+        },
+    )
+    .map_err(|e| fail(&grip, format!("worker handshake: {e}")))?;
+    match read_msg_frame(conv_sock) {
+        Ok(Msg::ManifestReturn { version, .. }) if version == PROTOCOL_VERSION => {}
+        Ok(Msg::ManifestReturn { version, .. }) => {
+            return Err(fail(
+                &grip,
+                format!(
+                    "worker process speaks peer-protocol version {version}; this host \
+                     speaks {PROTOCOL_VERSION} (mixed qn binaries?)"
+                ),
+            ));
+        }
+        Ok(other) => {
+            return Err(fail(
+                &grip,
+                format!("worker handshake: expected ManifestReturn, got {other:?}"),
+            ));
+        }
+        Err(e) => return Err(fail(&grip, format!("worker handshake: {e}"))),
+    }
+    conv_sock.set_read_timeout(None).ok();
 
     let (inbox_tx, inbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (outbox_tx, outbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (done_tx, done_rx) = async_channel::bounded::<Result<WireData, String>>(1);
     let (control_tx, control_rx) = async_channel::unbounded::<ControlReq>();
-
-    // Single write path: every to-child frame funnels through one channel.
-    let (to_sock_tx, to_sock_rx) = std::sync::mpsc::channel::<WireData>();
-    let ctl_map: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<u64, async_channel::Sender<WorkerMsg>>>,
-    > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-
-    // fwd: parent sends -> data frames
+    let (dispatch_tx, dispatch_rx) = async_channel::unbounded::<DispatchReq>();
+    // Channel-relay lanes (§6): dumb frame pumps over their own socket — the
+    // relay protocol is event-shaped (correlation ids), so unlike the
+    // conversation pumps there is no state to track, just bytes both ways.
+    let (chan_to_worker_tx, chan_out_rx) = async_channel::unbounded::<ChanFrame>();
+    let (chan_in_tx, chan_to_parent_rx) = async_channel::unbounded::<ChanFrame>();
     {
-        let to_sock = to_sock_tx.clone();
+        let mut wsock = chan_sock
+            .try_clone()
+            .map_err(|e| format!("chan socket clone: {e}"))?;
+        std::thread::spawn(move || {
+            while let Ok(f) = chan_out_rx.recv_blocking() {
+                if write_msg_frame(&mut wsock, &chan_frame_to_msg(f)).is_err() {
+                    break;
+                }
+            }
+            let _ = wsock.shutdown(std::net::Shutdown::Write);
+        });
+    }
+    {
+        let mut rsock = chan_sock;
+        std::thread::spawn(move || {
+            while let Ok(msg) = read_msg_frame(&mut rsock) {
+                if let Some(f) = msg_to_chan_frame(msg)
+                    && chan_in_tx.send_blocking(f).is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Conversation pumps: one per lane socket, all consuming the SHARED
+    // control/dispatch queues (MPMC — whichever pump is free takes the next
+    // request; lanes are fungible tokens, exactly as thread backing's serve
+    // fibers). Each pump runs one LIFO conversation at a time on its socket.
+    for sock in conv_socks {
+        let control_rx = control_rx.clone();
+        let dispatch_rx = dispatch_rx.clone();
+        std::thread::spawn(move || parent_conv_pump(sock, control_rx, dispatch_rx));
+    }
+    // Mailbox writer: parent sends -> Call{op:"send"} frames.
+    {
+        let mut sock = mail_sock
+            .try_clone()
+            .map_err(|e| format!("socket clone: {e}"))?;
         std::thread::spawn(move || {
             while let Ok(msg) = inbox_rx.recv_blocking() {
                 match msg {
                     WorkerMsg::Data(dv) => {
-                        if to_sock
-                            .send(WireData::Map(vec![
-                                ("t".into(), WireData::Str("d".into())),
-                                ("v".into(), dv),
-                            ]))
-                            .is_err()
-                        {
+                        if write_msg_frame(&mut sock, &call_frame(OP_SEND, Some(dv))).is_err() {
                             break;
                         }
                     }
@@ -374,85 +714,45 @@ pub fn spawn_worker_process(
                     WorkerMsg::Block(_) => {
                         eprintln!("qn: dropped a block on a process-worker lane");
                     }
+                    // A shipped channel endpoint: the id rides the mailbox as
+                    // its own op; the relay traffic rides the chan socket.
+                    WorkerMsg::Channel(chan) => {
+                        let mut f = call_frame(OP_SEND_CHAN, None);
+                        if let Msg::Call { recv, .. } = &mut f {
+                            *recv = chan;
+                        }
+                        if write_msg_frame(&mut sock, &f).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
+            let _ = sock.shutdown(std::net::Shutdown::Write);
         });
     }
-    // fwd: control requests -> ctl frames (reply senders parked in the map)
+    // Mailbox reader: the child's sends, then the lane's terminal (= done).
+    // EOF without a terminal means the child vanished; reap it either way.
     {
-        let to_sock = to_sock_tx.clone();
-        let map = ctl_map.clone();
-        std::thread::spawn(move || {
-            let mut next_id: u64 = 1;
-            while let Ok(req) = control_rx.recv_blocking() {
-                let id = next_id;
-                next_id += 1;
-                map.lock().expect("ctl map").insert(id, req.reply);
-                let kind = match req.kind {
-                    ControlKind::PsTree => "ps",
-                };
-                if to_sock
-                    .send(WireData::Map(vec![
-                        ("t".into(), WireData::Str("c".into())),
-                        ("i".into(), WireData::Int(id as i64)),
-                        ("k".into(), WireData::Str(kind.into())),
-                    ]))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-    }
-    // writer: the only thread that touches the socket's write half
-    {
-        let mut wsock = sock.try_clone().map_err(|e| format!("socket clone: {e}"))?;
-        std::thread::spawn(move || {
-            while let Ok(frame) = to_sock_rx.recv() {
-                if frame_write(&mut wsock, &frame).is_err() {
-                    break;
-                }
-            }
-            let _ = wsock.shutdown(std::net::Shutdown::Write);
-        });
-    }
-    // reader: frames -> lanes; EOF closes everything and reaps the child
-    {
-        let mut rsock = sock;
-        let map = ctl_map;
+        let mut sock = mail_sock;
         let reader_grip = grip.clone();
         std::thread::spawn(move || {
             let mut done_sent = false;
-            while let Ok(frame) = frame_read(&mut rsock) {
-                let WireData::Map(pairs) = frame else {
-                    continue;
-                };
-                match fget(&pairs, "t") {
-                    Some(WireData::Str(t)) if t == "d" => {
-                        if let Some(v) = fget(&pairs, "v") {
-                            let _ = outbox_tx.send_blocking(WorkerMsg::Data(v.clone()));
-                        }
+            while let Ok(msg) = read_msg_frame(&mut sock) {
+                match msg {
+                    Msg::Call { op, data, .. } if op == OP_SEND => {
+                        let dv = data.unwrap_or(WireData::Null);
+                        let _ = outbox_tx.send_blocking(WorkerMsg::Data(dv));
                     }
-                    Some(WireData::Str(t)) if t == "k" => {
-                        let v = fget(&pairs, "v").cloned().unwrap_or(WireData::Null);
-                        let _ = done_tx.send_blocking(Ok(v));
+                    Msg::Call { op, recv, .. } if op == OP_SEND_CHAN => {
+                        let _ = outbox_tx.send_blocking(WorkerMsg::Channel(recv));
+                    }
+                    Msg::CallReturnData { value } => {
+                        let _ = done_tx.send_blocking(Ok(value));
                         done_sent = true;
                     }
-                    Some(WireData::Str(t)) if t == "e" => {
-                        let m = match fget(&pairs, "m") {
-                            Some(WireData::Str(m)) => m.clone(),
-                            _ => "worker process error".to_string(),
-                        };
-                        let _ = done_tx.send_blocking(Err(m));
+                    Msg::CallReturnError { message, .. } => {
+                        let _ = done_tx.send_blocking(Err(message));
                         done_sent = true;
-                    }
-                    Some(WireData::Str(t)) if t == "r" => {
-                        if let (Some(WireData::Int(id)), Some(v)) =
-                            (fget(&pairs, "i"), fget(&pairs, "v"))
-                            && let Some(reply) = map.lock().expect("ctl map").remove(&(*id as u64))
-                        {
-                            let _ = reply.send_blocking(WorkerMsg::Data(v.clone()));
-                        }
                     }
                     _ => {}
                 }
@@ -467,7 +767,6 @@ pub fn spawn_worker_process(
                     .unwrap_or_default();
                 let _ = done_tx.send_blocking(Err(format!("worker process exited{status}")));
             }
-            map.lock().expect("ctl map").clear();
             COMPLETED.fetch_add(1, Ordering::Relaxed);
             // Reap; leave None so a late `terminate` is a clean no-op.
             if let Some(mut c) = reader_grip.lock().expect("child grip").take() {
@@ -482,135 +781,318 @@ pub fn spawn_worker_process(
             outbox_rx,
             done_rx,
             control_tx,
+            dispatch_tx,
+            chan_tx: chan_to_worker_tx,
+            chan_rx: chan_to_parent_rx,
         },
         pid,
         grip,
     ))
 }
 
-/// The CHILD entry (`qn worker-serve <sock> <unit> [<serviceClass>]`):
-/// connect back, bridge socket<->lanes with the mirror pumps, run the
-/// standard worker body, ship the done frame.
-pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> i32 {
-    let sock = match UnixStream::connect(sock_path) {
-        Ok(s) => s,
+/// One child-side conversation loop (one per lane socket): serve
+/// conversations one at a time. A `psTree` (empty class) routes to the
+/// driver's control lane; anything else is a hosted-object dispatch for the
+/// serve loop's shared dispatch lane.
+fn child_conv_loop(
+    mut sock: UnixStream,
+    control_tx: async_channel::Sender<ControlReq>,
+    dispatch_tx: async_channel::Sender<DispatchReq>,
+) {
+    while let Ok(frame) = read_msg_frame(&mut sock) {
+        let Msg::Call {
+            ref op,
+            ref class_name,
+            ..
+        } = frame
+        else {
+            continue;
+        };
+        if op == OP_PS_TREE && class_name.is_empty() {
+            // One conversation at a time: a fresh reply lane per request,
+            // the terminal written before the next Call is read.
+            let (reply_tx, reply_rx) = async_channel::bounded::<WorkerMsg>(1);
+            if control_tx
+                .send_blocking(ControlReq {
+                    kind: ControlKind::PsTree,
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                return;
+            }
+            let Ok(WorkerMsg::Data(value)) = reply_rx.recv_blocking() else {
+                return;
+            };
+            if write_msg_frame(&mut sock, &Msg::CallReturnData { value }).is_err() {
+                return;
+            }
+            continue;
+        }
+        let (reply_tx, reply_rx) = async_channel::unbounded::<Msg>();
+        let (hostop_tx, hostop_rx) = async_channel::unbounded::<Msg>();
+        let handler = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        if dispatch_tx
+            .send_blocking(DispatchReq {
+                frame,
+                blocks: Vec::new(),
+                reply: reply_tx,
+                hostops: hostop_rx,
+                handler_micros: handler.clone(),
+            })
+            .is_err()
+        {
+            // No serve loop (a plain worker, or one that already
+            // stopped): answer recoverably, stay in sync.
+            let refuse = Msg::CallReturnError {
+                message: "this worker hosts no objects".to_string(),
+                remote_stack: String::new(),
+            };
+            if write_msg_frame(&mut sock, &refuse).is_err() {
+                return;
+            }
+            continue;
+        }
+        // Relay this conversation (mirror of the parent pump): serve-
+        // fiber frames — host-ops, then the terminal — go up the
+        // socket; parent frames (host-op replies, nested calls) come
+        // back down to the fiber. Call opens a level, CallReturn*
+        // closes one; the fiber frame that closes level 0 ends the
+        // relay and carries the serve fiber's handler time as
+        // `ReplyMeta` (§7). A dead serve loop mid-conversation closes
+        // every open level with an error so the parent stays in sync.
+        let mut depth: u32 = 1;
+        while depth > 0 {
+            let up = match reply_rx.recv_blocking() {
+                Ok(f) => f,
+                Err(_) => {
+                    let e = Msg::CallReturnError {
+                        message: "the hosted serve loop exited mid-call".to_string(),
+                        remote_stack: String::new(),
+                    };
+                    while depth > 0 {
+                        if write_msg_frame(&mut sock, &e).is_err() {
+                            return;
+                        }
+                        depth -= 1;
+                    }
+                    break;
+                }
+            };
+            if matches!(up, Msg::Call { .. }) {
+                depth += 1;
+            } else {
+                depth = depth.saturating_sub(1);
+            }
+            if depth == 0 {
+                if write_msg_frame_meta(
+                    &mut sock,
+                    &up,
+                    handler.load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .is_err()
+                {
+                    return;
+                }
+                break;
+            }
+            if write_msg_frame(&mut sock, &up).is_err() {
+                return;
+            }
+            let down = match read_msg_frame(&mut sock) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            if matches!(down, Msg::Call { .. }) {
+                depth += 1;
+            } else {
+                depth = depth.saturating_sub(1);
+            }
+            if hostop_tx.send_blocking(down).is_err() {
+                // The serve fiber vanished with parent frames owed;
+                // the next reply_rx recv reports it and closes the
+                // open levels.
+                continue;
+            }
+        }
+    }
+}
+
+/// The CHILD entry (`qn worker-serve <sock> <unit> [<serviceClass> [<lanes>]]`):
+/// connect back `lanes + 1` times (every conversation socket first, then the
+/// mailbox — the order the parent accepts in), answer the manifest handshake
+/// on the first conversation socket, bridge the mailbox to the lanes, run the
+/// standard worker body, and ship the done terminal.
+pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lanes: u32) -> i32 {
+    let lanes = lanes.max(1);
+    let connect = |what: &str| match UnixStream::connect(sock_path) {
+        Ok(s) => Some(s),
         Err(e) => {
-            eprintln!("qn worker-serve: cannot connect {sock_path}: {e}");
-            return 1;
+            eprintln!("qn worker-serve: cannot connect {what} socket at {sock_path}: {e}");
+            None
         }
     };
+    let mut conv_socks = Vec::with_capacity(lanes as usize);
+    for _ in 0..lanes {
+        let Some(s) = connect("conversation") else {
+            return 1;
+        };
+        conv_socks.push(s);
+    }
+    let Some(mail_sock) = connect("mailbox") else {
+        return 1;
+    };
+    let Some(chan_sock) = connect("channel relay") else {
+        return 1;
+    };
+
+    // Answer the manifest handshake SYNCHRONOUSLY, before anything that can
+    // fail (a missing unit, a compile error) exits the process — the parent's
+    // spawn blocks on this reply, and a fast-failing body must still get its
+    // done terminal read, which requires the spawn to succeed first. One gate
+    // per worker, on the first conversation socket. No classes are provided
+    // yet (hosted manifests are a later slice); the version in the reply is
+    // what the PARENT enforces.
+    let conv_sock = &mut conv_socks[0];
+    match read_msg_frame(conv_sock) {
+        Ok(Msg::GetManifest { .. }) => {
+            if let Err(e) = write_msg_frame(
+                conv_sock,
+                &Msg::ManifestReturn {
+                    classes: Vec::new(),
+                    version: PROTOCOL_VERSION,
+                },
+            ) {
+                eprintln!("qn worker-serve: handshake reply: {e}");
+                return 1;
+            }
+        }
+        other => {
+            eprintln!("qn worker-serve: handshake: expected GetManifest, got {other:?}");
+            return 1;
+        }
+    }
+
     let (inbox_tx, inbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (outbox_tx, outbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (control_tx, control_rx) = async_channel::unbounded::<ControlReq>();
-    let (to_sock_tx, to_sock_rx) = std::sync::mpsc::channel::<WireData>();
-    // Control replies ride ONE lane, correlated FIFO: the driver services
-    // its queue in order, so ids pop in the order the reader pushed them.
-    let (ctl_reply_tx, ctl_reply_rx) = async_channel::unbounded::<WorkerMsg>();
-    let ctl_ids: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u64>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let (dispatch_tx, dispatch_rx) = async_channel::unbounded::<DispatchReq>();
 
-    // reader: frames -> inbox / control
+    // One conversation thread per lane socket, feeding the SHARED dispatch
+    // lane the serve fibers consume (the thread-backing shape, over sockets).
+    for sock in conv_socks {
+        let control_tx = control_tx.clone();
+        let dispatch_tx = dispatch_tx.clone();
+        std::thread::spawn(move || child_conv_loop(sock, control_tx, dispatch_tx));
+    }
+    // Mailbox reader: the parent's sends -> inbox.
     {
-        let mut rsock = match sock.try_clone() {
+        let mut sock = match mail_sock.try_clone() {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("qn worker-serve: socket clone: {e}");
                 return 1;
             }
         };
-        let ids = ctl_ids.clone();
         std::thread::spawn(move || {
-            while let Ok(frame) = frame_read(&mut rsock) {
-                let WireData::Map(pairs) = frame else {
-                    continue;
-                };
-                match fget(&pairs, "t") {
-                    Some(WireData::Str(t)) if t == "d" => {
-                        if let Some(v) = fget(&pairs, "v") {
-                            let _ = inbox_tx.send_blocking(WorkerMsg::Data(v.clone()));
-                        }
+            while let Ok(msg) = read_msg_frame(&mut sock) {
+                if let Msg::Call { op, data, recv, .. } = msg {
+                    if op == OP_SEND {
+                        let dv = data.unwrap_or(WireData::Null);
+                        let _ = inbox_tx.send_blocking(WorkerMsg::Data(dv));
+                    } else if op == OP_SEND_CHAN {
+                        let _ = inbox_tx.send_blocking(WorkerMsg::Channel(recv));
                     }
-                    Some(WireData::Str(t)) if t == "c" => {
-                        if let Some(WireData::Int(id)) = fget(&pairs, "i") {
-                            ids.lock().expect("ctl ids").push_back(*id as u64);
-                            let _ = control_tx.send_blocking(ControlReq {
-                                kind: ControlKind::PsTree,
-                                reply: ctl_reply_tx.clone(),
-                            });
-                        }
-                    }
-                    _ => {}
                 }
             }
             // Parent gone: closing inbox_tx (drop) ends Worker.receive with nil.
         });
     }
-    // fwd: worker sends -> data frames
+    // Mailbox writer — a funnel, because the done terminal (from this thread)
+    // must follow every queued send; `None` is the close sentinel that lets it
+    // flush before the process exits.
+    let (to_mail_tx, to_mail_rx) = std::sync::mpsc::channel::<Option<Msg>>();
+    let writer = {
+        let mut sock = mail_sock;
+        std::thread::spawn(move || {
+            while let Ok(Some(msg)) = to_mail_rx.recv() {
+                if write_msg_frame(&mut sock, &msg).is_err() {
+                    break;
+                }
+            }
+            let _ = sock.shutdown(std::net::Shutdown::Write);
+        })
+    };
+    // fwd: worker sends -> Call{op:"send"} frames into the funnel.
     {
-        let to_sock = to_sock_tx.clone();
+        let to_mail = to_mail_tx.clone();
         std::thread::spawn(move || {
             while let Ok(msg) = outbox_rx.recv_blocking() {
-                if let WorkerMsg::Data(dv) = msg
-                    && to_sock
-                        .send(WireData::Map(vec![
-                            ("t".into(), WireData::Str("d".into())),
-                            ("v".into(), dv),
-                        ]))
-                        .is_err()
-                {
+                let frame = match msg {
+                    WorkerMsg::Data(dv) => call_frame(OP_SEND, Some(dv)),
+                    WorkerMsg::Channel(chan) => {
+                        let mut f = call_frame(OP_SEND_CHAN, None);
+                        if let Msg::Call { recv, .. } = &mut f {
+                            *recv = chan;
+                        }
+                        f
+                    }
+                    // Refused at the send seams; unreachable in practice.
+                    WorkerMsg::Block(_) => {
+                        eprintln!("qn: dropped a block on a process-worker lane");
+                        continue;
+                    }
+                };
+                if to_mail.send(Some(frame)).is_err() {
                     break;
                 }
             }
         });
     }
-    // fwd: control replies -> ctlr frames (FIFO id correlation)
+
+    // Channel-relay pumps, the parent side's mirror.
+    let (chan_tx, chan_out_rx) = async_channel::unbounded::<ChanFrame>();
+    let (chan_in_tx, chan_rx) = async_channel::unbounded::<ChanFrame>();
     {
-        let to_sock = to_sock_tx.clone();
-        let ids = ctl_ids;
-        std::thread::spawn(move || {
-            while let Ok(msg) = ctl_reply_rx.recv_blocking() {
-                let id = ids.lock().expect("ctl ids").pop_front().unwrap_or(0);
-                if let WorkerMsg::Data(dv) = msg
-                    && to_sock
-                        .send(WireData::Map(vec![
-                            ("t".into(), WireData::Str("r".into())),
-                            ("i".into(), WireData::Int(id as i64)),
-                            ("v".into(), dv),
-                        ]))
-                        .is_err()
-                {
-                    break;
-                }
+        let mut wsock = match chan_sock.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("qn worker-serve: chan socket clone: {e}");
+                return 1;
             }
-        });
-    }
-    // writer — `Null` is the close sentinel: the fwd threads hold sender
-    // clones (one is pinned on a reader that outlives us), so the channel
-    // never closes on its own; the sentinel lets the done frame flush and
-    // the writer finish before the process exits.
-    let writer = {
-        let mut wsock = sock;
+        };
         std::thread::spawn(move || {
-            while let Ok(frame) = to_sock_rx.recv() {
-                if matches!(frame, WireData::Null) {
-                    break;
-                }
-                if frame_write(&mut wsock, &frame).is_err() {
+            while let Ok(f) = chan_out_rx.recv_blocking() {
+                if write_msg_frame(&mut wsock, &chan_frame_to_msg(f)).is_err() {
                     break;
                 }
             }
             let _ = wsock.shutdown(std::net::Shutdown::Write);
-        })
-    };
-
+        });
+    }
+    {
+        let mut rsock = chan_sock;
+        std::thread::spawn(move || {
+            while let Ok(msg) = read_msg_frame(&mut rsock) {
+                if let Some(f) = msg_to_chan_frame(msg)
+                    && chan_in_tx.send_blocking(f).is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
     let link = WorkerLink {
         inbox_rx,
         outbox_tx,
         control_rx,
+        dispatch_rx,
+        chan_tx,
+        chan_rx,
         process: true,
     };
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match service {
-        Some(class) => run_worker_service(unit, class, link),
+        Some(class) => run_worker_service(unit, class, lanes, link),
         None => run_worker_unit(unit, link),
     }))
     .unwrap_or_else(|p| {
@@ -621,21 +1103,19 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>) -> 
             .unwrap_or_else(|| "unknown panic".to_string());
         Err(format!("worker panicked: {what}"))
     });
+    // The mailbox lane's terminal: the whole run was one implicit conversation.
     let done = match &out {
-        Ok(v) => WireData::Map(vec![
-            ("t".into(), WireData::Str("k".into())),
-            ("v".into(), v.clone()),
-        ]),
-        Err(m) => WireData::Map(vec![
-            ("t".into(), WireData::Str("e".into())),
-            ("m".into(), WireData::Str(m.clone())),
-        ]),
+        Ok(v) => Msg::CallReturnData { value: v.clone() },
+        Err(m) => Msg::CallReturnError {
+            message: m.clone(),
+            remote_stack: String::new(),
+        },
     };
-    let _ = to_sock_tx.send(done);
-    let _ = to_sock_tx.send(WireData::Null); // close sentinel (see writer)
-    drop(to_sock_tx);
+    let _ = to_mail_tx.send(Some(done));
+    let _ = to_mail_tx.send(None); // close sentinel (see writer)
+    drop(to_mail_tx);
     let _ = writer.join();
-    // Exit now: the reader/fwd threads are parked on a socket the PARENT
-    // still holds open; returning would leave this process lingering.
+    // Exit now: the reader/conversation threads are parked on sockets the
+    // PARENT still holds open; returning would leave this process lingering.
     i32::from(out.is_err())
 }

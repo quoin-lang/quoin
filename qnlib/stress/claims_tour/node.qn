@@ -1,0 +1,10 @@
+"* The hosted class for the claims tour (see main.qn): tiny methods shaped to
+"* build claim trees — hold an object while sleeping, hold it while running a
+"* caller block (which may call other objects), mint siblings.
+Node <- { |@n|
+    init -> { @n = 0 }
+    mate -> { Node.new }
+    double: -> { |n| n * 2 }
+    slow: -> { |ms| Async.sleep:ms; ms }
+    hold:then: -> { |ms blk| Async.sleep:ms; blk.value:0 }
+}

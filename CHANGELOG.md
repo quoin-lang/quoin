@@ -10,6 +10,25 @@ under **Changed**, with the migration.
 
 ### Added
 
+- **Boundary profiling** (`VM.boundaryStats` / `VM.boundaryReport`): every extension
+  call is counted per (peer, class, selector) — calls, errors, bytes both ways, and a
+  cost decomposition in microseconds: in-call wall time, time parked waiting for the
+  peer's connection (contention), and the peer's own servicing time (`handler_micros`,
+  a new append-only protocol field both SDKs now report; 0 from older SDKs). The
+  rendered report sorts by total cost and flags transport-dominated hot rows — the
+  chatty-vs-slow placement diagnosis (`docs/internal/ACTOR_OBJECTS.md` §7). Always on;
+  rows survive a dead extension.
+- Scheduler (experimental): **wake-log record/replay hooks**. `QN_WAKE_RECORD=<path>`
+  records the scheduler's decision stream (ready-picks, yield preemptions, I/O delivery
+  order); `QN_WAKE_REPLAY=<path>` re-runs the program forcing those decisions,
+  reproducing a recorded concurrent execution exactly — the groundwork for deterministic
+  replay debugging (`docs/internal/ACTOR_OBJECTS.md` §8). `QN_WAKE_LOG=1` keeps a ring
+  of recent wake events and dumps it when the scheduler reports a global deadlock;
+  `QN_WAKE_DEBUG=1` traces deliveries. Scope: replay re-performs real I/O and forces
+  its order, so it covers programs whose external inputs are deterministic (timers,
+  channels, file reads, schedule races); timing-dependent externals (extensions,
+  sockets, subprocesses) report a divergence naming the mismatched op — replaying
+  those needs result injection, a later arc.
 - Extensions (experimental): **cross-process stack traces**. A failed extension call now
   carries an opaque stack blob — a Python extension sends its real traceback, a Rust one
   its error chain under a dispatch-frame line, and failures that cross the boundary
@@ -20,6 +39,101 @@ under **Changed**, with the migration.
 
 ### Changed
 
+- **`WorkerService` is removed; hosting lives on `Worker`** (experimental,
+  breaking). The class-form constructor moved verbatim — write
+  `Worker.host:'unit.qn' class:'Pool'` (plus the `backing:`/`lanes:` variants)
+  where `WorkerService.host:class:` used to be — and hosting gained **block
+  forms**: `Worker.host:'unit.qn' with:{ Pool.new:cfg }` runs the portable block
+  *in* the worker after its unit loads and hosts the object it answers (real
+  constructor arguments, at last), and bare `Worker.with:{ … }` is the unit-less
+  version (qnlib classes only; block forms are thread-backed only). Proxies are
+  now **real installed classes** built from a manifest the worker sends at
+  ready: introspection (`can?:`, `class.name`) answers locally, an unknown
+  selector raises an honest MessageNotUnderstood instead of a round trip,
+  class-side selectors dispatch to the hosted class, `==` compares hosted-object
+  identity, and classes appearing for the first time in a return install
+  themselves lazily — even a returned Block works, with remote `value:`.
+- `WorkerService` (experimental): hosted services now speak the peer protocol and
+  gained **hosted object returns** — a hosted method that returns a non-portable
+  object no longer refuses: the object is kept in the worker and the caller gets a
+  live **sub-proxy** for it, usable like any receiver (including as an argument to
+  further calls on the same service, where it travels as a live reference; a dropped
+  proxy's object is released on the next call). Hosted errors now surface with the
+  worker's rendered stack as `ex.remoteStack`, and an unknown selector raises
+  MessageNotUnderstood naming it. `serviceStop` is now explicitly worker-wide.
+- `WorkerService` (experimental): **block arguments always cross now**. A portable
+  block ships to a thread-backed service as a capture snapshot and runs *inside*
+  the worker — one boundary crossing however many times the hosted method invokes
+  it, and the method may keep it for later calls (the batch-API answer to chatty
+  proxies; `docs/internal/ACTOR_OBJECTS.md` §3a). Every other block — one that
+  captures live state, or any block to a process-backed service — crosses as a
+  **handle** the worker invokes back in the parent (one round trip per invocation,
+  write-captures see live parent state; portable blocks freeze their captures at
+  send time on either path, so the backing never changes meaning).
+- **Cross-isolate channels** (experimental, `docs/internal/ACTOR_OBJECTS.md` §6):
+  a `Channel` now crosses to a worker — thread- OR process-backed — as a **live
+  endpoint**: pass it through `Worker.send:`, as a hosted-service method argument
+  (nested calls included), or get one back as a method's return, and the far
+  side's `send:` / `receive` / `close` / `each:` relay to the owning isolate with
+  channel semantics intact: values serialize at the boundary, one FIFO fairness
+  order for local and remote waiters alike, **backpressure crosses** (a full
+  buffer parks remote senders; a cap-0 rendezvous works at round-trip latency),
+  `close` propagates both directions, and a value committed to a receiver that
+  got cancelled is redelivered, never dropped. Several workers can hold endpoints
+  on one channel — the worker-pool pattern (fan a jobs channel out, fan results
+  in) works directly, across processes too. Sends of non-portable values on a
+  shipped channel raise immediately at the sender. Not yet: re-shipping an
+  endpoint onward, and `closed?`/`count`/`capacity` on an endpoint (the state
+  lives with the owner) — each refuses with a clear error. Note the honest
+  limitation: a wait cycle through channels *across isolates* is not detected
+  (unlike hosted-object call cycles, which raise catchably) — `VM.ps` park labels
+  show the shape.
+- `WorkerService` (experimental): **per-object mailboxes and lanes**
+  (`docs/internal/ACTOR_OBJECTS.md` §5.1). `host:class:lanes:` gives a service N
+  concurrent lanes: calls to *different* hosted objects overlap (worker-side, each
+  lane is a cooperative fiber — an object parked on IO doesn't block its
+  isolate-mates), while calls to one object still serialize in arrival order (its
+  mailbox, fairly queued). The acquisition discipline is deadlock-free by
+  construction for everything except calls that genuinely wait on each other —
+  and those now raise a **catchable deadlock error naming the cycle** at call
+  time instead of hanging, verified end to end. Lanes work on **both backings**
+  (`host:class:backing:lanes:`): a thread service runs one cooperative fiber per
+  lane, a process service opens one conversation socket per lane (never frame
+  multiplexing — each socket speaks the protocol unchanged), with identical
+  semantics. Process services also now report their real servicing time
+  (`ReplyMeta` crosses the socket pumps), so their `VM.boundaryStats` rows
+  decompose into handler/transport/queue like everything else's.
+- **`VM.claims` / `VM.claimsReport`**: live lock-shape observability for hosted
+  services — per object: holder, re-entry depth, queued waiters and their wait so
+  far; per service: lane occupancy and contention counters (acquisitions,
+  contended, wait totals, queue high-water, deadlocks detected); plus the
+  waits-for edges themselves, with the report calling out the longest live wait
+  chain — the pre-deadlock warning. Hosted-service calls also now feed
+  `VM.boundaryStats` rows beside extensions, with real `handler_micros` on both
+  backings.
+- Workers (experimental): **conversations, not round trips** — the peer protocol's
+  re-entrancy now works for worker services, both backings. While a call is in
+  flight the worker can invoke parent-held block handles (serviced on the caller's
+  fiber), and code running that way can call back into the same service — the
+  nested call rides the open conversation (strictly LIFO, depth-capped, mutual
+  recursion errors catchably). A timeout or cancellation mid-conversation abandons
+  it cleanly: the worker unwinds catchably and the service stays usable —
+  cancelled *extension* calls still kill their peer (framed-socket desync), but
+  worker services survive.
+- Workers (experimental): the process-worker wire now speaks the **extension
+  protocol's frames** instead of a bespoke envelope — one remote-peer protocol
+  (`docs/internal/ACTOR_OBJECTS.md`). Two sockets per process worker: a conversation
+  socket that opens with the `GetManifest` **version handshake** (a mixed-binary
+  worker is now refused with a clear error instead of misbehaving) and carries
+  control conversations, and a mailbox socket whose `send:`s are `Call` frames and
+  whose done report is a `CallReturn*` terminal. Behavior of
+  `spawn:`/`send:`/`receive`/`join`/`terminate`/`psTree` is unchanged; thread
+  workers are untouched.
+- Extensions (experimental): SDK manifests now list a class's selectors in **sorted
+  order** (both SDKs). The Rust SDK serialized them in hash order, so the manifest's
+  wire bytes differed from process to process for the same extension — semantically
+  harmless, but wire bytes must be deterministic. No interop impact: hosts treat the
+  lists as sets.
 - Extensions (experimental): concurrent calls to one extension connection now **queue
   fairly** instead of raising a "busy" error — a waiting caller parks and is handed the
   connection FIFO when the in-flight call finishes, so `Async.gather:` over one long-lived

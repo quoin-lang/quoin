@@ -199,10 +199,25 @@ pub enum Wake<'gc> {
     /// empty, closed channel (returns nil / ends `each:`); a sender raises "send on a
     /// closed channel".
     ChannelClosed,
+    /// A RELAY channel op failed on the owner side (a buffered value that predates
+    /// shipping turned out not to be portable) — the parked op raises catchably.
+    /// Never delivered to a local channel park.
+    ChannelErr {
+        #[collect(require_static)]
+        message: String,
+    },
     /// A task queued for an extension connection was HANDED the in-flight claim by the
     /// finishing call (`extension.rs` fair queuing): on resume it proceeds directly into
     /// its call — ownership already transferred, no re-race with running tasks.
     ExtClaim,
+    /// A task queued for a hosted object's claim was HANDED it by the finishing call
+    /// (`claims.rs`, ACTOR_OBJECTS.md §5.1): ownership already transferred. `lane` is
+    /// the jointly-granted lane for a top-level send, `None` for a nested grant (rides
+    /// its bound lane) or a `serviceStop` drain wake.
+    ServiceClaim {
+        #[collect(require_static)]
+        lane: Option<u32>,
+    },
 }
 
 /// Classification of a finished detached task's outcome, used by `complete_detached`

@@ -18,6 +18,53 @@ enum TaskWakeup {
 /// A boxed, single-threaded background future tagged with the task that is waiting on it.
 type IoTaskFuture = Pin<Box<dyn Future<Output = (TaskId, TaskWakeup)>>>;
 
+/// The wake-log event a delivery corresponds to (`replay.rs`). The result payload is
+/// fingerprinted so a replay whose I/O produced different content is reported as
+/// divergence rather than silently absorbed.
+fn wake_event_for(tid: TaskId, wakeup: &TaskWakeup) -> crate::replay::WakeEvent {
+    match wakeup {
+        TaskWakeup::Io(Ok(result)) => crate::replay::WakeEvent::Io {
+            tid: tid.0,
+            aborted: false,
+            hash: crate::replay::hash_debug(result),
+        },
+        TaskWakeup::Io(Err(Aborted)) => crate::replay::WakeEvent::Io {
+            tid: tid.0,
+            aborted: true,
+            hash: 0,
+        },
+        TaskWakeup::Deadline { target, epoch } => crate::replay::WakeEvent::Deadline {
+            tid: tid.0,
+            target: target.0,
+            epoch: *epoch,
+        },
+    }
+}
+
+/// Divergence detail for a delivery mismatch: what the log wants next vs the
+/// completions that actually arrived (held back as unmatched). A non-empty `held`
+/// means the op ran but produced a different result this run — the usual culprit
+/// for timing-dependent external inputs.
+fn replay_mismatch(
+    want: &crate::replay::WakeEvent,
+    held: &[(TaskId, TaskWakeup)],
+    at: &str,
+) -> String {
+    if held.is_empty() {
+        format!("the log expects delivery {want:?} ({at}), but no background work is in flight")
+    } else {
+        let got: Vec<String> = held
+            .iter()
+            .map(|(t, w)| format!("{:?}", wake_event_for(*t, w)))
+            .collect();
+        format!(
+            "the log expects delivery {want:?} ({at}), but the completions that arrived \
+             do not match: [{}] — the op ran but its result differed from the recording",
+            got.join(", ")
+        )
+    }
+}
+
 /// A tiny deterministic PRNG (SplitMix64) for `QN_SCHED_STRESS`. Seeded so a
 /// randomized scheduling failure can be replayed exactly. Not used outside stress.
 struct SplitMix64 {
@@ -549,6 +596,15 @@ fn drive_to_completion<F: DriverFrontend>(
     let backend = arena.mutate_root(|_mc, vm| vm.io.backend.clone());
     let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
     let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
+    // The wake log (`replay.rs`): record/replay hooks over the three decision streams —
+    // ready-pick, yield-preempt, and delivery order. Inert (one branch per site) unless
+    // a QN_WAKE_* env var is set; worker VMs stay unlogged until protocol convergence.
+    let mut replay =
+        crate::replay::ReplayCtx::from_env(arena.mutate_root(|_mc, vm| vm.worker_link.is_some()))
+            .map_err(QuoinError::Other)?;
+    // Completions that arrived before the replay log says they land; always empty
+    // outside replay mode.
+    let mut held: Vec<(TaskId, TaskWakeup)> = Vec::new();
     // Announce the seed once per process so a failing run is reproducible with the same
     // `QN_SCHED_STRESS=<seed>`.
     if let Some(seed) = crate::tuning::sched_stress() {
@@ -635,8 +691,29 @@ fn drive_to_completion<F: DriverFrontend>(
         > = std::collections::VecDeque::new();
         // Deliver a background completion: an I/O result wakes its task onto `ready`; a
         // deadline routes through `deliver_deadline` (which resolves the completion/deadline
-        // race). Shared by the idle reactor wait and the yield-boundary drain below.
-        let deliver = |arena: &mut ReplArena, tid: TaskId, wakeup: TaskWakeup| {
+        // race). Shared by the idle reactor wait and the yield-boundary drain below. The
+        // single choke point where deliveries enter the wake log.
+        let deliver = |arena: &mut ReplArena,
+                       tid: TaskId,
+                       wakeup: TaskWakeup,
+                       replay: &mut crate::replay::ReplayCtx| {
+            if replay.logging() {
+                replay.log(wake_event_for(tid, &wakeup));
+            }
+            if replay.debugging() {
+                let desc = match &wakeup {
+                    TaskWakeup::Io(Ok(r)) => {
+                        let mut d = format!("{r:?}");
+                        d.truncate(160);
+                        d
+                    }
+                    TaskWakeup::Io(Err(_)) => "aborted".to_string(),
+                    TaskWakeup::Deadline { target, epoch } => {
+                        format!("deadline target={} epoch={epoch}", target.0)
+                    }
+                };
+                eprintln!("[wake] deliver tid={} {desc}", tid.0);
+            }
             arena.mutate_root(|_mc, vm| match wakeup {
                 TaskWakeup::Io(result) => {
                     {
@@ -702,22 +779,49 @@ fn drive_to_completion<F: DriverFrontend>(
             // `ready` (random under stress); if none are ready but I/O is in flight, await a
             // completion, which feeds `ready`, and retry.
             if current.is_none() {
-                let picked = arena.mutate_root(|_mc, vm| {
-                    let n = vm.sched.ready.len();
+                let picked = if replay.replaying() {
+                    // Replay: the log dictates the pick. A non-empty `ready` at this
+                    // point must line up with a logged `Pick` naming a queued task.
+                    let n = arena.mutate_root(|_mc, vm| vm.sched.ready.len());
                     if n == 0 {
                         None
                     } else {
-                        let idx = rng.as_mut().map(|r| r.below(n)).unwrap_or(0);
-                        Some(vm.sched.ready.remove(idx).expect("idx within ready"))
+                        let want = replay.expect_pick().map_err(QuoinError::Other)?;
+                        let found = arena.mutate_root(|_mc, vm| {
+                            vm.sched.ready.iter().position(|t| t.0 == want).map(|idx| {
+                                vm.sched.ready.remove(idx).expect("position within ready")
+                            })
+                        });
+                        match found {
+                            Some(tid) => Some(tid),
+                            None => {
+                                return Err(QuoinError::Other(replay.divergence_msg(&format!(
+                                    "the log picks task {want}, which is not in the ready queue"
+                                ))));
+                            }
+                        }
                     }
-                });
+                } else {
+                    arena.mutate_root(|_mc, vm| {
+                        let n = vm.sched.ready.len();
+                        if n == 0 {
+                            None
+                        } else {
+                            let idx = rng.as_mut().map(|r| r.below(n)).unwrap_or(0);
+                            Some(vm.sched.ready.remove(idx).expect("idx within ready"))
+                        }
+                    })
+                };
                 match picked {
                     Some(tid) => {
+                        if replay.logging() {
+                            replay.log(crate::replay::WakeEvent::Pick { tid: tid.0 });
+                        }
                         current = Some(tid);
                         needs_load = true;
                     }
                     None => {
-                        if futures.is_empty() {
+                        if futures.is_empty() && held.is_empty() {
                             // Nothing ready and nothing in flight. A finished main
                             // task already broke out via `RunStep::Finished`, so if
                             // its slot is still occupied it is parked — on a channel,
@@ -729,6 +833,7 @@ fn drive_to_completion<F: DriverFrontend>(
                                 vm.sched.tasks.first().is_some_and(|t| t.is_some())
                             });
                             if main_parked {
+                                replay.dump_ring("global deadlock");
                                 let e = QuoinError::Other(
                                     "deadlock: every task is parked with no I/O in \
                                      flight (e.g. a receive with no sender, or a join \
@@ -765,6 +870,49 @@ fn drive_to_completion<F: DriverFrontend>(
                         });
                         for id in reaped_children {
                             backend.reap_child(id);
+                        }
+                        // Replay: the log dictates which completion lands next; anything
+                        // that completes out of logged order is held back for its turn.
+                        // Worker VMs never replay, so the control lane below is unaffected.
+                        if replay.replaying() {
+                            let mut delivered = false;
+                            while let Some(want) = replay.peek_delivery() {
+                                let got = loop {
+                                    if let Some(i) =
+                                        held.iter().position(|(t, w)| wake_event_for(*t, w) == want)
+                                    {
+                                        break held.remove(i);
+                                    }
+                                    match futures.next().await {
+                                        Some(step) => held.push(step),
+                                        None => {
+                                            let what = replay_mismatch(
+                                                &want,
+                                                &held,
+                                                "while the scheduler is idle",
+                                            );
+                                            return Err(QuoinError::Other(
+                                                replay.divergence_msg(&what),
+                                            ));
+                                        }
+                                    }
+                                };
+                                replay.consume();
+                                deliver(arena, got.0, got.1, &mut replay);
+                                delivered = true;
+                            }
+                            if delivered {
+                                continue;
+                            }
+                            if let Some(ev) = replay.peek() {
+                                return Err(QuoinError::Other(replay.divergence_msg(&format!(
+                                    "the scheduler is idle with nothing ready, but the \
+                                     log's next event is {ev:?}"
+                                ))));
+                            }
+                            // Log exhausted: the recorded run ended in this state; fall
+                            // through to the live idle machinery, which concludes the
+                            // same way (deadlock, or nothing in flight).
                         }
                         // The single reactor wait: park until some background future (I/O op
                         // or deadline timer) lands.
@@ -818,7 +966,7 @@ fn drive_to_completion<F: DriverFrontend>(
                             Woke::Tick => continue,
                         };
                         let (tid, wakeup) = step.expect("futures is non-empty");
-                        deliver(arena, tid, wakeup);
+                        deliver(arena, tid, wakeup, &mut replay);
                         continue;
                     }
                 }
@@ -845,23 +993,53 @@ fn drive_to_completion<F: DriverFrontend>(
                     // deterministic round-robin at yield boundaries. A task running alone
                     // (every benchmark) pays two emptiness checks and keeps going.
                     // Under stress, always preempt (and pick at random) so ordering varies.
-                    if !futures.is_empty() {
+                    if replay.replaying() {
+                        // Replay: deliver exactly the completions the log delivered at
+                        // this boundary (awaiting any that are slower this run); the
+                        // boundary's own `Rotate` event marks where the drain stopped.
+                        while let Some(want) = replay.peek_delivery() {
+                            let got = loop {
+                                if let Some(i) =
+                                    held.iter().position(|(t, w)| wake_event_for(*t, w) == want)
+                                {
+                                    break held.remove(i);
+                                }
+                                match futures.next().await {
+                                    Some(step) => held.push(step),
+                                    None => {
+                                        let what =
+                                            replay_mismatch(&want, &held, "at a yield boundary");
+                                        return Err(QuoinError::Other(
+                                            replay.divergence_msg(&what),
+                                        ));
+                                    }
+                                }
+                            };
+                            replay.consume();
+                            deliver(arena, got.0, got.1, &mut replay);
+                        }
+                    } else if !futures.is_empty() {
                         while let Some(Some((tid, wakeup))) =
                             futures_lite::future::poll_once(futures.next()).await
                         {
-                            deliver(arena, tid, wakeup);
+                            deliver(arena, tid, wakeup, &mut replay);
                         }
                     }
-                    let rotate = arena.mutate_root(|_mc, vm| {
-                        if rng.is_some() || !vm.sched.ready.is_empty() {
+                    // The preempt decision — logged at every boundary (whichever way it
+                    // goes) so replay knows exactly where the yields fell.
+                    let rotate = if replay.replaying() {
+                        replay.expect_rotate().map_err(QuoinError::Other)?
+                    } else {
+                        arena.mutate_root(|_mc, vm| rng.is_some() || !vm.sched.ready.is_empty())
+                    };
+                    if replay.logging() {
+                        replay.log(crate::replay::WakeEvent::Rotate { preempt: rotate });
+                    }
+                    if rotate {
+                        arena.mutate_root(|_mc, vm| {
                             vm.save_task_context(cur);
                             vm.sched.ready.push_back(cur);
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                    if rotate {
+                        });
                         current = None;
                     }
                 }
