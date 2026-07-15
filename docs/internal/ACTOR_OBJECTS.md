@@ -64,8 +64,10 @@ counter.value                    "* -> 1
 - `Worker.host:` evaluates the block **in the worker** (it is a portable block — the
   submit-time scan applies) and hosts the resulting object; the parent receives a proxy.
   (As built: a real installed class from the worker's manifest — see §10's decoupling
-  entry; the shipped surface is `host:class:` / `host:with:` / `with:`, each ±lanes,
-  class form ±backing.)
+  entry. The shipped surface is `host:with:` / `with:` / `start:`, each ±`args:`
+  ±`lanes:` ±`backing:` — the `class:` form was removed 2026-07-15, blocks being the
+  only constructor; see §6's as-built notes for the source-shipping that made block
+  forms work on process backing.)
 - Sends park; concurrency is blocks and channels (stance guarantee 3). The mailbox is
   the fair-queued claim machinery from PR #11, replacing the one-token channel — waiters
   park FIFO with epoch identity, nested re-entry composes, depth-capped. The claim is
@@ -485,6 +487,9 @@ refusal is gone). Channel endpoints over the mailbox lane cross as
 flag are deleted — channels now cross every worker link, verified by process
 twins of the pool and service-seam tests.
 
+**7c RESOLVED by `args:` instead (2026-07-15) — see below; the original deferral
+note kept for the record.**
+
 **7c (block-capture shipping) DEFERRED by decision (2026-07-14).** It turned out
 to be ergonomics, not capability: a service block that captures a channel already
 works fully — it fails the portability scan, takes the §3a handle path, and runs
@@ -499,6 +504,36 @@ threads through `snapshot_block`/`rebuild_portable_value`; and `Worker.start:`
 needs `spawn_worker_with` split so the `ChanLink` exists before the snapshot
 ships captures. Also still open: a `VM.channels` live view (the `VM.claims`
 mirror).
+
+**7c RESOLUTION AS BUILT (2026-07-15, Damon's design): spawn-time `args:` — blocks
+take parameters, not captures.** `with:`/`host:with:`/`start:` gained `args:`
+(±`lanes:`/±`backing:`): the block declares parameters, the list fills them at
+spawn, arity checked parent-side before anything ships. A CHANNEL element becomes
+a live relay endpoint in the worker — the honest form of what capture-shipping
+would have faked (a capture that looks like a snapshot but is live); a channel
+capture still refuses. Mechanically the args ride the MAILBOX (`WorkerMsg`
+already carries Data | Block | Channel on both backings): the parent registers
+the chan link, ships each element against it, and sends them as the first N
+inbox messages before the ready wait; `hostBlockRoot`/`jobRoot` consume exactly
+N before invoking (receive/materialize split for yield-safety). The process
+mailbox pump gained `OP_SEND_BLOCK` (source + captures) for block-valued args.
+The context-dependent-rebuild wrinkle above thus never needed solving.
+
+**The `class:` form is REMOVED (2026-07-15, Damon's call): blocks are the only
+constructor.** No variadic `new` exists in Quoin — constructors are keyword
+selectors — so "instantiate this class name with these args" fits nothing; the
+block IS the constructor call site, and the matrix prunes. Consequence built
+alongside: PORTABLE BLOCKS CROSS PROCESS BOUNDARIES as source text
+(`SourceInfo.source_text`, recorded at parse) + wire-encoded capture snapshot +
+global names, re-compiled in the child (capture names pre-declared as locals for
+the strict undefined-name check; nested block captures recurse). The spawn
+handshake carries the payload as a gated `Call{op:"hostBlock"}` after the
+version check. `Worker.hostRoot:`/`run_worker_service`/`spawn_worker_service`
+and the argv class slot are deleted; `worker-serve` speaks `@none`/`@block`/
+`@job` sentinels. Also fixed en route: worker-serve children EXIT when the
+parent dies (mailbox EOF ⇔ parent death, since the registry pins a mailbox
+sender for the parent's lifetime) — orphans previously lingered forever and
+pinned inherited stdio pipes.
 
 ## 7. Boundary profiling (diagnosing chattiness)
 
@@ -648,14 +683,13 @@ injection wrapper, which feeds recorded results instead of re-performing.
    wrinkle recorded in §6.
 8. `WorkerService` reimplemented as sugar over `Worker.host:` (or deprecated into it).
    DONE (2026-07-14, the other way round): `WorkerService` is REMOVED (Damon's call —
-   it complicated the documentation); hosting lives on `Worker` as the §2 surface:
-   `host:class:` (+backing/lanes), `host:with:` (+lanes — the init-block form: the
-   portable block ships, runs after the unit loads, and its answer is hosted), and
-   the unit-less `with:` (+lanes). Block forms are thread-only by construction (a
-   block cannot ship to a process, and the handle fallback would create the object
-   in the parent). The block-form worker body stashes the shipped `PortableBlock`
-   in a VM slot and synthesizes `Worker.hostBlockRoot` + the lane gather; the ready
-   message carries the class NAME too, since the parent cannot know it up front.
+   it complicated the documentation); hosting lives on `Worker`. FINALIZED
+   2026-07-15: the `class:` form is removed too — the surface is `host:with:` /
+   `with:` / `start:`, each ±`args:` ±`lanes:` ±`backing:` (blocks are the only
+   constructor; process backing works via source-shipping — §6's as-built notes).
+   The block-form worker body stashes the shipped `PortableBlock` in a VM slot and
+   synthesizes `Worker.hostBlockRoot` + the lane gather; the ready message carries
+   the class NAME, since the parent cannot know it up front.
 
 Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, since
 "restart the isolate and re-host" is where proxy lifetime and supervision meet.

@@ -1597,7 +1597,7 @@ fn fetch_manifest<'gc>(
 }
 
 /// Extract the elements of a Quoin list value passed as the `args:` argument.
-fn extract_args<'gc>(value: Value<'gc>) -> Result<Vec<Value<'gc>>, QuoinError> {
+pub(crate) fn extract_args<'gc>(value: Value<'gc>) -> Result<Vec<Value<'gc>>, QuoinError> {
     value
         .with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
         .map_err(|_| QuoinError::TypeError {

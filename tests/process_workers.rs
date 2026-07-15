@@ -126,7 +126,7 @@ Counter <- { |@total|
 fn process_backed_service_state_errors_and_stop() {
     let script = r#"
 var ok = true;
-var c = Worker.host:'@counter.qn@' class:'Counter' backing:'process';
+var c = Worker.host:'@counter.qn@' with:{ Counter.new } backing:'process';
 ((c.add:5) == 5).else:{ ok = false };
 ((c.add:7) == 12).else:{ ok = false };
 var thrown = { c.boom; 'no-error' }.catch:{ |e| e.s };
@@ -150,14 +150,14 @@ var j = { (Worker.spawn:'/nonexistent/nope.qn' backing:'process').join; 'ran' }
     .catch:{ |e| (e.s.contains?:'nope.qn').if:{ 'named' } else:{ e.s } };
 (j == 'named').else:{ ok = false };
 "* services handshake at host:, so THEY raise there
-var h = { Worker.host:'/nonexistent/nope.qn' class:'X' backing:'process'; 'hosted' }
+var h = { Worker.host:'/nonexistent/nope.qn' with:{ Counter.new } backing:'process'; 'hosted' }
     .catch:{ |e| (e.s.contains?:'nope.qn').if:{ 'named' } else:{ e.s } };
 (h == 'named').else:{ ok = false };
-"* start: with process backing points at the unit form
-var sb = { Worker.start:{ 1 } backing:'process'; 'started' }
-    .catch:{ |e| (e.s.contains?:'unit').if:{ 'refused' } else:{ e.s } };
-(sb == 'refused').else:{ ok = false };
-ok.if:{ 'PASS'.print } else:{ ('FAIL ' + j + '/' + h + '/' + sb).print };
+"* start: with process backing is REAL now: the block ships as source,
+"* runs in a child qn, and join carries its value home
+var sb = (Worker.start:{ 1 } backing:'process').join;
+(sb == 1).else:{ ok = false };
+ok.if:{ 'PASS'.print } else:{ ('FAIL ' + j + '/' + h + '/' + sb.s).print };
 "#;
     assert_proc_script_passes("boot", script, &[]);
 }

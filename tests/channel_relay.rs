@@ -112,7 +112,7 @@ Pump <- { |@out|
 "#;
     let script = r#"
 var ok = true;
-var p = Worker.host:'@pump.qn@' class:'Pump';
+var p = Worker.host:'@pump.qn@' with:{ Pump.new };
 
 "* argument: the worker fills a PARENT-owned channel and closes it
 var sink = Channel.buffered:2;
@@ -175,7 +175,7 @@ Pump <- { |@out|
 "#;
     let script = r#"
 var ok = true;
-var p = Worker.host:'@pump.qn@' class:'Pump' backing:'process';
+var p = Worker.host:'@pump.qn@' with:{ Pump.new } backing:'process';
 
 var sink = Channel.buffered:2;
 var t = Task.spawn:{ p.fill:sink upTo:4 };

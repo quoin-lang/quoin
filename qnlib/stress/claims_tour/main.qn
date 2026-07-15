@@ -17,14 +17,14 @@
 var unit = 'qnlib/stress/claims_tour/node.qn'
 
 "* crew: 4 lanes, objects a-d (plus x/y later for the deadlock)
-var crew = Worker.host:unit class:'Node' lanes:4
+var crew = Worker.host:unit with:{ Node.new } lanes:4
 var a = crew.mate
 var b = crew.mate
 var c = crew.mate
 var d = crew.mate
 
 "* depot: ONE lane, two objects — p will pin the lane, q will starve for it
-var depot = Worker.host:unit class:'Node'
+var depot = Worker.host:unit with:{ Node.new }
 var p = depot.mate
 var q = depot.mate
 

@@ -1,10 +1,11 @@
-//! `WorkerService` — hosted objects on the peer protocol (docs/internal/ACTOR_OBJECTS.md
-//! §2; the L4 of docs/internal/CONCURRENCY_ARCH.md §10, converged): host a class in a
-//! dedicated worker isolate and get a PROXY whose ordinary method sends become
-//! peer-protocol `Call` frames. Sticky state, serialized access — an actor.
+//! Hosted objects on the peer protocol (docs/internal/ACTOR_OBJECTS.md §2; the
+//! L4 of docs/internal/CONCURRENCY_ARCH.md §10, converged): a block evaluates
+//! in a dedicated worker isolate, the object it answers is hosted, and the
+//! caller gets a PROXY whose ordinary method sends become peer-protocol
+//! `Call` frames. Sticky state, serialized access — an actor.
 //!
 //! ```text
-//! var index = WorkerService.host:'search/index.qn' class:'SearchIndex';
+//! var index = Worker.host:'search/index.qn' with:{ SearchIndex.new };
 //! index.add:doc;
 //! var hits = index.query:'quoin';
 //! ```
@@ -81,7 +82,6 @@ use crate::vm::VmState;
 use crate::vm::scheduler::{TaskId, Wake};
 use crate::worker::{
     DispatchReq, OP_STOP, PortableBlock, note_message, rebuild_portable_value, snapshot_block,
-    spawn_worker_service,
 };
 
 /// Proxy-side state: the worker's dispatch lane plus this proxy's hosted-object
@@ -884,42 +884,15 @@ fn sub_proxy<'gc>(
     )
 }
 
-/// `Worker.host:'unit.qn' class:'Pool'` (+ backing/lanes variants): spawn a
-/// worker running the unit, instantiate the named class in it, host the
-/// instance, and answer the root proxy.
-pub(crate) fn host_class<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &gc_arena::Mutation<'gc>,
-    receiver: Value<'gc>,
-    path: String,
-    class_name: String,
-    backing: &'static str,
-    lanes: u32,
-) -> Result<Value<'gc>, QuoinError> {
-    let Value::Class(_) = receiver else {
-        return Err(QuoinError::Other("Worker.host: bad receiver".into()));
-    };
-    let (ch, pid) = match backing {
-        "process" => {
-            let (ch, pid, _grip) =
-                crate::worker::spawn_worker_process(path.clone(), Some(class_name.clone()), lanes)
-                    .map_err(QuoinError::Other)?;
-            (ch, Some(pid))
-        }
-        _ => (
-            spawn_worker_service(path.clone(), class_name.clone(), lanes),
-            None,
-        ),
-    };
-    finish_host(vm, mc, ch, pid, backing, lanes, &path, Some(class_name))
-}
-
 /// The block forms — `Worker.host:'unit.qn' with:{ Pool.new:cfg }` and the
 /// unit-less `Worker.with:{ Timer.new }`: the PORTABLE block ships to the
 /// worker, runs there after its unit loads, and the object it answers is
-/// hosted as the root. Thread-only: a block cannot ship to a process, and
-/// the handle fallback would run it in the PARENT — precisely the wrong
-/// place to create the object being hosted.
+/// hosted as the root. On process backing the block crosses as source +
+/// captures. The `args:` list parameterizes the block: each element crosses
+/// by the spawn-arg rules ([`spawn_arg`]) as a mailbox message the worker
+/// consumes before invoking the block — channels become live relay
+/// endpoints, portable values snapshot, anything else refuses loudly here.
+#[allow(clippy::too_many_arguments)] // the host forms thread their full spawn context
 pub(crate) fn host_block<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -927,6 +900,8 @@ pub(crate) fn host_block<'gc>(
     path: Option<String>,
     block: Value<'gc>,
     lanes: u32,
+    backing: &'static str,
+    args: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
     let Value::Class(_) = receiver else {
         return Err(QuoinError::Other("Worker.host: bad receiver".into()));
@@ -936,18 +911,95 @@ pub(crate) fn host_block<'gc>(
             "Worker.host:with: expects a Block (the object to host is its answer)".into(),
         ));
     };
+    // Arity first, before anything ships: the block's parameters are exactly
+    // the args: list (absent = a parameterless block).
+    let arg_values = match args {
+        Some(list) => crate::runtime::extension::extract_args(list)?,
+        None => Vec::new(),
+    };
+    if template.param_syms.len() != arg_values.len() {
+        return Err(QuoinError::Other(format!(
+            "Worker.host:with:args: the block takes {} parameter(s) but args: has {}",
+            template.param_syms.len(),
+            arg_values.len()
+        )));
+    }
     let pb = snapshot_block(template, parent_env, 0)
         .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
     let label_path = path.clone().unwrap_or_else(|| "{block}".to_string());
-    let ch = crate::worker::spawn_worker_hosted_block(path, pb, lanes);
-    finish_host(vm, mc, ch, None, "thread", lanes, &label_path, None)
+    let process = backing == "process";
+    let (ch, pid) = match backing {
+        // Process backing: the block crosses as SOURCE + captures (the same
+        // portability gate as thread backing — snapshot_block above — plus
+        // the source-text requirement) and the child compiles it against its
+        // own unit after the version gate.
+        "process" => {
+            let payload = crate::worker::portable_block_to_wire(&pb)
+                .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
+            let (ch, pid, _grip) = crate::worker::spawn_worker_process(
+                path,
+                crate::worker::ProcessBody::Block(payload),
+                lanes,
+            )
+            .map_err(QuoinError::Other)?;
+            (ch, Some(pid))
+        }
+        _ => (
+            crate::worker::spawn_worker_hosted_block(path, pb, lanes),
+            None,
+        ),
+    };
+    // The chan link registers BEFORE the args ship (a channel arg mints its
+    // relay bookkeeping against it), and the args ship BEFORE the ready wait
+    // (the worker consumes them before running the block — sending after
+    // would deadlock the handshake).
+    let chan_link = crate::runtime::channel_relay::register_chan_link(
+        vm,
+        ch.chan_tx.clone(),
+        ch.chan_rx.clone(),
+    );
+    for (i, v) in arg_values.into_iter().enumerate() {
+        let msg = spawn_arg(vm, mc, v, chan_link, process).map_err(|e| {
+            QuoinError::Other(format!("Worker.host:with:args: element {}: {e}", i + 1))
+        })?;
+        let _ = ch.inbox_tx.try_send(msg);
+    }
+    finish_host(vm, mc, ch, pid, backing, lanes, &label_path, chan_link)
+}
+
+/// Classify one spawn-time `args:` element into its crossing form: a channel
+/// ships as a relay endpoint id (against the just-registered link), a
+/// portable block snapshots (pre-validating the source-text requirement for
+/// process backing, so the mailbox pump's encode cannot fail later), and
+/// anything else must be portable data. Errors name the reason; the caller
+/// prefixes the element index.
+pub(crate) fn spawn_arg<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    v: Value<'gc>,
+    chan_link: usize,
+    process: bool,
+) -> Result<crate::worker::WorkerMsg, QuoinError> {
+    if crate::runtime::channel_relay::is_channel_value(v) {
+        let chan = crate::runtime::channel_relay::ship_for_crossing(vm, mc, v, chan_link)?;
+        return Ok(crate::worker::WorkerMsg::Channel(chan));
+    }
+    if let Some((template, parent_env)) = crate::runtime::worker::block_parts(v) {
+        let pb = snapshot_block(template, parent_env, 0)?;
+        if process {
+            crate::worker::portable_block_to_wire(&pb).map_err(QuoinError::Other)?;
+        }
+        return Ok(crate::worker::WorkerMsg::Block(pb));
+    }
+    let dv = crate::runtime::extension::value_to_wire(v, None)?;
+    Ok(crate::worker::WorkerMsg::Data(dv))
 }
 
 /// The shared back half of hosting: registry rows, the ready/manifest
 /// handshake, claim + boundary + relay registration, and the installed-class
-/// two-step that mints the root proxy. `class_name_hint` is the class form's
-/// argument; the block form learns the class from the ready message.
-#[allow(clippy::too_many_arguments)] // the two host forms thread their full spawn context
+/// two-step that mints the root proxy. The hosted class is whatever the
+/// ready message names — the block's answer.
+#[allow(clippy::too_many_arguments)] // hosting threads its full spawn context
 fn finish_host<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -956,7 +1008,7 @@ fn finish_host<'gc>(
     backing: &'static str,
     lanes: u32,
     path: &str,
-    class_name_hint: Option<String>,
+    chan_link: usize,
 ) -> Result<Value<'gc>, QuoinError> {
     // Disambiguate the display label when several services host the same
     // unit: the first keeps the bare label, later ones gain an ordinal —
@@ -1008,7 +1060,7 @@ fn finish_host<'gc>(
                 )));
             }
         };
-    let class_name = match class_name_hint.or(ready_class) {
+    let class_name = match ready_class {
         Some(n) => n,
         None => {
             return Err(QuoinError::Other(
@@ -1026,11 +1078,6 @@ fn finish_host<'gc>(
         rows: HashMap::new(),
     }));
     vm.io.ext_stats.borrow_mut().push(boundary.clone());
-    let chan_link = crate::runtime::channel_relay::register_chan_link(
-        vm,
-        ch.chan_tx.clone(),
-        ch.chan_rx.clone(),
-    );
     // Install the hosted class from its manifest (the two-step: the shell
     // exists first so the root proxy can be its instance, then the method
     // nodes — which carry the proxy — fill it in).
