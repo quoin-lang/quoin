@@ -108,11 +108,22 @@ pub fn ext_handshake_timeout_ms() -> u64 {
     })
 }
 
+static AOT_ON: OnceLock<bool> = OnceLock::new();
+
 /// AOT compilation of the sealed/typed subset at unit compile
 /// (docs/internal/AOT_ARCH.md). Default ON as of v0.3 (the soak); `QN_AOT=0` is the
 /// kill switch — the interpreter path is untouched either way (the registry
 /// is a pure overlay), so disabling is always safe.
 pub fn aot_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| !std::env::var("QN_AOT").is_ok_and(|v| v == "0"))
+    *AOT_ON.get_or_init(|| !std::env::var("QN_AOT").is_ok_and(|v| v == "0"))
+}
+
+/// Force AOT off for the whole process, ahead of the first `aot_enabled()` read.
+/// `qn check` boots its VM only to populate the checker's class table and never
+/// runs user code, so cranelift-compiling stdlib methods for it is pure waste
+/// (~25% of a session boot). Must run before any compile consults the gate; a
+/// later call (gate already read) is a no-op, which is fail-safe — AOT stays in
+/// whatever state the process started in.
+pub fn disable_aot_for_process() {
+    let _ = AOT_ON.set(false);
 }

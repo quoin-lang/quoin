@@ -1363,11 +1363,18 @@ impl VmRunner {
         let total = blocks.len();
         let mut checked_annotations = 0usize;
         let mut failures: Vec<String> = Vec::new();
-        for block in &blocks {
+        for (i, block) in blocks.iter().enumerate() {
+            // Progress on stderr (unbuffered) BEFORE the example runs: stdout is
+            // block-buffered when piped, so in a CI log example output arrives in
+            // late bursts and a hung example is anonymous — the last progress line
+            // names it.
+            eprintln!("[{}/{}] {}", i + 1, total, block.label);
             match self.run_example(block, &preload) {
                 Ok(n) => checked_annotations += n,
                 Err(msg) => failures.push(msg),
             }
+            // Bound the buffering: whatever the example printed reaches the log now.
+            let _ = std::io::Write::flush(&mut std::io::stdout().lock());
         }
 
         for f in &failures {

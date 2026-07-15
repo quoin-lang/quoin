@@ -2755,6 +2755,28 @@ impl<'gc> VmState<'gc> {
                 instance_vars,
                 source,
             } => {
+                // A NAMED package's unit may not define a bare-global class — the
+                // no-pollution rule extension packages get structurally
+                // (`EXT_PACKAGING.md` §4). The load stack's top is the package whose
+                // top level is executing right now (`load_unit` pushes the canonical
+                // package; bare/`std:` loads sit here as `None`, and `"self"` is the
+                // entry project's own units, which may claim bare globals). Checking
+                // at the definition site makes this the one enforcement point —
+                // including definitions the old load-time AST scan couldn't see,
+                // like one inside a block the top level runs. Reopens (`<--`) never
+                // reach this instruction, so extending existing classes stays allowed.
+                if name.path.is_empty()
+                    && let Some(Some(pkg)) = self.modules.load_stack.last()
+                    && pkg != "self"
+                {
+                    return Err(QuoinError::ClassError(format!(
+                        "use: package `{pkg}` defines the bare-global class `{cls}` — a \
+                         package's classes must live under a namespace (e.g. \
+                         `[{ns}]{cls}`); packages cannot claim bare globals",
+                        cls = name.name,
+                        ns = crate::runtime::extension::pascal_case(pkg),
+                    )));
+                }
                 // Definition wins over any earlier record (a REPL redefinition moves the
                 // class); a native class's `.class_doc(..)` set at registration survives.
                 if source.is_some() {

@@ -1057,6 +1057,10 @@ impl VmRunner {
     /// without running it. A directory argument is searched recursively for `.qn` files (like
     /// `fmt`). Exits non-zero if any file emitted a diagnostic, so it works as a CI gate.
     fn run_check(&self) {
+        // Check never RUNS user code — its VM boots only to populate the
+        // checker's class table — so cranelift-compiling stdlib methods for it
+        // is pure waste (~25% of the boot, and boot is ~all of check's latency).
+        crate::tuning::disable_aot_for_process();
         let args = &self.options.vm_options.arguments;
         if args.is_empty() {
             eprintln!("Usage: qn check <file-or-dir>…");

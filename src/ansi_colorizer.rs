@@ -151,11 +151,10 @@ fn parse_tag(content: &str) -> Option<Tag> {
             if !style.flags.contains(&f) {
                 style.flags.push(f);
             }
-        } else if let Some(fg) = color_fragment(tok, false) {
-            style.fg = Some(fg);
         } else {
-            // Any token that isn't an attribute disqualifies the whole run.
-            return None;
+            // Any token that isn't an attribute disqualifies the whole run
+            // (the `?`: a non-color here answers None for the lot).
+            style.fg = Some(color_fragment(tok, false)?);
         }
     }
     Some(Tag::Open(style))

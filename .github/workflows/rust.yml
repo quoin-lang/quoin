@@ -20,6 +20,10 @@ jobs:
   test:
 
     runs-on: ubuntu-latest
+    # Backstop for a wedged step: the default job timeout is 6 HOURS, and a hung
+    # doc example once sat 40+ minutes before anyone force-cancelled (2026-07-15).
+    # Normal warm-cache duration is ~13m; a cold build roughly doubles it.
+    timeout-minutes: 45
 
     steps:
     - uses: actions/checkout@v4
@@ -38,7 +42,10 @@ jobs:
       run: cargo run --verbose -- test qnlib/tests
     # Every fenced example in the reference docs and the language book must run and match
     # its `"* -> value` annotations (docs/internal/DOCS_ARCH.md phase 3 / RELEASE_PREP Tier 2).
+    # ~8 minutes when healthy (each example boots a fresh session); a single
+    # deadlocked example wedges the whole step, so it gets its own tight bound.
     - name: Check documentation examples
+      timeout-minutes: 20
       run: |
         cargo run -- doc --check --stdlib
         cargo run -- doc --check docs/language README.md

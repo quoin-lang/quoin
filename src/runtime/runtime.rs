@@ -6,6 +6,7 @@ use crate::packages::{LoadStatus, LoadedUnit, canonical_package};
 use crate::parser::ast::NodeValue;
 use crate::parser::try_parse_quoin_string_named;
 use crate::runtime::map::NativeMapState;
+use crate::runtime::unit_cache::{self, CachedUnit};
 use crate::symbol::Symbol;
 use crate::value::{Block, EnvFrame, NativeClassBuilder, Value};
 use crate::vm::VmState;
@@ -272,6 +273,14 @@ fn map_to_bindings<'gc>(map_val: Value<'gc>) -> Result<Vec<Binding<'gc>>, QuoinE
         .map_err(|_| QuoinError::Other("eval bindings: expected a Map".to_string()))?
 }
 
+/// How `compile_and_execute_source` is being driven: an eval (per-evaluation
+/// compile, nothing cacheable) or a `use`-loaded unit (run-once — template ids,
+/// AOT candidates, and a unit-cache fill under its chain key).
+enum SourceMode {
+    Eval,
+    Unit { cache_key: u64 },
+}
+
 /// Compile `source` (named `display` for source-info / errors) into a top-level block and run
 /// it to completion, returning its final value. The shared core behind `eval:` and `use`.
 /// `bindings` are seeded as locals in the eval'd frame (via a parent env), and the binding
@@ -283,8 +292,9 @@ fn compile_and_execute_source<'gc>(
     display: &str,
     self_val: Option<Value<'gc>>,
     bindings: &[Binding<'gc>],
-    unit_mode: bool,
+    mode: SourceMode,
 ) -> Result<Value<'gc>, QuoinError> {
+    let unit_mode = matches!(mode, SourceMode::Unit { .. });
     // Use the fallible parser so a syntax error in eval'd / `use`d source surfaces as a
     // catchable `ParseError` rather than panicking the whole VM (the panicking
     // `parse_quoin_string_named` is for the main-program entry, which fails the process).
@@ -331,10 +341,28 @@ fn compile_and_execute_source<'gc>(
         .compile_program_with(program_node, self_val.is_none())
         .map_err(|e| QuoinError::ParseError(format!("Compilation error: {}", e)))?;
     vm.report_type_warnings(compiler.diagnostics());
+    // Fill the unit cache before AOT registration consumes the compiler (the
+    // artifacts are valid even if execution below errors — a later session
+    // replaying them reaches the same error).
+    let unit_cache_key = match mode {
+        SourceMode::Unit { cache_key } => Some(cache_key),
+        SourceMode::Eval => None,
+    };
+    let cached_diagnostics = unit_cache_key.map(|_| compiler.diagnostics().to_vec());
     if unit_mode && crate::tuning::aot_enabled() {
         // Annotated methods compile eagerly; block templates and speculative
         // methods go pending (B3a / SPECULATIVE_AOT_ARCH S0).
         vm.register_aot_candidates(compiler.take_aot_candidates());
+    }
+    let static_block = Arc::new(static_block);
+    if let (Some(key), Some(diagnostics)) = (unit_cache_key, cached_diagnostics) {
+        unit_cache::insert(
+            key,
+            CachedUnit {
+                program: static_block.clone(),
+                diagnostics,
+            },
+        );
     }
     // Seed the bindings into a parent env the eval'd frame walks into.
     let parent_env = (!bindings.is_empty()).then(|| {
@@ -348,6 +376,18 @@ fn compile_and_execute_source<'gc>(
     vm.execute_block(mc, block, Vec::new(), self_val)
 }
 
+/// Execute a unit-cache hit: parse and compile are skipped wholesale — see
+/// `runtime::unit_cache` for why that is sound.
+fn execute_cached_unit<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    unit: &CachedUnit,
+) -> Result<Value<'gc>, QuoinError> {
+    vm.report_type_warnings(&unit.diagnostics);
+    let block = build_block_with_env(mc, &unit.program, None);
+    vm.execute_block(mc, block, Vec::new(), None)
+}
+
 pub(crate) fn eval_string<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
@@ -356,7 +396,7 @@ pub(crate) fn eval_string<'gc>(
     self_val: Option<Value<'gc>>,
     bindings: &[Binding<'gc>],
 ) -> Result<Value<'gc>, QuoinError> {
-    compile_and_execute_source(vm, mc, code, filename, self_val, bindings, false)
+    compile_and_execute_source(vm, mc, code, filename, self_val, bindings, SourceMode::Eval)
 }
 
 /// `use self:` names the package the EXECUTING unit belongs to: inside a package's unit it
@@ -373,37 +413,9 @@ fn effective_package(vm: &VmState, package: Option<&str>) -> Option<String> {
     package.map(str::to_string)
 }
 
-/// A **named** package's unit may not define a bare-global class — the no-pollution rule
-/// extension packages get structurally (`EXT_PACKAGING.md` §4), enforced for source units
-/// at load time, before anything runs. Reopening an existing class (`String <-- { … }`)
-/// stays allowed. Checks the unit's top level; a parse failure is left to the real
-/// compile path, which reports it with full spans.
-fn forbid_bare_class_definitions(
-    source: &str,
-    display: &str,
-    package: &str,
-) -> Result<(), QuoinError> {
-    let Ok(node) = crate::parser::try_parse_quoin_string_named(source, display) else {
-        return Ok(());
-    };
-    let NodeValue::Program(program) = &node.value else {
-        return Ok(());
-    };
-    for expr in &program.expressions {
-        if let NodeValue::ClassDefinition(cd) = &expr.value
-            && cd.identifier.namespace.is_none()
-        {
-            return Err(QuoinError::Other(format!(
-                "use: {display} defines the bare-global class `{name}` — a package's \
-                 classes must live under a namespace (e.g. `[{ns}]{name}`); packages \
-                 cannot claim bare globals",
-                name = cd.identifier.name,
-                ns = crate::runtime::extension::pascal_case(package),
-            )));
-        }
-    }
-    Ok(())
-}
+// (The bare-global-class rule for named packages is enforced at the definition
+// site — `Instruction::DefineClass` consults the load stack — not by a load-time
+// AST scan; the old `forbid_bare_class_definitions` pre-parse is gone.)
 
 /// Load a unit once. Resolves `(package, path)` to source via the VM's resolver, runs
 /// it in a nested top-level frame (frame-balanced), and records it in the run-once
@@ -438,11 +450,11 @@ pub fn load_unit<'gc>(
     };
     let q = package.map(|p| format!("{p}:")).unwrap_or_default();
     let display = format!("{q}{path}.qn");
-    if let Some(named) = package
-        && named != "self"
-    {
-        forbid_bare_class_definitions(&source, &display, named)?;
-    }
+    // Advance the unit-cache chain over this unit's identity + source; the
+    // resulting key covers everything loaded before it (the compile context).
+    let chain = unit_cache::advance(vm.modules.unit_chain, package, path, &source);
+    vm.modules.unit_chain = chain;
+    let cached = unit_cache::get(chain);
     vm.modules.loaded.push(LoadedUnit {
         package: package.map(|s| s.to_string()),
         path: path.to_string(),
@@ -450,7 +462,18 @@ pub fn load_unit<'gc>(
     });
     // The unit's package is the `self:` context for every `use` its top level executes.
     vm.modules.load_stack.push(package.map(|s| s.to_string()));
-    let executed = compile_and_execute_source(vm, mc, &source, &display, None, &[], true);
+    let executed = match &cached {
+        Some(unit) => execute_cached_unit(vm, mc, unit),
+        None => compile_and_execute_source(
+            vm,
+            mc,
+            &source,
+            &display,
+            None,
+            &[],
+            SourceMode::Unit { cache_key: chain },
+        ),
+    };
     vm.modules.load_stack.pop();
     executed?;
     if let Some(u) = vm
