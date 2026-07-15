@@ -34,18 +34,21 @@ fn assert_passes(name: &str, script: &str, units: &[(&str, &str)], kill_via_pidf
         }
         let pidfile = dir.join("pid.txt");
         script = script.replace("@pidfile@", pidfile.to_str().unwrap());
+        let phasefile = dir.join("phase.txt");
+        script = script.replace("@phasefile@", phasefile.to_str().unwrap());
         let main_path = dir.join("main.qn");
         std::fs::write(&main_path, &script).unwrap();
 
-        let child = Command::new(env!("CARGO_BIN_EXE_qn"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_qn"))
             .arg(&main_path)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("run qn");
-        if kill_via_pidfile {
-            // Wait for the script to publish its worker's pid, give the parked
-            // call a beat to open, then deliver the hard death.
+        let worker_pid = if kill_via_pidfile {
+            // Wait for the script to publish its worker's pid (rename-published,
+            // so a partial write is never visible), give the parked call a beat
+            // to open, then deliver the hard death.
             let mut pid = String::new();
             for _ in 0..100 {
                 if let Ok(s) = std::fs::read_to_string(&pidfile)
@@ -59,15 +62,51 @@ fn assert_passes(name: &str, script: &str, units: &[(&str, &str)], kill_via_pidf
             assert!(!pid.is_empty(), "the script never published a pid");
             std::thread::sleep(std::time::Duration::from_millis(300));
             let _ = Command::new("kill").args(["-9", &pid]).status();
+            Some(pid)
+        } else {
+            None
+        };
+        // Bounded wait: a wedged qn must FAIL with its evidence, never hang the
+        // suite for the job timeout to reap (the doc-check wedge lesson). 90s
+        // dwarfs the slowest healthy run (~2s).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        let mut timed_out = false;
+        loop {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                timed_out = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Probe the worker child BEFORE killing qn (qn's death takes the
+        // worker with it): discriminates "the kill never landed" from "the
+        // death was never detected".
+        let worker_alive = timed_out
+            && worker_pid.as_deref().is_some_and(|pid| {
+                Command::new("kill")
+                    .args(["-0", pid])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            });
+        if timed_out {
+            let _ = child.kill();
         }
         let out = child.wait_with_output().expect("qn output");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        if stdout.contains("PASS") {
+        if stdout.contains("PASS") && !timed_out {
             let _ = std::fs::remove_dir_all(&dir);
             return;
         }
+        // The phase file survives the kill (written through file I/O, not the
+        // block-buffered stdout): the last line names where the script wedged.
+        let phase = std::fs::read_to_string(dir.join("phase.txt")).unwrap_or_default();
         last_diag = format!(
-            "status: {:?}\nstdout:\n{stdout}\nstderr:\n{}",
+            "timed out after 90s: {timed_out} (worker child still alive at timeout: \
+             {worker_alive})\nphase file:\n{phase}\nstatus: {:?}\nstdout:\n{stdout}\nstderr:\n{}",
             out.status,
             String::from_utf8_lossy(&out.stderr)
         );
@@ -102,13 +141,19 @@ fn service_hard_death_types_every_seam_and_marks_claims() {
     // carry the explicit post-mortem marker instead of implying death.
     let script = r#"
 var svc = Worker.host:'@kaboom.qn@' with:{ Kaboom.new } backing:'process';
+[IO]File.append:'hosted\n' to:'@phasefile@';
 var pid = ((VM.ps.at:'workers').at:0).at:'pid';
-[IO]File.write:pid.s to:'@pidfile@';
+[IO]File.write:pid.s to:'@pidfile@.tmp';
+[IO]File.rename:'@pidfile@.tmp' to:'@pidfile@';
+[IO]File.append:'pid-published\n' to:'@phasefile@';
 var t1 = { svc.sleepLong; 'no-error' }.catch:{ |e:PeerDiedError|
     (e.reason == #exited).if:{ 'died' } else:{ 'wrong-reason' } };
+[IO]File.append:('t1=' + t1 + '\n') to:'@phasefile@';
 var t2 = { svc.ping; 'no-error' }.catch:{ |e:PeerDiedError| 'dead-refused' };
+[IO]File.append:('t2=' + t2 + '\n') to:'@phasefile@';
 var gone = nil;
 VM.claims.each:{ |p| ((p.at:'gone') == 'died').if:{ gone = 'marked' } };
+[IO]File.append:'claims-checked\n' to:'@phasefile@';
 ((t1 == 'died') && (t2 == 'dead-refused') && (gone == 'marked'))
     .if:{ 'PASS'.print }
     else:{ ('FAIL ' + t1 + ' ' + t2 + ' ' + (gone == 'marked').s).print };
@@ -135,7 +180,8 @@ var w = Worker.start:{ |ch| ch.receive; 'never' } args:#( jobs ) backing:'proces
 "* let the child reach its endpoint receive (the remote waiter registers here)
 Async.sleep:300;
 var pid = ((VM.ps.at:'workers').at:0).at:'pid';
-[IO]File.write:pid.s to:'@pidfile@';
+[IO]File.write:pid.s to:'@pidfile@.tmp';
+[IO]File.rename:'@pidfile@.tmp' to:'@pidfile@';
 var j = { w.join; 'no-error' }.catch:{ |e:PeerDiedError| 'join-died' };
 "* the join has fired; give the relay agent a beat to process the link closure
 Async.sleep:200;
@@ -195,7 +241,8 @@ var ev = e.events;
 ((ev.receive.at:'kind') == 'spawned').else:{{ 'FAIL spawned'.print }};
 var pid = nil;
 VM.peers.each:{{ |p| ((p.at:'kind') == 'extension').if:{{ pid = p.at:'pid' }} }};
-[IO]File.write:pid.s to:'@pidfile@';
+[IO]File.write:pid.s to:'@pidfile@.tmp';
+[IO]File.rename:'@pidfile@.tmp' to:'@pidfile@';
 var d = ev.receive;
 var deadCall = {{ e.call:'ping' with:'' }}.catch:{{ |ex:PeerDiedError| 'typed' }};
 var marked = nil;
