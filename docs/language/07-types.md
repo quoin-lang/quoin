@@ -240,7 +240,9 @@ A trailing `allow:` comment silences exactly that warning kind, exactly there:
 
 The kind name is the warning's family — `nil-receiver`, `caret-discard`, `mnu`,
 `no-variant`, `element-type`, `type-mismatch`, `return-type`, `unknown-type`,
-`annotation` — and several can be listed, separated by commas. A parenthesized
+`annotation`, `portability` (a block shipped to a worker whose shape can never
+cross — see chapter 5's portable-block rules) — and several can be listed,
+separated by commas. A parenthesized
 rationale is encouraged and ignored by the parser. Three rules keep suppressions
 honest: the pragma must **trail** the warned line (on a line of its own it would
 be captured as a doc comment, so that placement warns instead of silently doing

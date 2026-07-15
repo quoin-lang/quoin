@@ -90,10 +90,15 @@ fn clean_file_emits_empty_diagnostics_and_exit_zero() {
 
 #[test]
 fn blocks_carry_the_portability_classification() {
-    let src = "var n = 3\nvar a = { n * 2 }\nvar m = #{}\nvar u = { m.at:'k' }\nvar w = { n = 4 }\n";
+    let src =
+        "var n = 3\nvar a = { n * 2 }\nvar m = #{}\nvar u = { m.at:'k' }\nvar w = { n = 4 }\n";
     let f = fixture("blocks", src);
     let (out, json) = check_json(&[&f]);
-    assert_eq!(out.status.code(), Some(0), "classification is not a finding");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "classification is not a finding"
+    );
     let blocks = json["blocks"].as_array().expect("a blocks array");
     assert_eq!(blocks.len(), 3, "{json:#?}");
     assert_eq!(blocks[0]["state"], "portable");
