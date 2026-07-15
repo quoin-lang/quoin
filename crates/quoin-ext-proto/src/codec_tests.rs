@@ -91,6 +91,7 @@ fn every_message_round_trips() {
                 class_selectors: vec!["zeros:".into()],
             }],
             version: 2,
+            lanes: 3,
         },
         Msg::MakeString { value: "s".into() },
         Msg::HandleToString { handle: 3 },
@@ -189,6 +190,47 @@ fn extra_trailing_fields_are_skipped() {
     ];
     match decode_frame(&frame).unwrap() {
         Msg::CallReturn { result } => assert_eq!(result, "x"),
+        other => panic!("unexpected msg: {other:?}"),
+    }
+}
+
+#[test]
+fn manifest_return_without_lanes_decodes_as_zero() {
+    // A pre-lanes peer sends the old 3-element shape `[8, version, classes]`;
+    // the appended `lanes` field reads as 0 (= unset, consumers normalize to 1).
+    let frame = vec![
+        0x93, // array of 3
+        0x08, // T_MANIFEST_RETURN
+        0x02, // version: 2
+        0x90, // classes: []
+    ];
+    match decode_frame(&frame).unwrap() {
+        Msg::ManifestReturn {
+            classes,
+            version,
+            lanes,
+        } => {
+            assert!(classes.is_empty());
+            assert_eq!(version, 2);
+            assert_eq!(lanes, 0);
+        }
+        other => panic!("unexpected msg: {other:?}"),
+    }
+}
+
+#[test]
+fn manifest_return_extras_after_lanes_are_skipped() {
+    // A yet-newer peer appends fields after `lanes`: `[8, 2, [], 4, nil]`.
+    let frame = vec![
+        0x95, // array of 5
+        0x08, // T_MANIFEST_RETURN
+        0x02, // version: 2
+        0x90, // classes: []
+        0x04, // lanes: 4
+        0xc0, // extra: nil
+    ];
+    match decode_frame(&frame).unwrap() {
+        Msg::ManifestReturn { lanes, .. } => assert_eq!(lanes, 4),
         other => panic!("unexpected msg: {other:?}"),
     }
 }

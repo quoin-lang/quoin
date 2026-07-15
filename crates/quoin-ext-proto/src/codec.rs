@@ -194,14 +194,19 @@ pub fn encode_with_meta(msg: &Msg, meta: Option<&ReplyMeta>) -> Vec<u8> {
             write_uint(&mut out, T_GET_MANIFEST);
             write_uint(&mut out, *version as u64);
         }
-        Msg::ManifestReturn { classes, version } => {
-            write_array_header(&mut out, 3);
+        Msg::ManifestReturn {
+            classes,
+            version,
+            lanes,
+        } => {
+            write_array_header(&mut out, 4);
             write_uint(&mut out, T_MANIFEST_RETURN);
             write_uint(&mut out, *version as u64);
             write_array_header(&mut out, classes.len());
             for c in classes {
                 write_class_decl(&mut out, c);
             }
+            write_uint(&mut out, *lanes as u64);
         }
         Msg::MakeString { value } => {
             write_array_header(&mut out, 2);
@@ -700,7 +705,7 @@ pub fn decode_frame_with_meta(bytes: &[u8]) -> Result<(Msg, ReplyMeta), String> 
             msg
         }
         T_MANIFEST_RETURN => {
-            let extra = need(fields, 2, "ManifestReturn")?;
+            let mut extra = need(fields, 2, "ManifestReturn")?;
             let msg = Msg::ManifestReturn {
                 version: read_version(rd)?,
                 classes: {
@@ -711,6 +716,7 @@ pub fn decode_frame_with_meta(bytes: &[u8]) -> Result<(Msg, ReplyMeta), String> 
                     }
                     classes
                 },
+                lanes: read_appended_u64(rd, &mut extra)? as u32,
             };
             skip_extra(rd, extra)?;
             msg

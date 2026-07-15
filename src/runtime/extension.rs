@@ -1570,7 +1570,9 @@ fn fetch_manifest<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<ClassD
     match quoin_ext_proto::decode_frame(&frame)
         .map_err(|e| QuoinError::Other(format!("Extension manifest: malformed frame: {e}")))?
     {
-        Msg::ManifestReturn { classes, version } => {
+        Msg::ManifestReturn {
+            classes, version, ..
+        } => {
             if version != PROTOCOL_VERSION {
                 return Err(QuoinError::Other(format!(
                     "Extension manifest: the extension SDK speaks protocol version {version}, \

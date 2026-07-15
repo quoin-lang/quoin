@@ -572,6 +572,8 @@ pub fn serve<R: Into<Reply>>(
                     &quoin_ext_proto::encode(&Msg::ManifestReturn {
                         classes: Vec::new(),
                         version: PROTOCOL_VERSION,
+                        // The generic path is single-connection by design (see the doc above).
+                        lanes: 1,
                     }),
                 )?;
             }
@@ -865,6 +867,8 @@ pub struct Extension {
     /// Maps each registered Rust type to its Quoin class name, so an instance returned by a method
     /// (of this class or another) is wrapped as the right class on the host — cross-class returns.
     type_names: HashMap<TypeId, String>,
+    /// Declared in the manifest; 0 (the `Default`) is normalized to 1 at send. See [`Extension::lanes`].
+    lanes: u32,
 }
 
 impl Extension {
@@ -872,7 +876,23 @@ impl Extension {
         Self {
             classes: Vec::new(),
             type_names: HashMap::new(),
+            lanes: 1,
         }
+    }
+
+    /// Declare how many lane connections this extension serves (default 1). A count above 1
+    /// invites the host to open that many connections and issue calls on all of them
+    /// concurrently — one conversation per lane, each serviced on its own thread — so calls
+    /// to different instances can overlap (the host still serializes calls to any one
+    /// instance). Declaring more than one lane asserts that your handlers tolerate that
+    /// concurrency; hosts too old to understand the field simply stay at one connection.
+    pub fn lanes(&mut self, n: u32) -> &mut Self {
+        assert!(
+            (1..=1024).contains(&n),
+            "Extension::lanes: count must be 1..=1024, got {n}"
+        );
+        self.lanes = n;
+        self
     }
 
     /// Register a class named `name` backed by the Rust type `T`; `build` configures its
@@ -985,6 +1005,7 @@ impl Extension {
         Msg::ManifestReturn {
             classes,
             version: PROTOCOL_VERSION,
+            lanes: self.lanes.max(1),
         }
     }
 

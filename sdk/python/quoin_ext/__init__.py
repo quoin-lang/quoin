@@ -247,15 +247,17 @@ def write_frame(conn, payload):
 # --------------------------------------------------------------------------------------------
 
 
-def _encode_manifest_return(classes):
+def _encode_manifest_return(classes, lanes=1):
     """The reply to the host's spawn-time ``GetManifest``: this SDK's protocol version plus the
     classes this extension provides, each ``(name, instance_selectors, class_selectors)``. An
-    empty list keeps a generic-handler extension backward-compatible."""
+    empty list keeps a generic-handler extension backward-compatible. ``lanes`` is the appended
+    lane-count declaration (PROTOCOL.md §Evolution); hosts too old to read it skip it."""
     return _pack(
         [
             _T_MANIFEST_RETURN,
             PROTOCOL_VERSION,
             [[name, list(inst), list(cls)] for (name, inst, cls) in classes],
+            max(1, lanes),
         ]
     )
 
@@ -594,8 +596,18 @@ class Extension:
     :meth:`serve`. The SDK owns the instances, so writing an extension class is just writing a plain
     Python class plus a selector -> method mapping."""
 
-    def __init__(self):
+    def __init__(self, lanes=1):
+        """``lanes`` declares how many lane connections this extension serves (default 1). A
+        count above 1 invites the host to open that many connections and issue calls on all of
+        them concurrently — one conversation per lane, each serviced on its own thread — so
+        calls to different instances can overlap (the host still serializes calls to any one
+        instance). Handlers that block with the GIL released (sockets, files, native kernels)
+        genuinely overlap; pure-Python compute should stay at 1. Declaring more than one lane
+        asserts your handlers tolerate that concurrency."""
+        if not 1 <= lanes <= 1024:
+            raise ValueError(f"Extension lanes must be 1..=1024, got {lanes}")
         self._classes = {}  # name -> _ClassReg
+        self._lanes = lanes
 
     def register(self, name, cls, constructors=None, methods=None):
         """Register the Python class ``cls`` as the Quoin class ``name``. ``constructors`` maps
@@ -623,7 +635,9 @@ class Extension:
                         break
                     msg = self._unpack_frame(table, frame)
                     if msg[0] == _T_GET_MANIFEST:
-                        write_frame(conn, _encode_manifest_return(self._manifest()))
+                        write_frame(
+                            conn, _encode_manifest_return(self._manifest(), self._lanes)
+                        )
                         continue
                     started = time.perf_counter()
                     write_frame(
