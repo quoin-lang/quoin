@@ -376,8 +376,7 @@ fn compile_and_execute_source<'gc>(
     vm.execute_block(mc, block, Vec::new(), self_val)
 }
 
-/// Execute a unit-cache hit: parse and compile are skipped wholesale (including
-/// the named-package class-definition scan, which parses on its own) — see
+/// Execute a unit-cache hit: parse and compile are skipped wholesale — see
 /// `runtime::unit_cache` for why that is sound.
 fn execute_cached_unit<'gc>(
     vm: &mut VmState<'gc>,
@@ -414,37 +413,9 @@ fn effective_package(vm: &VmState, package: Option<&str>) -> Option<String> {
     package.map(str::to_string)
 }
 
-/// A **named** package's unit may not define a bare-global class — the no-pollution rule
-/// extension packages get structurally (`EXT_PACKAGING.md` §4), enforced for source units
-/// at load time, before anything runs. Reopening an existing class (`String <-- { … }`)
-/// stays allowed. Checks the unit's top level; a parse failure is left to the real
-/// compile path, which reports it with full spans.
-fn forbid_bare_class_definitions(
-    source: &str,
-    display: &str,
-    package: &str,
-) -> Result<(), QuoinError> {
-    let Ok(node) = crate::parser::try_parse_quoin_string_named(source, display) else {
-        return Ok(());
-    };
-    let NodeValue::Program(program) = &node.value else {
-        return Ok(());
-    };
-    for expr in &program.expressions {
-        if let NodeValue::ClassDefinition(cd) = &expr.value
-            && cd.identifier.namespace.is_none()
-        {
-            return Err(QuoinError::Other(format!(
-                "use: {display} defines the bare-global class `{name}` — a package's \
-                 classes must live under a namespace (e.g. `[{ns}]{name}`); packages \
-                 cannot claim bare globals",
-                name = cd.identifier.name,
-                ns = crate::runtime::extension::pascal_case(package),
-            )));
-        }
-    }
-    Ok(())
-}
+// (The bare-global-class rule for named packages is enforced at the definition
+// site — `Instruction::DefineClass` consults the load stack — not by a load-time
+// AST scan; the old `forbid_bare_class_definitions` pre-parse is gone.)
 
 /// Load a unit once. Resolves `(package, path)` to source via the VM's resolver, runs
 /// it in a nested top-level frame (frame-balanced), and records it in the run-once
@@ -484,12 +455,6 @@ pub fn load_unit<'gc>(
     let chain = unit_cache::advance(vm.modules.unit_chain, package, path, &source);
     vm.modules.unit_chain = chain;
     let cached = unit_cache::get(chain);
-    if cached.is_none()
-        && let Some(named) = package
-        && named != "self"
-    {
-        forbid_bare_class_definitions(&source, &display, named)?;
-    }
     vm.modules.loaded.push(LoadedUnit {
         package: package.map(|s| s.to_string()),
         path: path.to_string(),

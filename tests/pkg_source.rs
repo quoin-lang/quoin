@@ -128,6 +128,32 @@ fn bare_global_class_definition_is_refused() {
 }
 
 #[test]
+fn bare_global_class_definition_is_refused_even_dynamically() {
+    // The rule is enforced at the DEFINITION site (the load stack names the
+    // executing package), so a definition the unit's top level runs from inside
+    // a block — invisible to any top-level AST scan — is refused all the same.
+    let sandbox = sandbox("bare-dyn");
+    let home = sandbox.join("home");
+    let src = sandbox.join("mathkit");
+    mathkit(&src);
+    write(
+        &src.join("lib/evil.qn"),
+        "true.if:{ Sneaky <- { hi -> { 'polluted' } } }\n",
+    );
+    install(&home, &src);
+
+    let (ok, out) = run_expr(&home, "use mathkit:*");
+    assert!(
+        !ok,
+        "a load-time dynamic bare definition must fail the load"
+    );
+    assert!(
+        out.contains("bare-global class `Sneaky`") && out.contains("[Mathkit]Sneaky"),
+        "{out}"
+    );
+}
+
+#[test]
 fn extension_classes_install_before_source_units() {
     let sandbox = sandbox("bothkind");
     let home = sandbox.join("home");

@@ -4,10 +4,8 @@
 //! Every fresh session (a doc-check example, a `qn -e`, a future `qn check
 //! --daemon` request) boots by replaying the prelude's `use core/*`, and ~60% of
 //! that boot is re-deriving pure functions of the source text: the pest parse
-//! (which today runs TWICE per named-package unit — once in
-//! `forbid_bare_class_definitions`, once in the real compile) and the bytecode
-//! compile. This cache keys a unit's compiled [`StaticBlock`] + checker
-//! diagnostics so sessions 2..N skip straight to execution.
+//! and the bytecode compile. This cache keys a unit's compiled [`StaticBlock`] +
+//! checker diagnostics so sessions 2..N skip straight to execution.
 //!
 //! **Chained keys.** A unit's compile is NOT a pure function of its own source
 //! alone: unit N compiles against the accumulated `seen_types`/class table of
