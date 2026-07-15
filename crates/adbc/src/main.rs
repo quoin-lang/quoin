@@ -503,6 +503,12 @@ fn main() {
     let path = std::env::args().nth(1).expect("usage: adbc <socket-path>");
 
     let mut ext = Extension::new();
+    // Eight lanes: the host opens eight connections and issues calls on all of them, each
+    // served on its own SDK thread — so queries on DIFFERENT `Connection`s run in parallel
+    // while the host's per-instance claim keeps any ONE connection single-threaded (the
+    // ADBC requirement). Class-side sends contend only on lanes, so `connect`s and
+    // `Database` opens also overlap. DESIGN.md §6.
+    ext.lanes(8);
     ext.class::<Database>("Database", |c| {
         c.constructor("sqlite:", |_h, args| Database::sqlite(str_arg(args, 0)));
         c.constructor("sqliteMemory", |_h, _a| Database::sqlite(":memory:"));

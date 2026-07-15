@@ -39,6 +39,29 @@ under **Changed**, with the migration.
 
 ### Changed
 
+- **Extension SDKs serve multiple lanes; the Rust SDK's handler bounds tightened**
+  (breaking, Rust SDK only). An extension can now declare `lanes` — how many
+  connections it serves concurrently — via `Extension::lanes(n)` (Rust) or
+  `Extension(lanes=n)` (Python); the declaration rides `ManifestReturn` as an
+  append-only protocol field, so older peers on either side interoperate
+  unchanged at one lane. Both SDKs serve each accepted connection on its own
+  thread over the shared object table. Consequences in the Rust SDK's types:
+  registered instance types and handler closures now need `Send` (+ `Sync` for
+  closures), and `Host::instance` — which lent a reference into the now-locked
+  table — is replaced by `Host::with_instance(value, |v| …)`, which takes the
+  instance out for the closure's duration (the same discipline as a call's
+  receiver). Typical extensions compile unchanged apart from that rename; the
+  Python SDK's surface is purely additive.
+
+  Host-side, an extension declaring N lanes gets N connections and the same
+  claim machinery hosted services run: calls to one instance serialize on its
+  per-object mailbox, calls to different instances overlap up to the lane
+  count, and class-side sends (constructors) contend only on lanes — so a DB
+  extension's connections genuinely run queries in parallel. Extension claims
+  now appear in `VM.claims`/`VM.claimsReport` beside services', and a claim
+  cycle through extensions (even mixed with hosted services) raises the same
+  catchable deadlock error at the task that closes it, instead of hanging.
+  Extensions declaring nothing keep exactly the old one-connection behavior.
 - **`WorkerService` is removed; hosting lives on `Worker`** (experimental,
   breaking). The class-form constructor moved verbatim — write
   `Worker.host:'unit.qn' class:'Pool'` (plus the `backing:`/`lanes:` variants)

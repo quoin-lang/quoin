@@ -198,6 +198,11 @@ pub enum Msg {
     ManifestReturn {
         classes: Vec<ClassDecl>,
         version: u32,
+        /// APPENDED (PROTOCOL.md §Evolution): how many lane connections the extension serves.
+        /// An extension declaring N > 1 invites the host to open N-1 further connections to
+        /// the same socket and issue calls on all N concurrently (one conversation per lane).
+        /// 0 = not sent (an older peer) and means 1; consumers normalize with `max(1)`.
+        lanes: u32,
     },
     /// ext -> host (re-entrant): make a host String, return a handle to it.
     MakeString { value: String },

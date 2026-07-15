@@ -29,6 +29,16 @@ plus extension-backed classes (Phase 3) via `quoin_ext.Extension` — register a
 class with selector→callable tables and the host installs it as a real Quoin class. The
 in-repo `quoin_packages/numpy` extension is the flagship consumer.
 
+## Lanes: serving calls concurrently
+
+`quoin_ext.Extension(lanes=n)` (1–1024, default 1) declares that this extension serves up
+to `n` connections concurrently — a lane-aware host opens that many and issues calls on
+all of them, each served on its own thread over the shared instance table. The host still
+serializes the calls *to any one instance*; the concurrency is across instances. Worth
+declaring when your handlers block with the GIL released — database drivers, sockets,
+files, native kernels — where threads genuinely overlap; pure-Python compute gains nothing
+and should stay at 1. Old hosts ignore the declaration and open one connection.
+
 ## The wire
 
 There are no generated bindings and no codegen step: a frame is a length-prefixed

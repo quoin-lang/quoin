@@ -487,22 +487,50 @@ fn claim_object<'gc>(
     selector: Symbol,
     kind: WaitKind,
 ) -> Result<Claimed, QuoinError> {
+    let what = format!("service call '{}'", selector.as_str());
+    let wait_micros = claim_peer_object(
+        vm,
+        receiver,
+        &ctx.claims,
+        ctx.object_id,
+        &ctx.class_name,
+        &what,
+        kind,
+        "service claim",
+    )?;
+    Ok(Claimed { wait_micros })
+}
+
+/// The peer-generic body of [`claim_object`], shared with extension dispatch
+/// (`runtime/extension.rs`): the §5.1 acquisition drive loop over any
+/// registered [`PeerClaims`]. `object_label` names the object in rows and
+/// cycle renderings; `what` prefixes the raised errors (e.g. `service call
+/// 'sum:'`); `park_label` is the `VM.ps` park annotation. Returns the wait in
+/// microseconds (0 on the uncontended path).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn claim_peer_object<'gc>(
+    vm: &mut VmState<'gc>,
+    receiver: Value<'gc>,
+    claims: &Rc<RefCell<PeerClaims>>,
+    object_id: u64,
+    object_label: &str,
+    what: &str,
+    kind: WaitKind,
+    park_label: &'static str,
+) -> Result<u64, QuoinError> {
     let me = vm.sched.current_task;
     let epoch = vm.current_park_epoch();
     let nested = kind == WaitKind::Nested;
-    let decision =
-        ctx.claims
-            .borrow_mut()
-            .try_acquire(me.0, epoch, ctx.object_id, &ctx.class_name, nested);
+    let decision = claims
+        .borrow_mut()
+        .try_acquire(me.0, epoch, object_id, object_label, nested);
     let blocker = match decision {
         Acquire::Granted { .. } | Acquire::Reentrant => {
-            return Ok(Claimed { wait_micros: 0 });
+            return Ok(0);
         }
         Acquire::TooDeep => {
             return Err(QuoinError::Other(format!(
-                "service call '{}': re-entered {} too deeply — mutual recursion?",
-                selector.as_str(),
-                ctx.class_name
+                "{what}: re-entered {object_label} too deeply — mutual recursion?"
             )));
         }
         Acquire::WouldQueue { blocker } => blocker,
@@ -511,67 +539,71 @@ fn claim_object<'gc>(
     // can extend the walk; a reservation blocks on a task that holds nothing.)
     if let Some(start) = blocker {
         let registry = vm.io.claim_peers.clone();
-        let label = format!("{}#{}", ctx.class_name, ctx.object_id);
+        let label = format!("{object_label}#{object_id}");
         let cycle = {
             let mut live = |t: usize, e: u64| vm.channel_waiter_live(TaskId(t), e);
             would_deadlock(&registry, me.0, start, &label, &mut live)
         };
         if let Some(cycle) = cycle {
-            ctx.claims.borrow_mut().stats.deadlocks += 1;
-            return Err(QuoinError::Other(format!(
-                "service call '{}': {cycle}",
-                selector.as_str()
-            )));
+            claims.borrow_mut().stats.deadlocks += 1;
+            return Err(QuoinError::Other(format!("{what}: {cycle}")));
         }
     }
-    ctx.claims
+    claims
         .borrow_mut()
-        .enqueue(me.0, epoch, ctx.object_id, &ctx.class_name, kind);
-    // Park until the finishing call HANDS us the claim (fair FIFO — the
+        .enqueue(me.0, epoch, object_id, object_label, kind);
+    // Park until the finishing call HANDS us the claim (fair FIFO — the old
     // ext_prelude park verbatim). The wait is boundary-profiled separately:
     // mailbox contention is its own diagnosis (§7).
     let queued_at = Instant::now();
     if let Some(t) = vm.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
         t.parked_on_channel = true;
     }
-    vm.set_park_info("service claim".to_string(), Some(receiver));
+    vm.set_park_info(park_label.to_string(), Some(receiver));
     if let Some(yielder) = unsafe { vm.get_yielder() } {
         yielder.suspend(YieldReason::ChannelPark);
     } else {
-        ctx.claims.borrow_mut().retract(me.0, ctx.object_id);
-        return Err(QuoinError::Other(
-            "service call queued outside the VM scheduler".to_string(),
-        ));
+        claims.borrow_mut().retract(me.0, object_id);
+        return Err(QuoinError::Other(format!(
+            "{what} queued outside the VM scheduler"
+        )));
     }
     // On resume: if the claim was already handed to us and a cancel raced in,
-    // pass it onward (mirrors ext_prelude) — never strand the queue.
+    // pass it onward (mirrors channel_redeliver) — never strand the queue.
     let handed = matches!(vm.sched.wake.take(), Some(Wake::ServiceClaim { .. }));
     if vm.sched.cancel_current {
         if handed {
-            end_call_and_wake(vm, ctx, me.0);
+            end_peer_call_and_wake(vm, claims, object_id, me.0);
         } else {
-            ctx.claims.borrow_mut().retract(me.0, ctx.object_id);
+            claims.borrow_mut().retract(me.0, object_id);
         }
         return Err(vm.take_cancellation());
     }
     if !handed {
-        return Err(QuoinError::Other(
-            "service claim park resumed without the claim".to_string(),
-        ));
+        return Err(QuoinError::Other(format!(
+            "{park_label} park resumed without the claim"
+        )));
     }
-    Ok(Claimed {
-        wait_micros: queued_at.elapsed().as_micros() as u64,
-    })
+    Ok(queued_at.elapsed().as_micros() as u64)
 }
 
 /// Release one call's claim on the proxy's object (outermost release frees
 /// the lane too) and deliver the resulting handoffs.
 fn end_call_and_wake<'gc>(vm: &mut VmState<'gc>, ctx: &CallCtx, task: usize) {
+    end_peer_call_and_wake(vm, &ctx.claims, ctx.object_id, task);
+}
+
+/// The peer-generic body of [`end_call_and_wake`], shared with extension
+/// dispatch: release + FIFO handoff over any registered [`PeerClaims`].
+pub(crate) fn end_peer_call_and_wake<'gc>(
+    vm: &mut VmState<'gc>,
+    claims: &Rc<RefCell<PeerClaims>>,
+    object_id: u64,
+    task: usize,
+) {
     let grants = {
         let mut live = |t: usize, e: u64| vm.channel_waiter_live(TaskId(t), e);
-        ctx.claims
-            .borrow_mut()
-            .end_call(task, ctx.object_id, &mut live)
+        claims.borrow_mut().end_call(task, object_id, &mut live)
     };
     for g in grants {
         vm.wake_channel_task(TaskId(g.task), Wake::ServiceClaim { lane: g.lane });

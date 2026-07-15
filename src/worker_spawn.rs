@@ -961,6 +961,9 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
                 &Msg::ManifestReturn {
                     classes: Vec::new(),
                     version: PROTOCOL_VERSION,
+                    // Workers don't self-declare lanes: the parent decides the count at
+                    // spawn and opens that many conversation sockets. 0 = no declaration.
+                    lanes: 0,
                 },
             ) {
                 eprintln!("qn worker-serve: handshake reply: {e}");

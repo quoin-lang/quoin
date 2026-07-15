@@ -12,4 +12,8 @@ readme = "README.md"
 # consumers resolve (cargo strips the path at publish).
 quoin-ext-proto = { path = "../quoin-ext-proto", version = "0.1.1" }
 
+[dev-dependencies]
+# Integration tests speak the raw wire protocol to a served extension (they play host).
+quoin-ext-proto = { path = "../quoin-ext-proto" }
+
 [lib]

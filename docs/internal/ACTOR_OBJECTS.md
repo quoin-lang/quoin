@@ -384,6 +384,31 @@ chatty-vs-slow decomposition in `VM.boundaryStats` instead of handler 0. Surface
 `host:class:backing:lanes:`. Remaining for 5c: extensions (manifest `lanes`
 field, SDK threading, claim key from connection → resource id).
 
+**5c AS BUILT (2026-07-14): extension lanes — the DB story cashes out.** The
+manifest's `lanes` (append-only field on `ManifestReturn`, absent/0 = 1, both
+directions degrade to the pre-lanes protocol — no version bump) invites the host
+to open `lanes` connections; both SDKs serve each accepted connection on its own
+thread over a structurally-locked object table (the Rust SDK's handler bounds
+gained `Send + Sync`; `Host::instance` became the take-out/reinsert
+`Host::with_instance`). Host-side, the whole bespoke connection claim
+(`owner`/`depth`/`call_waiters`, `Wake::ExtClaim`) is DELETED: extensions run
+`claims.rs` via the peer-generic drive loop factored out of `worker_service.rs`
+(`claim_peer_object`/`end_peer_call_and_wake`), one `PeerClaims` per extension in
+`vm.io.claim_peers` — so extension claims appear in `VM.claims`/`claimsReport`
+and the rule-6 cycle walk covers mixed service↔extension cycles for free
+(deadlock-twin e2e proves it, over `apply_block` callbacks). The claim key is the
+receiver's RESOURCE id — per-instance mailboxes; queries on one connection
+serialize, on two connections overlap. Class-side and generic calls claim a fresh
+per-call PSEUDO-object (high-bit-tagged, `gc_object`-reaped when idle): §5.1
+rule 5's lane-only claim expressed with zero new machinery, so parallel
+constructors work — note the deliberate asymmetry with worker services, which
+serialize class-side sends via pseudo-object 0 (safer for class state; an
+extension declaring lanes > 1 asserts its own thread-safety). Lane tokens stay
+fungible: the token grants the right to pop a socket from the free pool; a
+conversation pins its socket for its LIFO duration (nested calls ride it), and
+the pool is repaid before grants are delivered. `lanes` caps at 1024 (the worker
+surface's cap).
+
 ## 6. Cross-isolate channels (CSP across the boundary)
 
 A channel endpoint becomes portable to a Quoin peer. Design, per the seam analysis:
@@ -606,9 +631,10 @@ injection wrapper, which feeds recorded results instead of re-performing.
    5a = shared claim module + unit-tested discipline + thread workers
    (`host:class:lanes:`) + claim observability (`VM.claims`/`VM.claimsReport`),
    5b = process workers (N sockets), 5c = extensions (manifest `lanes`, SDK
-   threading, per-resource claims). **5a + 5b DONE (2026-07-14)** — see §5.1's
-   as-built notes; the one-token serializer is gone, and process services carry
-   `ReplyMeta` handler timing over the pumps.
+   threading, per-resource claims). **5a + 5b + 5c ALL DONE (2026-07-14)** — see
+   §5.1's as-built notes; the one-token serializer is gone (both the worker's and
+   the extension's), process services carry `ReplyMeta` handler timing over the
+   pumps, and extensions run the same claims machinery per resource id.
 6. **Portable-block arguments** for Quoin peers (thread first; process blocked on
    source-shipping and falls back to handles). v1 DONE (2026-07-14): the ship path
    for thread backing — snapshot at the encode seam, `DispatchReq.blocks` sidecar,

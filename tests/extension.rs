@@ -1266,3 +1266,120 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_ext_boundary_python_test.qn", &script);
 }
+
+// --- Lanes (§5.1 for extensions): the manifest declares N, the host opens N connections ---
+
+/// A `lanes(2)` extension: calls to DIFFERENT instances overlap (two lanes, two per-object
+/// mailboxes), calls to ONE instance serialize (its mailbox), and class-side constructors
+/// contend only on lanes (per-call pseudo-objects), so two slow `slowMake:`s also overlap.
+/// `slowTag` sleeps 150ms: overlap lands near 150ms, serial near 300ms — 260ms splits them
+/// with margin on both sides.
+#[test]
+fn extension_lanes_overlap_and_serialize() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_lanes");
+    let script = format!(
+        r#"
+var ok = true;
+Extension.spawn:'{ext_bin}';
+var a = Slot.make:1;
+var b = Slot.make:2;
+
+"* different instances: the two lanes carry the calls concurrently
+var t = Timer.time:{{ Async.gather:#( {{ a.slowTag }} {{ b.slowTag }} ) }};
+(t < 260000).else:{{ ok = false; ('FAIL overlap took ' + t.s + 'us').print }};
+
+"* one instance: its mailbox serializes the same two calls
+var t2 = Timer.time:{{ Async.gather:#( {{ a.slowTag }} {{ a.slowTag }} ) }};
+(t2 >= 290000).else:{{ ok = false; ('FAIL serialize took ' + t2.s + 'us').print }};
+
+"* class-side sends claim per-call pseudo-objects: constructors run in parallel too
+var made = nil;
+var t3 = Timer.time:{{ made = Async.gather:#( {{ Slot.slowMake:3 }} {{ Slot.slowMake:4 }} ) }};
+(t3 < 260000).else:{{ ok = false; ('FAIL ctors took ' + t3.s + 'us').print }};
+(((made.at:0).tag == 3) && ((made.at:1).tag == 4)).else:{{ ok = false; 'FAIL ctor results'.print }};
+
+"* results stay correct under the overlap
+var r = Async.gather:#( {{ a.slowTag }} {{ b.tag }} );
+(r == #( 1 2 )).else:{{ ok = false; ('FAIL results: ' + r.s).print }};
+
+"* the peer registered its claim state: two lanes, visible to VM.claims
+var lanes = (VM.claims.at:0).at:'lanes';
+((lanes.at:'total') == 2).else:{{ ok = false; ('FAIL lanes: ' + lanes.s).print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_lanes_test.qn", &script);
+}
+
+/// §5.1 rule 6 for extensions, end to end: two tasks whose blocks (run host-side, on the
+/// caller's fiber, while the extension holds each task's instance) synchronously call each
+/// other's held `Slot`s — the claim cycle raises catchably at the task that closes it, the
+/// other call completes, and the extension stays usable. The exact worker-service deadlock
+/// twin, over the extension transport.
+#[test]
+fn extension_lanes_deadlock_detected() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_lanes");
+    let script = format!(
+        r#"
+var ok = true;
+Extension.spawn:'{ext_bin}';
+var a = Slot.make:1;
+var b = Slot.make:2;
+
+var ta = Task.spawn:{{ {{ (a.applyHeld:{{ |n| b.tag }}).s }}.catch:{{ |e| e.s }} }};
+var tb = Task.spawn:{{ {{ (b.applyHeld:{{ |n| a.tag }}).s }}.catch:{{ |e| e.s }} }};
+var oa = ta.join;
+var ob = tb.join;
+
+"* exactly one side closed the cycle and got the catchable deadlock error;
+"* the other completed normally once the loser unwound
+var died = 0;
+(oa.contains?:'deadlock').if:{{ died = died + 1 }};
+(ob.contains?:'deadlock').if:{{ died = died + 1 }};
+(died == 1).else:{{ ok = false; ('FAIL died=' + died.s + ' oa=' + oa + ' ob=' + ob).print }};
+((oa == '2') || (ob == '1')).else:{{ ok = false; ('FAIL winner: ' + oa + ' / ' + ob).print }};
+
+"* the detection was counted, and the extension still answers
+var dl = ((VM.claims.at:0).at:'stats').at:'deadlocks';
+(dl == 1).else:{{ ok = false; ('FAIL dl=' + dl.s).print }};
+((a.tag) == 1).else:{{ ok = false; 'FAIL: unusable after deadlock'.print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_lanes_deadlock_test.qn", &script);
+}
+
+/// The Python SDK's lanes, end to end: `Extension(lanes=2)` serves two connections on
+/// threads (the slow handler sleeps with the GIL released, standing in for a DB driver),
+/// so two calls to different instances overlap from Quoin exactly as with the Rust SDK.
+#[test]
+fn extension_lanes_python() {
+    if !python_fixture_runnable() {
+        eprintln!("skipping extension_lanes_python: python3 with `msgpack` unavailable");
+        return;
+    }
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/sdk/python/examples/ext_lanes.py"
+    );
+    ensure_executable(fixture);
+    let script = format!(
+        r#"
+var ok = true;
+Extension.spawn:'{fixture}';
+var a = Slot.make:1;
+var b = Slot.make:2;
+
+var t = Timer.time:{{ Async.gather:#( {{ a.slowTag }} {{ b.slowTag }} ) }};
+(t < 260000).else:{{ ok = false; ('FAIL overlap took ' + t.s + 'us').print }};
+
+var r = Async.gather:#( {{ a.slowTag }} {{ b.tag }} );
+(r == #( 1 2 )).else:{{ ok = false; ('FAIL results: ' + r.s).print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_lanes_python_test.qn", &script);
+}

@@ -36,7 +36,7 @@ unsigned ints; `str`/`bin`/`bool`/arrays/maps are their native MessagePack forms
 | 5 | CallReturnData | ext → host | `value:Value, handler_micros:u64`† |
 | 6 | CallReturnHandle | ext → host | `handle:u64, handler_micros:u64`† |
 | 7 | GetManifest | host → ext | `version:u32` |
-| 8 | ManifestReturn | ext → host | `version:u32, classes:[ClassDecl]` |
+| 8 | ManifestReturn | ext → host | `version:u32, classes:[ClassDecl], lanes:u32`‡ |
 | 9 | MakeString | ext → host | `value:str` |
 | 10 | HandleToString | ext → host | `handle:u64` |
 | 11 | Retain | ext → host | `handle:u64` |
@@ -65,6 +65,16 @@ meta-free. Note the append-only consequence: the first appended position on
 these terminals is now claimed and **typed** — a frame carrying a non-uint there
 is malformed (exactly as a non-str in `CallReturnError`'s `remote_stack` position
 always was); further unknown extras after it are still skipped.
+
+‡ `lanes` is an appended field (see Evolution) on `ManifestReturn`: how many lane
+connections the extension serves. Absent (an older peer) or 0 means 1. A count N > 1
+invites the host to open N-1 further connections to the same socket path after the
+handshake and issue calls on all N concurrently — one conversation per lane; the
+extension serves each accepted connection independently (in the SDKs, one thread
+each). Only the first connection carries the `GetManifest` handshake; the extras
+speak `Call` directly. A host too old to read the field simply stays at one
+connection, and a peer declaring nothing stays at one lane, so both directions
+degrade to exactly the pre-lanes protocol.
 
 Composite fields (also MessagePack arrays):
 
@@ -123,7 +133,9 @@ are indistinguishable on every SDK surface).
    replies `ManifestReturn` with its own version and its provided classes (empty list if
    it only serves the generic `call:with:` surface). **Each side must refuse a version it
    does not speak with a clear error naming both versions** — this is the first exchange,
-   so a mismatch is caught before any other frame is interpreted.
+   so a mismatch is caught before any other frame is interpreted. When the manifest
+   declares `lanes` N > 1 (‡ above), the host may then open N-1 further connections;
+   each is an independent conversation stream with this same shape, minus the handshake.
 2. Thereafter the host sends `Call` frames. The extension answers each with exactly one
    terminal (`CallReturn`, `CallReturnError`, `CallReturnResource`, `CallReturnArray`,
    `CallReturnData`, `CallReturnHandle`), optionally preceded by any number of re-entrant
