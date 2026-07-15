@@ -167,17 +167,16 @@ fn main() {
             Ok(out.into_iter().next().unwrap_or(DataValue::Null))
         });
         // Inbound instance references: the single list argument carries `Resource` leaves that
-        // `Host::instance` resolves to this extension's live `Vector`s.
+        // `Host::with_instance` resolves to this extension's live `Vector`s.
         c.class_method("sumOf:", |host, args| {
             let Some(DataValue::List(items)) = args[0].data() else {
                 return Err("sumOf: expects a list of Vectors".into());
             };
             let mut total = 0.0;
             for item in items {
-                let v = host
-                    .instance::<Vector>(item)
+                total += host
+                    .with_instance::<Vector, _>(item, |v| v.sum())
                     .ok_or("sumOf: list elements must be live Vectors")?;
-                total += v.sum();
             }
             Ok(DataValue::Float(total))
         });

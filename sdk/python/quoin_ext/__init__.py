@@ -22,6 +22,7 @@ import decimal
 import os
 import socket
 import struct
+import threading
 import time
 import traceback
 
@@ -556,22 +557,28 @@ class _ClassReg:
 
 class _ObjectTable:
     """The SDK-owned instance table: live instances keyed by an opaque id (the resource id the host
-    holds). Ids start at 1, so ``recv == 0`` unambiguously means a class-side send."""
+    holds). Ids start at 1, so ``recv == 0`` unambiguously means a class-side send. The lock is
+    structural (id allotment + map ops): lane threads share the table, but the host never issues
+    two concurrent calls to one instance, so instance state itself needs no locking here."""
 
     def __init__(self):
         self._objects = {}
         self._next_id = 0
+        self._lock = threading.Lock()
 
     def insert(self, obj):
-        self._next_id += 1
-        self._objects[self._next_id] = obj
-        return self._next_id
+        with self._lock:
+            self._next_id += 1
+            self._objects[self._next_id] = obj
+            return self._next_id
 
     def get(self, oid):
-        return self._objects.get(oid)
+        with self._lock:
+            return self._objects.get(oid)
 
     def remove(self, oid):
-        self._objects.pop(oid, None)
+        with self._lock:
+            self._objects.pop(oid, None)
 
 
 class _HostBlock:
@@ -618,38 +625,67 @@ class Extension:
         return self
 
     def serve(self, path):
-        """Bind a unix socket at ``path``, accept one host connection, and serve until it
-        disconnects: answer the spawn-time ``GetManifest`` from the registered classes, and route
-        each method ``Call`` to its handler — materializing returned instances into the table."""
+        """Bind a unix socket at ``path``, accept the host connection(s), and serve until the
+        host disconnects: answer the spawn-time ``GetManifest`` from the registered classes, and
+        route each method ``Call`` to its handler — materializing returned instances into the
+        table. With ``lanes`` above 1, up to ``lanes - 1`` further host connections are accepted
+        and each is served on its own (daemon) thread over the shared table; a host too old to
+        open them costs nothing — the accept thread idles until the process exits."""
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(path)
-        server.listen(1)
+        server.listen(max(1, self._lanes))
         table = _ObjectTable()
         registered_types = tuple(reg.cls for reg in self._classes.values())
         try:
             conn, _ = server.accept()
-            try:
-                while True:
-                    frame = read_frame(conn)
-                    if frame is None:
-                        break
-                    msg = self._unpack_frame(table, frame)
-                    if msg[0] == _T_GET_MANIFEST:
-                        write_frame(
-                            conn, _encode_manifest_return(self._manifest(), self._lanes)
-                        )
-                        continue
-                    started = time.perf_counter()
-                    write_frame(
-                        conn,
-                        _stamp_handler_micros(
-                            self._dispatch(conn, msg, table, registered_types), started
-                        ),
-                    )
-            finally:
-                conn.close()
+            if self._lanes > 1:
+                # The host connects the extra lanes after reading the manifest on the first
+                # connection; accept them as they come. Daemon threads: when the first
+                # connection closes, `serve` returns and the process exits — an accept
+                # thread still parked (an older host never opens extras) must not block that.
+                def _accept_lanes():
+                    accepted = 1
+                    while accepted < self._lanes:
+                        try:
+                            extra, _ = server.accept()
+                        except OSError:
+                            break
+                        accepted += 1
+                        threading.Thread(
+                            target=self._serve_conn,
+                            args=(extra, table, registered_types),
+                            daemon=True,
+                        ).start()
+
+                threading.Thread(target=_accept_lanes, daemon=True).start()
+            self._serve_conn(conn, table, registered_types)
         finally:
             server.close()
+
+    def _serve_conn(self, conn, table, registered_types):
+        """Serve one connection (one lane) to completion: the shared frame loop behind
+        :meth:`serve`. Only the first connection ever sees ``GetManifest``, but answering it is
+        stateless, so every lane handles it uniformly."""
+        try:
+            while True:
+                frame = read_frame(conn)
+                if frame is None:
+                    break
+                msg = self._unpack_frame(table, frame)
+                if msg[0] == _T_GET_MANIFEST:
+                    write_frame(
+                        conn, _encode_manifest_return(self._manifest(), self._lanes)
+                    )
+                    continue
+                started = time.perf_counter()
+                write_frame(
+                    conn,
+                    _stamp_handler_micros(
+                        self._dispatch(conn, msg, table, registered_types), started
+                    ),
+                )
+        finally:
+            conn.close()
 
     # --- the table-aware codec: live-instance references (ext type 3) inside values ---
 

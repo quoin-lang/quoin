@@ -142,6 +142,18 @@ round-trip the VM services while the caller is parked):
 reaped automatically; generic `serve` handlers with self-managed registries should free
 them at the top of each call.
 
+## Lanes: serving calls concurrently
+
+By default an extension serves one connection — every call serializes through it. Declare
+more with `ext.lanes(n)` (1–1024) and a lane-aware host opens `n` connections and issues
+calls on all of them at once, each lane served on its own thread over the shared object
+table; the host still serializes the calls *to any one instance*, so your per-instance
+`&mut` state needs no locking — the concurrency you opt into is *across* instances
+(different database connections, different files). Declaring lanes is the assertion that
+your class-side handlers tolerate running concurrently; that's what the `Send + Sync`
+bounds on handlers enforce. Hosts (or Quoin versions) that don't understand lanes simply
+open one connection — the declaration costs nothing.
+
 ## Packaging
 
 Hand-spawning a binary path is the development loop. To ship, an extension becomes a

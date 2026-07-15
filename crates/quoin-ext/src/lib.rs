@@ -29,6 +29,8 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use quoin_ext_proto::{ArrowArray, ArrowDType, DataValue};
 use quoin_ext_proto::{ClassDecl, Msg, PROTOCOL_VERSION};
@@ -91,7 +93,7 @@ pub struct Host<'a> {
     /// The structured-value payload passed via `call:with:data:`, if any.
     data: Option<DataValue>,
     /// The class-dispatch context (`None` on the generic `serve` path): the registry and the
-    /// object table, so [`Host::instance`] resolves live-instance references AND the wait
+    /// object table, so [`Host::with_instance`] resolves live-instance references AND the wait
     /// loops can service a NESTED `Call` — the host re-entering this extension from inside
     /// a block/method it is currently servicing for us (strictly LIFO on the shared stream).
     ctx: Option<HostCtx<'a>>,
@@ -101,10 +103,11 @@ pub struct Host<'a> {
     nested_error_stacks: Vec<String>,
 }
 
-/// The dispatch context a class extension threads into each call's [`Host`].
+/// The dispatch context a class extension threads into each call's [`Host`]. The table is
+/// internally locked (lane threads share it), so a shared borrow suffices.
 struct HostCtx<'a> {
     ext: &'a Extension,
-    table: &'a mut ObjectTable,
+    table: &'a ObjectTable,
 }
 
 impl<'a> Host<'a> {
@@ -135,16 +138,26 @@ impl<'a> Host<'a> {
 
     /// Resolve a live-instance reference nested inside a data tree (a [`DataValue::Resource`]
     /// leaf — e.g. inside a `List`/`Map` method argument, the way the Python SDK hands the live
-    /// object directly) to this extension's instance. `None` for a non-`Resource` value, a dead
-    /// or foreign id, a type mismatch, the receiver or an instance ARGUMENT of the current call
-    /// (both are taken out of the table for the call's duration), or on the generic `serve`
-    /// path (no object table). The reference borrows `self`, so copy what you need out before
-    /// the next `&mut` host-op.
-    pub fn instance<T: 'static>(&self, value: &DataValue) -> Option<&T> {
+    /// object directly) and run `f` over the instance, returning its result. `None` for a
+    /// non-`Resource` value, a dead or foreign id, a type mismatch, the receiver or an instance
+    /// ARGUMENT of the current call (both are taken out of the table for the call's duration),
+    /// or on the generic `serve` path (no object table). The instance is taken out of the
+    /// table while `f` runs — the same discipline as the receiver — so `f` sees it exclusively
+    /// even with lane threads serving concurrently; consequently a nested `with_instance` on
+    /// the SAME id inside `f` answers `None`.
+    pub fn with_instance<T: 'static, R>(
+        &self,
+        value: &DataValue,
+        f: impl FnOnce(&T) -> R,
+    ) -> Option<R> {
         let DataValue::Resource { id, .. } = value else {
             return None;
         };
-        self.ctx.as_ref()?.table.get(*id)?.downcast_ref::<T>()
+        let table = self.ctx.as_ref()?.table;
+        let obj = table.take(*id)?;
+        let result = obj.downcast_ref::<T>().map(f);
+        table.reinsert(*id, obj);
+        result
     }
 
     /// Make a host `String` value and return a (call-local) handle to it.
@@ -450,7 +463,7 @@ pub enum Value {
     List(Vec<Value>),
     Map(Vec<(String, Value)>),
     /// A new live instance of a registered class (see [`Value::instance`]).
-    Instance(Box<dyn Any>),
+    Instance(Box<dyn Any + Send>),
     /// An existing live-instance reference, passed through verbatim.
     Resource {
         id: u64,
@@ -460,7 +473,8 @@ pub enum Value {
 
 impl Value {
     /// Wrap a new instance of a registered class for embedding anywhere in a return tree.
-    pub fn instance<T: 'static>(obj: T) -> Value {
+    /// `T: Send` because it will live in the lane-shared object table.
+    pub fn instance<T: Send + 'static>(obj: T) -> Value {
         Value::Instance(Box::new(obj))
     }
 }
@@ -707,10 +721,18 @@ pub type HandlerResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync + 
 /// Erased per-selector handlers (the concrete `T` is captured at registration and downcast here).
 /// `Err(String)` is the recoverable error message → `CallReturnError`; transport/protocol failures
 /// (bad frame, dead instance id) stay `io::Error` at the dispatch/serve level.
-type CtorFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Box<dyn Any>, HandlerFailure>>;
-type MethodFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Reply, HandlerFailure>>;
-type MakesFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Box<dyn Any>, HandlerFailure>>;
-type ClassMethodFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Reply, HandlerFailure>>;
+// `Send + Sync` on the handler boxes and `Send` on the boxed instances: lane threads share
+// the `Extension` and the object table, so handlers and instances cross thread boundaries.
+type CtorFn =
+    Box<dyn Fn(&mut Host, &[Arg]) -> Result<Box<dyn Any + Send>, HandlerFailure> + Send + Sync>;
+type MethodFn =
+    Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Reply, HandlerFailure> + Send + Sync>;
+type MakesFn = Box<
+    dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Box<dyn Any + Send>, HandlerFailure>
+        + Send
+        + Sync,
+>;
+type ClassMethodFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Reply, HandlerFailure> + Send + Sync>;
 
 /// One registered class's erased handler tables, keyed by selector.
 struct ClassReg {
@@ -776,19 +798,19 @@ pub struct ClassBuilder<T> {
     _marker: PhantomData<fn() -> T>,
 }
 
-impl<T: 'static> ClassBuilder<T> {
+impl<T: Send + 'static> ClassBuilder<T> {
     /// A class-side constructor: `Class sel: …` builds a new `T` (stored in the object table); the
     /// Quoin caller receives an instance.
     pub fn constructor(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut Host, &[Arg]) -> HandlerResult<T> + 'static,
+        f: impl Fn(&mut Host, &[Arg]) -> HandlerResult<T> + Send + Sync + 'static,
     ) -> &mut Self {
         self.constructors.insert(
             selector.to_string(),
             Box::new(move |host, args| {
                 f(host, args)
-                    .map(|t| Box::new(t) as Box<dyn Any>)
+                    .map(|t| Box::new(t) as Box<dyn Any + Send>)
                     .map_err(failure_from)
             }),
         );
@@ -799,7 +821,7 @@ impl<T: 'static> ClassBuilder<T> {
     pub fn method<R: Into<Reply>>(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut T, &mut Host, &[Arg]) -> HandlerResult<R> + 'static,
+        f: impl Fn(&mut T, &mut Host, &[Arg]) -> HandlerResult<R> + Send + Sync + 'static,
     ) -> &mut Self {
         self.methods.insert(
             selector.to_string(),
@@ -815,16 +837,16 @@ impl<T: 'static> ClassBuilder<T> {
     /// An instance-side method that yields a new instance — of this class (`scale:` / `clone`) or
     /// of *any* registered class (`Matrix.row:` -> `Vector`, a cross-class return). The returned
     /// type's registered class is recovered by `TypeId` at dispatch, so the host wraps it correctly.
-    pub fn makes<U: 'static>(
+    pub fn makes<U: Send + 'static>(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut T, &mut Host, &[Arg]) -> HandlerResult<U> + 'static,
+        f: impl Fn(&mut T, &mut Host, &[Arg]) -> HandlerResult<U> + Send + Sync + 'static,
     ) -> &mut Self {
         self.makes.insert(
             selector.to_string(),
             Box::new(move |obj, host, args| {
                 f(downcast::<T>(obj)?, host, args)
-                    .map(|u| Box::new(u) as Box<dyn Any>)
+                    .map(|u| Box::new(u) as Box<dyn Any + Send>)
                     .map_err(failure_from)
             }),
         );
@@ -838,7 +860,7 @@ impl<T: 'static> ClassBuilder<T> {
     pub fn class_method<R: Into<Reply>>(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut Host, &[Arg]) -> HandlerResult<R> + 'static,
+        f: impl Fn(&mut Host, &[Arg]) -> HandlerResult<R> + Send + Sync + 'static,
     ) -> &mut Self {
         self.class_methods.insert(
             selector.to_string(),
@@ -896,8 +918,9 @@ impl Extension {
     }
 
     /// Register a class named `name` backed by the Rust type `T`; `build` configures its
-    /// constructors and methods.
-    pub fn class<T: 'static>(
+    /// constructors and methods. `T: Send` because instances live in a table shared by the
+    /// lane-serving threads (even at the default single lane).
+    pub fn class<T: Send + 'static>(
         &mut self,
         name: &str,
         build: impl FnOnce(&mut ClassBuilder<T>),
@@ -916,13 +939,66 @@ impl Extension {
         self
     }
 
-    /// Bind a unix socket at `path`, accept the host connection, and serve until it disconnects:
-    /// answer the spawn-time `GetManifest` from the registered classes, and route each method
-    /// `Call` to its handler — materializing returned instances into the object table.
+    /// Bind a unix socket at `path`, accept the host connection(s), and serve until the host
+    /// disconnects: answer the spawn-time `GetManifest` from the registered classes, and route
+    /// each method `Call` to its handler — materializing returned instances into the object
+    /// table. With [`Extension::lanes`] above 1, up to `lanes - 1` further host connections
+    /// are accepted and each is served on its own thread over the shared table; a host too
+    /// old to open them costs nothing (the accept loop just idles until the first connection
+    /// closes).
     pub fn serve(&self, path: &str) -> io::Result<()> {
         let listener = UnixListener::bind(path)?;
-        let (mut stream, _addr) = listener.accept()?;
-        let mut table = ObjectTable::default();
+        let (stream, _addr) = listener.accept()?;
+        let table = ObjectTable::default();
+        if self.lanes <= 1 {
+            // Single lane: unlink as soon as the host is connected (see the generic `serve` —
+            // the one connection never reconnects, and an early unlink survives signal death).
+            let _ = std::fs::remove_file(path);
+            return self.serve_conn(stream, &table);
+        }
+        // Multi-lane: the path must OUTLIVE the handshake — the host connects the extra lanes
+        // to this same path after reading the manifest — so the unlink moves to the end of the
+        // accept loop. The flag stops the accept poll once the first connection closes (a host
+        // that never opens extras — an older one, or one that dies — must not pin the loop).
+        let done_accepting = AtomicBool::new(false);
+        listener.set_nonblocking(true)?;
+        let table = &table;
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let mut accepted = 1u32;
+                while accepted < self.lanes && !done_accepting.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((conn, _addr)) => {
+                            accepted += 1;
+                            if conn.set_nonblocking(false).is_err() {
+                                continue;
+                            }
+                            s.spawn(move || {
+                                // A lane failing alone (a decode error, a broken pipe) ends
+                                // that lane; the extension keeps serving the others.
+                                if let Err(e) = self.serve_conn(conn, table) {
+                                    eprintln!("quoin-ext: lane exited: {e}");
+                                }
+                            });
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = std::fs::remove_file(path);
+            });
+            let result = self.serve_conn(stream, table);
+            done_accepting.store(true, Ordering::Relaxed);
+            result
+        })
+    }
+
+    /// Serve one connection (one lane) to completion: the shared frame loop behind
+    /// [`Extension::serve`]. Only the first connection ever sees `GetManifest`, but answering
+    /// it is stateless, so every lane handles it uniformly.
+    fn serve_conn(&self, mut stream: UnixStream, table: &ObjectTable) -> io::Result<()> {
         while let Some(frame) = read_frame(&mut stream)? {
             match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
                 // The reply always carries this SDK's protocol version; the host enforces the
@@ -943,14 +1019,8 @@ impl Extension {
                     for rid in &releases {
                         table.take(*rid);
                     }
-                    let reply = self.dispatch(
-                        &mut stream,
-                        &mut table,
-                        &class_name,
-                        &op,
-                        recv,
-                        &method_args,
-                    )?;
+                    let reply =
+                        self.dispatch(&mut stream, table, &class_name, &op, recv, &method_args)?;
                     write_frame(
                         &mut stream,
                         &quoin_ext_proto::encode_with_meta(&reply, Some(&reply_meta(started))),
@@ -1013,7 +1083,7 @@ impl Extension {
     fn dispatch(
         &self,
         stream: &mut UnixStream,
-        table: &mut ObjectTable,
+        table: &ObjectTable,
         class_name: &str,
         op: &str,
         recv: u64,
@@ -1132,7 +1202,7 @@ impl Extension {
     /// every `Instance` leaf's type is validated against the registry *first*, then each is
     /// inserted and becomes a live-instance reference — atomic, so an unregistered type is a
     /// recoverable `CallReturnError` that inserts nothing.
-    fn finish_reply(&self, reply: Reply, table: &mut ObjectTable) -> Msg {
+    fn finish_reply(&self, reply: Reply, table: &ObjectTable) -> Msg {
         match reply {
             Reply::Scalar(result) => Msg::CallReturn { result },
             Reply::Resource(resource) => Msg::CallReturnResource {
@@ -1174,7 +1244,7 @@ impl Extension {
 
     /// Pass 2: insert each `Instance` into the table and lower it to a live-instance reference
     /// (infallible after [`Extension::check_instances`]).
-    fn lower_value(&self, v: Value, table: &mut ObjectTable) -> DataValue {
+    fn lower_value(&self, v: Value, table: &ObjectTable) -> DataValue {
         match v {
             Value::Null => DataValue::Null,
             Value::Bool(b) => DataValue::Bool(b),
@@ -1210,7 +1280,7 @@ impl Extension {
 fn host_for_call<'a>(
     ext: &'a Extension,
     stream: &'a mut UnixStream,
-    table: &'a mut ObjectTable,
+    table: &'a ObjectTable,
 ) -> Host<'a> {
     Host {
         stream,
@@ -1261,10 +1331,10 @@ fn call_error(
 /// while the handler runs. A bad id reinserts everything taken so far before erroring
 /// (a protocol bug must not eat live instances).
 fn take_arg_instances(
-    table: &mut ObjectTable,
+    table: &ObjectTable,
     method_args: &[quoin_ext_proto::Arg],
-) -> io::Result<Vec<(u64, Box<dyn Any>)>> {
-    let mut taken: Vec<(u64, Box<dyn Any>)> = Vec::new();
+) -> io::Result<Vec<(u64, Box<dyn Any + Send>)>> {
+    let mut taken: Vec<(u64, Box<dyn Any + Send>)> = Vec::new();
     for arg in method_args {
         if let quoin_ext_proto::Arg::Resource(id) = arg {
             if taken.iter().any(|(t, _)| t == id) {
@@ -1284,7 +1354,7 @@ fn take_arg_instances(
 }
 
 /// Put every taken argument instance back under its id once the handler is done.
-fn reinsert_instances(table: &mut ObjectTable, taken: Vec<(u64, Box<dyn Any>)>) {
+fn reinsert_instances(table: &ObjectTable, taken: Vec<(u64, Box<dyn Any + Send>)>) {
     for (id, obj) in taken {
         table.reinsert(id, obj);
     }
@@ -1295,7 +1365,7 @@ fn reinsert_instances(table: &mut ObjectTable, taken: Vec<(u64, Box<dyn Any>)>) 
 /// after a successful take), and a handle passes through.
 fn resolve_args<'t>(
     method_args: &[quoin_ext_proto::Arg],
-    taken: &'t [(u64, Box<dyn Any>)],
+    taken: &'t [(u64, Box<dyn Any + Send>)],
 ) -> Vec<Arg<'t>> {
     method_args
         .iter()
@@ -1320,34 +1390,41 @@ fn resolve_args<'t>(
 
 /// The SDK-owned instance table (Phase 3): live instances keyed by an opaque id — the resource id
 /// the host holds for each. Ids start at 1, so `recv == 0` unambiguously means a class-side send.
+/// Internally locked: lane threads share it, and the lock is structural only — it is held for
+/// single map operations, never across a handler (instances are `take`n out for a call's
+/// duration, which is what makes concurrent lanes safe; the host additionally never issues two
+/// concurrent calls to one instance).
 #[derive(Default)]
 struct ObjectTable {
-    objects: HashMap<u64, Box<dyn Any>>,
+    inner: Mutex<TableInner>,
+}
+
+#[derive(Default)]
+struct TableInner {
+    objects: HashMap<u64, Box<dyn Any + Send>>,
     next_id: u64,
 }
 
 impl ObjectTable {
     /// Store an instance under a fresh id and return it.
-    fn insert(&mut self, obj: Box<dyn Any>) -> u64 {
-        self.next_id += 1;
-        self.objects.insert(self.next_id, obj);
-        self.next_id
-    }
-
-    /// A shared borrow of the live instance for `id`, or `None` if it isn't (or no longer) live.
-    /// Shared so several args (and the receiver, once it's been `take`n out) can be resolved at once.
-    fn get(&self, id: u64) -> Option<&dyn Any> {
-        self.objects.get(&id).map(|b| &**b)
+    fn insert(&self, obj: Box<dyn Any + Send>) -> u64 {
+        let mut inner = self.inner.lock().expect("object table lock poisoned");
+        inner.next_id += 1;
+        let id = inner.next_id;
+        inner.objects.insert(id, obj);
+        id
     }
 
     /// Remove and return the instance for `id` (e.g. the receiver of an instance method, or one the
     /// host has dropped), or `None` if it isn't live.
-    fn take(&mut self, id: u64) -> Option<Box<dyn Any>> {
-        self.objects.remove(&id)
+    fn take(&self, id: u64) -> Option<Box<dyn Any + Send>> {
+        let mut inner = self.inner.lock().expect("object table lock poisoned");
+        inner.objects.remove(&id)
     }
 
     /// Put a previously-`take`n instance back under its id.
-    fn reinsert(&mut self, id: u64, obj: Box<dyn Any>) {
-        self.objects.insert(id, obj);
+    fn reinsert(&self, id: u64, obj: Box<dyn Any + Send>) {
+        let mut inner = self.inner.lock().expect("object table lock poisoned");
+        inner.objects.insert(id, obj);
     }
 }
