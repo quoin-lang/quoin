@@ -86,8 +86,15 @@ ArgGallery <- {
 "* Malformed generic shapes each get a targeted diagnostic; a declared
 "* class-header type variable (T) is silently in scope for that body.
 GenericGallery(T) <- {
-    "* Map keys are pinned String for now — `Map(Integer …)` warns.
-    badMapKey: -> { |m: Map(Integer Integer)| m }
+    "* Keys are checker-only beliefs (`key-type`): an off-K key on a typed Map
+    "* warns — a lookup never finds it; a write breaks the annotation.
+    badKeyRead: -> { |m: Map(Integer String)| m.at:'nope' }
+    badKeyWrite: -> { |m: Map(Integer String)| m.at:'nope' put:'v' }
+
+    "* `keys` carries K and `values` carries V: a bad insert into either
+    "* derived List trips the element check.
+    badKeysElem: -> { |m: Map(Integer String)| m.keys.add:'s' }
+    badValuesElem: -> { |m: Map(Integer String)| m.values.add:5 }
 
     "* Only List/Map/Set take type arguments today.
     notGeneric: -> { |x: Point(Integer)| x }
@@ -107,6 +114,10 @@ GenericGallery(T) <- {
     "* A declared type variable, and well-formed flat generics.
     usesVar: -> { |x: T ^T| x }
     wellFormed: -> { |m: Map(String Integer) ^List(Integer)| #( m.at:'k' ) }
+
+    "* Non-String keys are a legal annotation (the runtime keys by any value),
+    "* and a matching key is silent.
+    intKeys: -> { |m: Map(Integer String) ^String?| m.at:3 }
 }
 
 "* --- G4: Block types (`Block(args ^Ret)`, GENERICS_ARCH §11) ---

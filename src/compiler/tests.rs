@@ -2021,9 +2021,9 @@ fn generic_annotations_resolve_and_diagnose() {
             .any(|m| m.contains("nested element types are checker-only")),
         "{d:?}"
     );
-    // Malformed shapes each get a targeted diagnostic.
-    let d = all_diags("Foo <- { a: -> { |m: Map(Integer Integer)| m } }");
-    assert!(d.iter().any(|m| m.contains("Map keys are String")), "{d:?}");
+    // Non-String key types are legal annotations (the runtime keys by any
+    // value): `Map(Integer Integer)` resolves silently.
+    assert!(all_diags("Foo <- { a: -> { |m: Map(Integer Integer)| m } }").is_empty());
     let d = all_diags("Foo <- { a: -> { |l: List(Integer Integer)| l } }");
     assert!(
         d.iter().any(|m| m.contains("takes 1 type argument")),
@@ -2119,11 +2119,32 @@ fn generic_type_lattice_rules() {
     // Variables are gradual until G2 binding.
     let v = Type::Var("T".into());
     assert!(v.compatible_with(&Type::Int) && Type::Int.compatible_with(&v));
+    // Map: values follow the tag rules (invariant; an Any expectation claims
+    // nothing); keys are beliefs — gradual, only a definite conflict fails.
+    let map_of = |k: Type, v: Type| Type::MapOf(Box::new(k), Box::new(v));
+    let mii = map_of(Type::Int, Type::Int);
+    let msi = map_of(Type::String, Type::Int);
+    assert!(mii.compatible_with(&mii.clone()));
+    assert!(!mii.compatible_with(&msi) && !msi.compatible_with(&mii));
+    assert!(map_of(Type::Any, Type::Int).compatible_with(&mii)); // unclaimed key fits…
+    assert!(mii.compatible_with(&map_of(Type::Any, Type::Int))); // …both ways
+    assert!(mii.compatible_with(&map_of(Type::Int, Type::Any))); // Any value expectation
+    assert!(!map_of(Type::Int, Type::Any).compatible_with(&mii)); // no tag, no guarantee
+    assert!(mii.compatible_with(&Type::Map) && !Type::Map.compatible_with(&mii));
+    assert_eq!(mii.join(&msi), Type::Map);
     // Rendering.
     assert_eq!(li.name(), "List(Integer)");
     assert_eq!(
-        Type::MapOf(Box::new(Type::ListOf(Box::new(Type::Int)))).name(),
+        Type::MapOf(
+            Box::new(Type::String),
+            Box::new(Type::ListOf(Box::new(Type::Int)))
+        )
+        .name(),
         "Map(String List(Integer))"
+    );
+    assert_eq!(
+        Type::MapOf(Box::new(Type::Int), Box::new(Type::String)).name(),
+        "Map(Integer String)"
     );
     assert_eq!(Type::SetOf(Box::new(Type::String)).name(), "Set(String)");
 }
@@ -2401,7 +2422,14 @@ fn annotation_string_parsing_with_vars() {
     );
     assert_eq!(
         Type::parse_annotation_str("Map(String V)", &[Arc::from("V")]),
-        Type::MapOf(Box::new(Type::Var(Arc::from("V"))))
+        Type::MapOf(Box::new(Type::String), Box::new(Type::Var(Arc::from("V"))))
+    );
+    assert_eq!(
+        Type::parse_annotation_str("Map(K V)", &[Arc::from("K"), Arc::from("V")]),
+        Type::MapOf(
+            Box::new(Type::Var(Arc::from("K"))),
+            Box::new(Type::Var(Arc::from("V")))
+        )
     );
     assert_eq!(Type::parse_annotation_str("Integer", &vars), Type::Int);
 }
@@ -2423,6 +2451,56 @@ fn generic_insertion_warnings() {
     assert!(all_diags("Foo <- { a: -> { |l: List(Integer)| l.add:3 } }").is_empty());
     // A variable-typed element claims nothing (generic method bodies stay quiet).
     assert!(all_diags("It(T) <- { a: -> { |l: List(T)| l.add:'anything' } }").is_empty());
+}
+
+#[test]
+fn map_key_checks() {
+    // Keys are checker-only beliefs: an off-K key warns (`key-type`) — as a
+    // write (breaks the annotation) and as a read (never present).
+    let d = all_diags("Foo <- { a: -> { |m: Map(Integer String)| m.at:'k' put:'v' } }");
+    assert!(
+        d.iter()
+            .any(|m| m.contains("declares `Integer` keys") && m.contains("breaks the annotation")),
+        "{d:?}"
+    );
+    for read in ["m.at:'k'", "m.containsKey?:'k'", "m.remove:'k'"] {
+        let d = all_diags(&format!(
+            "Foo <- {{ a: -> {{ |m: Map(Integer String)| {read} }} }}"
+        ));
+        assert!(
+            d.iter()
+                .any(|m| m.contains("declares `Integer` keys") && m.contains("never present")),
+            "{read}: {d:?}"
+        );
+    }
+    // The value side keeps its tag-backed check alongside the key's.
+    let d = all_diags("Foo <- { a: -> { |m: Map(Integer String)| m.at:1 put:2 } }");
+    assert!(
+        d.iter().any(|m| m.contains("rejects a `Integer` element")),
+        "{d:?}"
+    );
+    // Matching keys and values — and a nil key (any value may key) — are silent.
+    assert!(
+        all_diags("Foo <- { a: -> { |m: Map(Integer String)| m.at:1 put:'v'; m.at:2 } }")
+            .is_empty()
+    );
+    assert!(all_diags("Foo <- { a: -> { |m: Map(Integer String)| m.at:nil } }").is_empty());
+    // A map LITERAL in a Map(K V) position checks its keys too.
+    let d = all_diags("Foo <- { a: -> { var m: Map(Integer String) = #{'x': 'v'}; m } }");
+    assert!(
+        d.iter().any(|m| m.contains("declares `Integer` keys")),
+        "{d:?}"
+    );
+    assert!(all_diags("Foo <- { a: -> { var m: Map(Integer String) = #{1: 'v'}; m } }").is_empty());
+    // (`keys` → List(K) / `values` → List(V) ride the native `.returns` declarations,
+    // which need a VM-populated class table — covered by the warnings.qn gallery.)
+    // `Map.of:X` types the VALUE only — any key stays silent, the value checks.
+    let d = all_diags("Foo <- { a: -> { var m = Map.of:Integer; m.at:true put:'s'; m } }");
+    assert!(
+        d.iter().any(|m| m.contains("rejects a `String` element")),
+        "{d:?}"
+    );
+    assert!(!d.iter().any(|m| m.contains("keys")), "{d:?}");
 }
 
 #[test]

@@ -10,6 +10,17 @@ under **Changed**, with the migration.
 
 ### Added
 
+- **Generic Map keys** — `Map(K V)` annotations now take any key type; the old
+  "Map keys are String" resolve-time warning is gone (the runtime has keyed by
+  any value since the hash-ladder map store). `V` stays runtime-tag-enforced
+  exactly as before; `K` is checker-only: a definitely off-`K` key in a map
+  literal, `at:`, `at:put:`, `containsKey?:`, or `remove:` warns (new kind
+  `key-type`, suppressible with `"* allow:`), and `keys`/`values` on a
+  `Map(K V)` receiver now type as `List(K)`/`List(V)`. Portability learned the
+  matching wire truth: a captured `Map(K V)` with a non-String key type
+  classifies non-portable (the wire's Map is String-keyed), where the old
+  value-only rule would have called it shippable.
+
 - **Portable-block classification** — the portability rules are now visible at
   compile time, computed by the same scan the isolate boundary runs (so tooling
   can never disagree with the runtime). Every block literal classifies as

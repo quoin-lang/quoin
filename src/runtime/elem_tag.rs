@@ -57,7 +57,7 @@ impl ElemTag {
             Type::Instance(n) => Some(ElemTag::Class(Symbol::intern(n))),
             Type::Nullable(inner) => ElemTag::from_type(inner),
             Type::ListOf(_)
-            | Type::MapOf(_)
+            | Type::MapOf(_, _)
             | Type::SetOf(_)
             | Type::BlockOf { .. }
             | Type::Var(_)

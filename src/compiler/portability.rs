@@ -71,11 +71,23 @@ fn type_ships(t: &Type) -> TypeShips {
     match t {
         Type::Int | Type::Double | Type::Bool | Type::String | Type::Nil => TypeShips::Always,
         Type::Nullable(inner) => type_ships(inner),
-        Type::ListOf(elem) | Type::MapOf(elem) => match type_ships(elem) {
-            TypeShips::Always => TypeShips::Always,
-            TypeShips::Unknown => TypeShips::Unknown,
-            TypeShips::Never(why) => TypeShips::Never(why),
-        },
+        Type::ListOf(elem) => type_ships(elem),
+        // The wire's Map is String-keyed (`WireData::Map`): a definitely
+        // non-String key type can never cross; a gradual key (`Any`/var/`String?`)
+        // caps the verdict at Unknown; String keys leave it to the values.
+        Type::MapOf(key, value) => {
+            let key_side = match &**key {
+                Type::String => TypeShips::Always,
+                Type::Any | Type::Var(_) => TypeShips::Unknown,
+                Type::Nullable(inner) if matches!(&**inner, Type::String) => TypeShips::Unknown,
+                _ => TypeShips::Never("Map with non-String keys".to_string()),
+            };
+            match (key_side, type_ships(value)) {
+                (TypeShips::Never(why), _) | (_, TypeShips::Never(why)) => TypeShips::Never(why),
+                (TypeShips::Unknown, _) | (_, TypeShips::Unknown) => TypeShips::Unknown,
+                (TypeShips::Always, TypeShips::Always) => TypeShips::Always,
+            }
+        }
         // Untagged collections: the elements decide, and nothing is known.
         Type::List | Type::Map => TypeShips::Unknown,
         Type::Instance(name) => match &**name {

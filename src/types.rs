@@ -27,8 +27,10 @@ pub enum Type {
     Block,
     /// `List(T)` — a checked-element list.
     ListOf(Box<Type>),
-    /// `Map(String V)` — keys are pinned `String`; `V` is the checked value type.
-    MapOf(Box<Type>),
+    /// `Map(K V)` — `V` is the checked value type (runtime-tagged, like `List(T)`
+    /// elements); `K` is a checker-only belief — the runtime accepts any key, so
+    /// key claims are gradual (compared like Block shapes, never tag-enforced).
+    MapOf(Box<Type>, Box<Type>),
     /// `Set(T)` — a checked-element set.
     SetOf(Box<Type>),
     /// `Block(args ^Ret)` — a block with a declared shape (`ret` = `Any` when
@@ -108,11 +110,18 @@ impl Type {
             // (untagged) type never satisfies a checked one (no tag, no
             // guarantee), and tags are invariant (GENERICS_ARCH.md §3.2).
             (Type::ListOf(_), Type::List)
-            | (Type::MapOf(_), Type::Map)
+            | (Type::MapOf(_, _), Type::Map)
             | (Type::SetOf(_), Type::Set) => true,
-            (Type::ListOf(a), Type::ListOf(b))
-            | (Type::MapOf(a), Type::MapOf(b))
-            | (Type::SetOf(a), Type::SetOf(b)) => a == b,
+            (Type::ListOf(a), Type::ListOf(b)) | (Type::SetOf(a), Type::SetOf(b)) => a == b,
+            // Values follow the tag rules: invariant, except an `Any` expectation
+            // claims nothing (the width rule's element-level face). Keys have no
+            // runtime backing at all — beliefs, gradual like Block shapes: only a
+            // definite key conflict (`Integer` vs `String`) fails.
+            (Type::MapOf(ak, av), Type::MapOf(ek, ev)) => {
+                let keys_ok = ak == ek || **ak == Type::Any || **ek == Type::Any;
+                let values_ok = av == ev || **ev == Type::Any;
+                keys_ok && values_ok
+            }
             // Blocks: a shaped block IS a block (width) — and, unlike the
             // collections, a bare `Block` also satisfies any shape: shapes are
             // beliefs with no runtime backing (nothing checks at `value:`), so
@@ -169,7 +178,7 @@ impl Type {
             (Type::ListOf(_), Type::ListOf(_) | Type::List) | (Type::List, Type::ListOf(_)) => {
                 return Type::List;
             }
-            (Type::MapOf(_), Type::MapOf(_) | Type::Map) | (Type::Map, Type::MapOf(_)) => {
+            (Type::MapOf(_, _), Type::MapOf(_, _) | Type::Map) | (Type::Map, Type::MapOf(_, _)) => {
                 return Type::Map;
             }
             (Type::SetOf(_), Type::SetOf(_) | Type::Set) | (Type::Set, Type::SetOf(_)) => {
@@ -264,7 +273,7 @@ impl Type {
             return match (base, args.len()) {
                 ("List", 1) => Type::ListOf(arg_ty(0)),
                 ("Set", 1) => Type::SetOf(arg_ty(0)),
-                ("Map", 2) => Type::MapOf(arg_ty(1)),
+                ("Map", 2) => Type::MapOf(arg_ty(0), arg_ty(1)),
                 _ => Type::from_annotation_name(base),
             };
         }
@@ -278,9 +287,8 @@ impl Type {
     pub fn contains_var(&self) -> bool {
         match self {
             Type::Var(_) => true,
-            Type::Nullable(t) | Type::ListOf(t) | Type::MapOf(t) | Type::SetOf(t) => {
-                t.contains_var()
-            }
+            Type::Nullable(t) | Type::ListOf(t) | Type::SetOf(t) => t.contains_var(),
+            Type::MapOf(k, v) => k.contains_var() || v.contains_var(),
             Type::BlockOf { params, ret } => {
                 params.iter().any(|p| p.contains_var()) || ret.contains_var()
             }
@@ -301,7 +309,10 @@ impl Type {
                 inner => Type::Nullable(Box::new(inner)),
             },
             Type::ListOf(t) => Type::ListOf(Box::new(t.substitute_bound(bindings))),
-            Type::MapOf(t) => Type::MapOf(Box::new(t.substitute_bound(bindings))),
+            Type::MapOf(k, v) => Type::MapOf(
+                Box::new(k.substitute_bound(bindings)),
+                Box::new(v.substitute_bound(bindings)),
+            ),
             Type::SetOf(t) => Type::SetOf(Box::new(t.substitute_bound(bindings))),
             Type::BlockOf { params, ret } => Type::BlockOf {
                 params: params
@@ -326,7 +337,10 @@ impl Type {
                 inner => Type::Nullable(Box::new(inner)),
             },
             Type::ListOf(t) => Type::ListOf(Box::new(t.substitute(bindings))),
-            Type::MapOf(t) => Type::MapOf(Box::new(t.substitute(bindings))),
+            Type::MapOf(k, v) => Type::MapOf(
+                Box::new(k.substitute(bindings)),
+                Box::new(v.substitute(bindings)),
+            ),
             Type::SetOf(t) => Type::SetOf(Box::new(t.substitute(bindings))),
             Type::BlockOf { params, ret } => Type::BlockOf {
                 params: params.iter().map(|p| p.substitute(bindings)).collect(),
@@ -356,9 +370,13 @@ impl Type {
                     bindings.insert(n.clone(), Type::Any);
                 }
             },
-            (Type::ListOf(d), Type::ListOf(a))
-            | (Type::MapOf(d), Type::MapOf(a))
-            | (Type::SetOf(d), Type::SetOf(a)) => Self::unify_into(d, a, bindings),
+            (Type::ListOf(d), Type::ListOf(a)) | (Type::SetOf(d), Type::SetOf(a)) => {
+                Self::unify_into(d, a, bindings)
+            }
+            (Type::MapOf(dk, dv), Type::MapOf(ak, av)) => {
+                Self::unify_into(dk, ak, bindings);
+                Self::unify_into(dv, av, bindings);
+            }
             // Block shapes: zip params positionally (an arity mismatch binds
             // only the shared prefix — gradual, never an error) + the return.
             (
@@ -395,7 +413,7 @@ impl Type {
             Type::Set => "Set".to_string(),
             Type::Block => "Block".to_string(),
             Type::ListOf(t) => format!("List({})", t.name()),
-            Type::MapOf(v) => format!("Map(String {})", v.name()),
+            Type::MapOf(k, v) => format!("Map({} {})", k.name(), v.name()),
             Type::SetOf(t) => format!("Set({})", t.name()),
             Type::BlockOf { params, ret } => {
                 let params: Vec<String> = params.iter().map(|p| p.name()).collect();

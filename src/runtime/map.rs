@@ -479,7 +479,7 @@ pub fn build_map_class() -> NativeClassBuilder {
             let value = map_get_any(vm, mc, receiver, args[0])?;
             Ok(value.unwrap_or_else(|| vm.new_nil(mc)))
         })
-        .returns("V?") // value-typed read on a Map(String V) receiver
+        .returns("V?") // value-typed read on a Map(K V) receiver
         .doc(
             "The value stored under a key, or nil when the key is absent (use `containsKey?:` \
              to tell the two apart).\n\n\
@@ -602,7 +602,7 @@ pub fn build_map_class() -> NativeClassBuilder {
             }
             Ok(v)
         })
-        .returns("Map(String V)") // emptyLike: same shape, same tag, empty
+        .returns("Map(K V)") // emptyLike: same shape, same tag, empty
         .doc(
             "A fresh empty map like the receiver — value tag included. The species hook the \
              Iterate mixin uses, so transforms of a checked map stay checked.",
@@ -639,6 +639,7 @@ pub fn build_map_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_list(mc, keys_vec))
         })
+        .returns("List(K)") // static claim only: the built list carries no runtime tag
         .doc(
             "The keys as a List, in insertion order.\n\n\
              ```\n\
@@ -651,6 +652,7 @@ pub fn build_map_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_list(mc, values_vec))
         })
+        .returns("List(V)") // static claim only: the built list carries no runtime tag
         .doc(
             "The values as a List, in insertion order (index-aligned with `keys`).\n\n\
              ```\n\

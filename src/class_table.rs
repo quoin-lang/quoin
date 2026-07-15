@@ -77,11 +77,11 @@ impl ClassSig {
         let mut method_params = HashMap::new();
         let mut method_returns = HashMap::new();
         // The generic builtin collections' type parameters (GENERICS_ARCH.md
-        // §3.3): List(T)/Set(T) elements, Map(V) values (keys pinned String).
-        // Their native `.returns("T?")`-style declarations parse against these.
+        // §3.3): List(T)/Set(T) elements, Map(K V) keys and values. Their
+        // native `.returns("T?")`-style declarations parse against these.
         let type_params: Vec<Arc<str>> = match info.name.as_str() {
             "List" | "Set" => vec![Arc::from("T")],
-            "Map" => vec![Arc::from("V")],
+            "Map" => vec![Arc::from("K"), Arc::from("V")],
             _ => Vec::new(),
         };
         // A native method whose CHECKER signature can't ride its dispatch
