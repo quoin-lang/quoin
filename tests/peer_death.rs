@@ -271,7 +271,8 @@ var sub = svc.mate;
 var early = { svc.serviceRestart; 'no' }.catch:{ |e| 'refused-running' };
 (early == 'refused-running').else:{ ok = false; 'e3'.print };
 var pid = ((VM.ps.at:'workers').at:0).at:'pid';
-[IO]File.write:pid.s to:'@pidfile@';
+[IO]File.write:pid.s to:'@pidfile@.tmp';
+[IO]File.rename:'@pidfile@.tmp' to:'@pidfile@';
 var t1 = { svc.sleepLong }.catch:{ |e:PeerDiedError| 'died' };
 (t1 == 'died').else:{ ok = false; 'e4'.print };
 svc.serviceRestart;
@@ -305,7 +306,8 @@ fn restart_window_parks_senders_into_the_new_incarnation() {
     let script = r#"
 var svc = Worker.host:'@kaboom.qn@' with:{ Kaboom.new } backing:'process';
 var pid = ((VM.ps.at:'workers').at:0).at:'pid';
-[IO]File.write:pid.s to:'@pidfile@';
+[IO]File.write:pid.s to:'@pidfile@.tmp';
+[IO]File.rename:'@pidfile@.tmp' to:'@pidfile@';
 var t1 = { svc.sleepLong }.catch:{ |e:PeerDiedError| 'died' };
 var results = Async.gather:#(
     { svc.serviceRestart; 'restarted' }
@@ -336,7 +338,8 @@ var svc = Worker.host:'@twoclass.qn@'
 var ok = true;
 (svc.ping == 'a').else:{ ok = false; 'e1'.print };
 var pid = ((VM.ps.at:'workers').at:0).at:'pid';
-[IO]File.write:pid.s to:'@pidfile@';
+[IO]File.write:pid.s to:'@pidfile@.tmp';
+[IO]File.rename:'@pidfile@.tmp' to:'@pidfile@';
 var t1 = { svc.sleepLong }.catch:{ |e:PeerDiedError| 'died' };
 (t1 == 'died').else:{ ok = false; 'e2'.print };
 [IO]File.write:'x' to:marker;
@@ -374,7 +377,8 @@ var ok = true;
 (svc.poke == 'ok').else:{ ok = false; 'e1'.print };
 (pipe.receive == 'hi').else:{ ok = false; 'e2'.print };
 var pid = ((VM.ps.at:'workers').at:0).at:'pid';
-[IO]File.write:pid.s to:'@pidfile@';
+[IO]File.write:pid.s to:'@pidfile@.tmp';
+[IO]File.rename:'@pidfile@.tmp' to:'@pidfile@';
 var t1 = { svc.sleepLong }.catch:{ |e:PeerDiedError| 'died' };
 (t1 == 'died').else:{ ok = false; 'e3'.print };
 svc.serviceRestart;
@@ -437,7 +441,8 @@ var v = Vector.ofFloats:#( 1.0 2.0 );
 (v.sum == 3).else:{{ ok = false; 'e1'.print }};
 var pid = nil;
 VM.peers.each:{{ |p| ((p.at:'kind') == 'extension').if:{{ pid = p.at:'pid' }} }};
-[IO]File.write:pid.s to:'@pidfile@';
+[IO]File.write:pid.s to:'@pidfile@.tmp';
+[IO]File.rename:'@pidfile@.tmp' to:'@pidfile@';
 var ev = e.events;
 ev.receive;
 ((ev.receive.at:'kind') == 'died').else:{{ ok = false; 'e2'.print }};
