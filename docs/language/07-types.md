@@ -78,7 +78,8 @@ nullable data) and leave exploratory code bare.
 >   part of the identifier, so `Integer ?` is not a type.
 > - **Generics**: `Class(args)`, space-separated — `List(Integer)`,
 >   `Map(String Integer)`, `Set(String)`, nesting allowed. Only `List`/`Map`/`Set`
->   take type arguments today; Map keys are pinned to `String` (§33).
+>   take type arguments today. `Map(K V)` takes any key type: `V` is
+>   runtime-checked like other element tags, `K` is checker-only (§33).
 > - **Block types**: `Block(args ^Ret)` — a block's type is its header with the
 >   names stripped. `Block()` is zero-arg, bare `Block` is fully unconstrained.
 > - **Type variables** are declared on the class header — `Stack(T) <- { … }` —
@@ -92,7 +93,7 @@ nullable data) and leave exploratory code bare.
 var count: Integer = 0                            "* typed local
 var title: String? = nil                          "* nullable: String or nil
 var xs: List(Integer) = #(1 2 3)                  "* checked collection (§33)
-var index: Map(String Integer) = #{ 'ada': 1 }    "* value type Integer; keys are String
+var index: Map(String Integer) = #{ 'ada': 1 }    "* keys String, values Integer
 var pred: Block(Integer ^Boolean) = { |n| n > 0 } "* a block type
 pred.value:3                                      "* -> true
 ```
@@ -239,10 +240,10 @@ A trailing `allow:` comment silences exactly that warning kind, exactly there:
 ```
 
 The kind name is the warning's family — `nil-receiver`, `caret-discard`, `mnu`,
-`no-variant`, `element-type`, `type-mismatch`, `return-type`, `unknown-type`,
-`annotation`, `portability` (a block shipped to a worker whose shape can never
-cross — see chapter 5's portable-block rules) — and several can be listed,
-separated by commas. A parenthesized
+`no-variant`, `element-type`, `key-type` (an off-`K` key on a `Map(K V)`, §33),
+`type-mismatch`, `return-type`, `unknown-type`, `annotation`, `portability`
+(a block shipped to a worker whose shape can never cross — see chapter 5's
+portable-block rules) — and several can be listed, separated by commas. A parenthesized
 rationale is encouraged and ignored by the parser. Three rules keep suppressions
 honest: the pragma must **trail** the warned line (on a line of its own it would
 be captured as a doc comment, so that placement warns instead of silently doing
@@ -419,7 +420,7 @@ inspection of the current contents.
 >   and match only bare `List`/`Map`/`Set` types.
 > - Three ways to construct a tagged collection:
 >   1. `List.of:Integer` / `Map.of:Integer` / `Set.of:String` — empty, tagged
->      (`Map.of:` tags the **values**; keys are always `String`).
+>      (`Map.of:` tags the **values**; keys stay unrestricted).
 >   2. An annotated declaration whose initializer is a literal:
 >      `var xs: List(Integer) = #(1 2 3)` — tags and checks the elements.
 >   3. `coll.ensure:Integer` — verifies every current element and returns a **new**
@@ -428,6 +429,12 @@ inspection of the current contents.
 > - `coll.elementType` → the tag as a Symbol (`#Integer`), or `nil` when untagged.
 > - `nil` elements are always allowed — a tag constrains what a *present* element
 >   is, so reads are honestly `T?` (§31).
+> - `Map(K V)` checks **both positions statically**, but only values at runtime.
+>   An off-`K` key in a literal, `at:`, `at:put:`, `containsKey?:`, or `remove:`
+>   warns (kind `key-type`): a lookup with such a key is never present; a write
+>   breaks the annotation. `m.keys` types as `List(K)`, `m.values` as `List(V)`.
+>   Keys carry **no runtime tag** — the key annotation is a checker belief, never
+>   a `TypeError` source (any value can key a Map, §3).
 > - Element-preserving combinators (`select:`, `reject:`, `take:`, `drop:`,
 >   `reverse`, `uniq`, `sort`, slices, set algebra) **keep the tag**. `collect:`
 >   returns **untagged** — its elements are whatever the block produced; chain

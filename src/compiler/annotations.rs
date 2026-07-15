@@ -75,7 +75,10 @@ pub(crate) fn type_from_ref_with_vars(tr: &TypeRefNode, vars: &[String]) -> Type
     match (base.as_str(), tr.args.len()) {
         ("List", 1) => Type::ListOf(Box::new(type_from_ref_with_vars(&tr.args[0], vars))),
         ("Set", 1) => Type::SetOf(Box::new(type_from_ref_with_vars(&tr.args[0], vars))),
-        ("Map", 2) => Type::MapOf(Box::new(type_from_ref_with_vars(&tr.args[1], vars))),
+        ("Map", 2) => Type::MapOf(
+            Box::new(type_from_ref_with_vars(&tr.args[0], vars)),
+            Box::new(type_from_ref_with_vars(&tr.args[1], vars)),
+        ),
         _ => Type::from_annotation_name(&base),
     }
 }
@@ -116,21 +119,7 @@ impl Compiler {
             match (base.as_str(), tr.args.len()) {
                 // Any arity, zero included (`Block()` = no args, `Any` return).
                 ("Block", _) => {}
-                ("List", 1) | ("Set", 1) => {}
-                ("Map", 2) => {
-                    let key = annotation_name(&tr.args[0]);
-                    if key != "String" {
-                        self.warn(
-                            "annotation",
-                            format!(
-                                "Map keys are String (got `Map({} …)`); only the value \
-                                 type is generic for now",
-                                key
-                            ),
-                            tr.ident.source_info.as_ref(),
-                        );
-                    }
-                }
+                ("List", 1) | ("Set", 1) | ("Map", 2) => {}
                 ("List", n) | ("Set", n) => {
                     self.warn(
                         "annotation",
@@ -141,7 +130,7 @@ impl Compiler {
                 ("Map", n) => {
                     self.warn(
                         "annotation",
-                        format!("`Map` takes 2 type arguments (`Map(String V)`), got {n}"),
+                        format!("`Map` takes 2 type arguments (`Map(K V)`), got {n}"),
                         tr.ident.source_info.as_ref(),
                     );
                 }
@@ -216,7 +205,7 @@ impl Compiler {
         matches!(
             (expected, &rvalue.value),
             (Type::ListOf(_), NodeValue::List(_))
-                | (Type::MapOf(_), NodeValue::Map(_))
+                | (Type::MapOf(_, _), NodeValue::Map(_))
                 | (Type::SetOf(_), NodeValue::Set(_))
         )
     }
@@ -233,7 +222,7 @@ impl Compiler {
             None => {
                 let base = match inner {
                     Type::ListOf(_) => Some(ElemTag::List),
-                    Type::MapOf(_) => Some(ElemTag::Map),
+                    Type::MapOf(_, _) => Some(ElemTag::Map),
                     Type::SetOf(_) => Some(ElemTag::Set),
                     _ => None, // Var/Any/…: checker-only, no tag
                 };
@@ -271,7 +260,7 @@ impl Compiler {
             None => {
                 let base = match t {
                     Type::ListOf(_) => Some(ElemTag::List),
-                    Type::MapOf(_) => Some(ElemTag::Map),
+                    Type::MapOf(_, _) => Some(ElemTag::Map),
                     Type::SetOf(_) => Some(ElemTag::Set),
                     _ => None,
                 };

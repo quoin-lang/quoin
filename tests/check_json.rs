@@ -90,8 +90,9 @@ fn clean_file_emits_empty_diagnostics_and_exit_zero() {
 
 #[test]
 fn blocks_carry_the_portability_classification() {
-    let src =
-        "var n = 3\nvar a = { n * 2 }\nvar m = #{}\nvar u = { m.at:'k' }\nvar w = { n = 4 }\n";
+    let src = "var n = 3\nvar a = { n * 2 }\nvar m = #{}\nvar u = { m.at:'k' }\nvar w = { n = 4 }\n\
+               var sm: Map(String Integer) = #{'a': 1}\nvar p = { sm.count }\n\
+               var im: Map(Integer String) = #{1: 'x'}\nvar q = { im.count }\n";
     let f = fixture("blocks", src);
     let (out, json) = check_json(&[&f]);
     assert_eq!(
@@ -100,7 +101,7 @@ fn blocks_carry_the_portability_classification() {
         "classification is not a finding"
     );
     let blocks = json["blocks"].as_array().expect("a blocks array");
-    assert_eq!(blocks.len(), 3, "{json:#?}");
+    assert_eq!(blocks.len(), 5, "{json:#?}");
     assert_eq!(blocks[0]["state"], "portable");
     assert!(blocks[0]["line"].is_u64() && blocks[0]["start"].is_u64());
     assert_eq!(blocks[1]["state"], "conditional");
@@ -111,6 +112,17 @@ fn blocks_carry_the_portability_classification() {
             .as_str()
             .unwrap()
             .contains("writes captured binding"),
+        "{json:#?}"
+    );
+    // Typed Map captures: String keys ship on the String-keyed wire; a
+    // declared non-String key type can never cross.
+    assert_eq!(blocks[3]["state"], "portable", "{json:#?}");
+    assert_eq!(blocks[4]["state"], "non-portable");
+    assert!(
+        blocks[4]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Map with non-String keys"),
         "{json:#?}"
     );
 }

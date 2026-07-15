@@ -26,7 +26,7 @@ fn gallery_warnings_match_reality() {
 
     // The full census: a NEW warning is a false positive, a LOST one is a regressed check.
     let count = stderr.lines().filter(|l| l.contains(": warning:")).count();
-    assert_eq!(count, 30, "gallery warning count drifted\n{stderr}");
+    assert_eq!(count, 33, "gallery warning count drifted\n{stderr}");
 
     // The historically drift-prone checks, by message.
     for needle in [
@@ -40,6 +40,8 @@ fn gallery_warnings_match_reality() {
         "does not respond to `nopeMethod`",
         // portability: a shipped block literal whose shape can never cross.
         "crosses an isolate boundary (Worker.with:) but is not portable",
+        // key-type: an off-K key on a typed Map is a checker-only belief break.
+        "`Map(Integer String)` declares `Integer` keys",
         // return-type covariance.
         "override of `defined?` returns `String`",
         // the `allow:` pragma polices itself: a typo'd kind…

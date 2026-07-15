@@ -257,7 +257,7 @@ impl Compiler {
             Type::Double => Some("Double".to_string()),
             Type::String => Some("String".to_string()),
             Type::List | Type::ListOf(_) => Some("List".to_string()),
-            Type::Map | Type::MapOf(_) => Some("Map".to_string()),
+            Type::Map | Type::MapOf(_, _) => Some("Map".to_string()),
             Type::Set | Type::SetOf(_) => Some("Set".to_string()),
             _ => None,
         }
@@ -332,39 +332,66 @@ impl Compiler {
     /// enforces on inserts — instead of letting the literal's bare `List` static type trip
     /// the width rule (a bare collection never satisfies a checked one, but THIS literal is
     /// constructed into the checked position, tagged on the decl path). Map literals check
-    /// their values (keys are pinned String). Nil elements pass, matching the insert check.
+    /// values against `V` (tag-backed) and keys against `K` (checker-only — the runtime
+    /// accepts any key, so a key mismatch is a broken belief, not a future TypeError).
+    /// Nil elements pass, matching the insert check.
     pub(super) fn check_literal_elements(&mut self, node: &Node, expected: &Type) {
-        let (elem, items): (Type, Vec<&Arc<Node>>) = match (expected, &node.value) {
-            (Type::ListOf(t), NodeValue::List(l)) => ((**t).clone(), l.values.iter().collect()),
-            (Type::SetOf(t), NodeValue::Set(s)) => ((**t).clone(), s.values.iter().collect()),
-            (Type::MapOf(t), NodeValue::Map(m)) => ((**t).clone(), m.values.iter().collect()),
+        let checks: Vec<(Type, Vec<&Arc<Node>>, bool)> = match (expected, &node.value) {
+            (Type::ListOf(t), NodeValue::List(l)) => {
+                vec![((**t).clone(), l.values.iter().collect(), false)]
+            }
+            (Type::SetOf(t), NodeValue::Set(s)) => {
+                vec![((**t).clone(), s.values.iter().collect(), false)]
+            }
+            (Type::MapOf(k, v), NodeValue::Map(m)) => vec![
+                ((**k).clone(), m.keys.iter().collect(), true),
+                ((**v).clone(), m.values.iter().collect(), false),
+            ],
             _ => return,
         };
-        if elem.contains_var() {
-            return;
-        }
-        let allowed = Type::Nullable(Box::new(elem));
-        for item in items {
-            let actual = self.static_type(item);
-            if actual.compatible_with(&allowed) {
+        for (elem, items, is_key) in checks {
+            if elem.contains_var() || elem == Type::Any {
                 continue;
             }
-            // Instance subtyping may rescue (a Circle literal element into List(Shape)).
-            if let (Type::Instance(sub), Type::Nullable(sup)) = (&actual, &allowed)
-                && let Type::Instance(sup) = sup.as_ref()
-                && self.class_table.is_subtype(sub, sup) != Some(false)
-            {
-                continue;
+            let allowed = Type::Nullable(Box::new(elem.clone()));
+            for item in items {
+                let actual = self.static_type(item);
+                if actual.compatible_with(&allowed) {
+                    continue;
+                }
+                // Instance subtyping may rescue (a Circle literal element into List(Shape)).
+                if let (Type::Instance(sub), Type::Instance(sup)) = (&actual, &elem)
+                    && self.class_table.is_subtype(sub, sup) != Some(false)
+                {
+                    continue;
+                }
+                let (kind, message) = if is_key {
+                    (
+                        "key-type",
+                        format!(
+                            "`{}` declares `{}` keys — this `{}` key breaks the annotation \
+                             (keys are checker-only, never runtime-checked)",
+                            expected.name(),
+                            elem.name(),
+                            actual.name(),
+                        ),
+                    )
+                } else {
+                    (
+                        "element-type",
+                        format!(
+                            "`{}` rejects a `{}` element — this raises a TypeError at runtime",
+                            expected.name(),
+                            actual.name(),
+                        ),
+                    )
+                };
+                self.warn(
+                    kind,
+                    message,
+                    item.source_info.as_ref().or(node.source_info.as_ref()),
+                );
             }
-            self.warn(
-                "element-type",
-                format!(
-                    "`{}` rejects a `{}` element — this raises a TypeError at runtime",
-                    expected.name(),
-                    actual.name(),
-                ),
-                item.source_info.as_ref().or(node.source_info.as_ref()),
-            );
         }
     }
 
@@ -418,12 +445,12 @@ impl Compiler {
     pub(super) fn receiver_bound_param_types(&self, call: &MethodCallNode) -> Option<Vec<Type>> {
         let subject = call.subject.as_ref()?;
         let recv_t = self.static_type(subject);
-        let (class_name, recv_elem) = match &recv_t {
+        let (class_name, recv_args) = match &recv_t {
             Type::Any | Type::Never | Type::Nullable(_) => return None,
-            Type::ListOf(e) => ("List".to_string(), Some((**e).clone())),
-            Type::MapOf(e) => ("Map".to_string(), Some((**e).clone())),
-            Type::SetOf(e) => ("Set".to_string(), Some((**e).clone())),
-            concrete => (concrete.name(), None),
+            Type::ListOf(e) => ("List".to_string(), vec![(**e).clone()]),
+            Type::MapOf(k, v) => ("Map".to_string(), vec![(**k).clone(), (**v).clone()]),
+            Type::SetOf(e) => ("Set".to_string(), vec![(**e).clone()]),
+            concrete => (concrete.name(), Vec::new()),
         };
         let selector = Self::reconstruct_send_selector(call)?;
         let (params, defining) = self
@@ -437,9 +464,11 @@ impl Compiler {
             std::collections::HashMap::new();
         // The same Map nuance as `typed_receiver_return_type`: a Map's iteration
         // element is a key/value pair, so a MapOf receiver binds only Map's own methods.
-        let elem_binds = !(matches!(recv_t, Type::MapOf(_)) && defining.as_ref() != "Map");
-        if let (true, Some(elem), Some(p0)) = (elem_binds, recv_elem, def_params.first()) {
-            bindings.insert(p0.clone(), elem);
+        let elem_binds = !(matches!(recv_t, Type::MapOf(..)) && defining.as_ref() != "Map");
+        if elem_binds {
+            for (p, a) in def_params.iter().zip(recv_args) {
+                bindings.insert(p.clone(), a);
+            }
         }
         Some(
             params
@@ -598,39 +627,68 @@ impl Compiler {
             return;
         };
         let recv_t = self.static_type(subject);
-        let (elem, arg_idx) = match (&recv_t, selector.as_str()) {
-            (Type::ListOf(e), "add:" | "push:") => ((**e).clone(), 0),
-            (Type::ListOf(e), "at:put:") => ((**e).clone(), 1),
-            (Type::SetOf(e), "add:") => ((**e).clone(), 0),
-            (Type::MapOf(e), "at:put:") => ((**e).clone(), 1),
+        // (expected type, argument position, key side?) — a Map send can check
+        // both: `at:put:` has a key AND a value position.
+        let checks: Vec<(Type, usize, bool)> = match (&recv_t, selector.as_str()) {
+            (Type::ListOf(e), "add:" | "push:") => vec![((**e).clone(), 0, false)],
+            (Type::ListOf(e), "at:put:") => vec![((**e).clone(), 1, false)],
+            (Type::SetOf(e), "add:") => vec![((**e).clone(), 0, false)],
+            (Type::MapOf(k, v), "at:put:") => {
+                vec![((**k).clone(), 0, true), ((**v).clone(), 1, false)]
+            }
+            (Type::MapOf(k, _), "at:" | "containsKey?:" | "remove:") => {
+                vec![((**k).clone(), 0, true)]
+            }
             _ => return,
         };
-        if elem.contains_var() {
-            return;
+        for (elem, arg_idx, is_key) in checks {
+            if elem.contains_var() || elem == Type::Any {
+                continue;
+            }
+            let Some(arg) = call.arguments.expressions.get(arg_idx) else {
+                continue;
+            };
+            let actual = self.static_type(arg);
+            let allowed = Type::Nullable(Box::new(elem.clone()));
+            if actual.compatible_with(&allowed) {
+                continue;
+            }
+            // Instance subtyping may rescue (a Circle into List(Shape)).
+            if let (Type::Instance(sub), Type::Instance(sup)) = (&actual, &elem)
+                && self.class_table.is_subtype(sub, sup) != Some(false)
+            {
+                continue;
+            }
+            let (kind, message) = if is_key {
+                // Keys have no runtime tag: a lookup with an off-type key answers
+                // nil/false (never present); a write breaks the declared belief.
+                let consequence = if selector == "at:put:" {
+                    "breaks the annotation (keys are checker-only, never runtime-checked)"
+                } else {
+                    "is never present"
+                };
+                (
+                    "key-type",
+                    format!(
+                        "`{}` declares `{}` keys — a `{}` key {}",
+                        recv_t.name(),
+                        elem.name(),
+                        actual.name(),
+                        consequence,
+                    ),
+                )
+            } else {
+                (
+                    "element-type",
+                    format!(
+                        "`{}` rejects a `{}` element — this raises a TypeError at runtime",
+                        recv_t.name(),
+                        actual.name(),
+                    ),
+                )
+            };
+            self.warn(kind, message, arg.source_info.as_ref());
         }
-        let Some(arg) = call.arguments.expressions.get(arg_idx) else {
-            return;
-        };
-        let actual = self.static_type(arg);
-        let allowed = Type::Nullable(Box::new(elem.clone()));
-        if actual.compatible_with(&allowed) {
-            return;
-        }
-        // Instance subtyping may rescue (a Circle into List(Shape)).
-        if let (Type::Instance(sub), Type::Instance(sup)) = (&actual, &elem)
-            && self.class_table.is_subtype(sub, sup) != Some(false)
-        {
-            return;
-        }
-        self.warn(
-            "element-type",
-            format!(
-                "`{}` rejects a `{}` element — this raises a TypeError at runtime",
-                recv_t.name(),
-                actual.name(),
-            ),
-            arg.source_info.as_ref(),
-        );
     }
 
     /// Phase 3c: warn on a non-nil-safe send to a receiver whose current (narrowed) type is
@@ -834,12 +892,12 @@ impl Compiler {
         // nil-misuse check's concern, not typed here. A checked collection looks up under its BASE
         // class and carries its element type into type-variable binding (GENERICS_ARCH.md §4.4).
         let recv_t = self.static_type(subject);
-        let (class_name, recv_elem) = match &recv_t {
+        let (class_name, recv_args) = match &recv_t {
             Type::Any | Type::Never | Type::Nullable(_) => return Type::Any,
-            Type::ListOf(e) => ("List".to_string(), Some((**e).clone())),
-            Type::MapOf(e) => ("Map".to_string(), Some((**e).clone())),
-            Type::SetOf(e) => ("Set".to_string(), Some((**e).clone())),
-            concrete => (concrete.name(), None),
+            Type::ListOf(e) => ("List".to_string(), vec![(**e).clone()]),
+            Type::MapOf(k, v) => ("Map".to_string(), vec![(**k).clone(), (**v).clone()]),
+            Type::SetOf(e) => ("Set".to_string(), vec![(**e).clone()]),
+            concrete => (concrete.name(), Vec::new()),
         };
         let Some(selector) = Self::reconstruct_send_selector(call) else {
             return Type::Any;
@@ -861,11 +919,13 @@ impl Compiler {
             std::collections::HashMap::new();
         // A Map's tag is its VALUE type, but its ITERATION element is a
         // key/value pair — so a MapOf receiver binds only methods Map itself
-        // defines (`at:` → V?); an inherited/mixin method (Iterate's
-        // combinators) must not claim the value type for pair elements.
-        let elem_binds = !(matches!(recv_t, Type::MapOf(_)) && defining.as_ref() != "Map");
-        if let (true, Some(elem), Some(p0)) = (elem_binds, recv_elem, def_params.first()) {
-            bindings.insert(p0.clone(), elem);
+        // defines (`at:` → V?, `keys` → List(K)); an inherited/mixin method
+        // (Iterate's combinators) must not claim key/value types for pair elements.
+        let elem_binds = !(matches!(recv_t, Type::MapOf(..)) && defining.as_ref() != "Map");
+        if elem_binds {
+            for (p, a) in def_params.iter().zip(recv_args) {
+                bindings.insert(p.clone(), a);
+            }
         }
         if let Some(decl_params) = self.class_table.own_method_params_of(&defining, &selector) {
             let args = &call.arguments.expressions;
@@ -881,7 +941,7 @@ impl Compiler {
     fn normalize_any_elems(t: Type) -> Type {
         match t {
             Type::ListOf(e) if *e == Type::Any => Type::List,
-            Type::MapOf(e) if *e == Type::Any => Type::Map,
+            Type::MapOf(k, v) if *k == Type::Any && *v == Type::Any => Type::Map,
             Type::SetOf(e) if *e == Type::Any => Type::Set,
             Type::Nullable(inner) => match Self::normalize_any_elems(*inner) {
                 Type::Any => Type::Any,
@@ -925,14 +985,15 @@ impl Compiler {
             // `xs.ensure:X` — the receiver is a collection value.
             match self.static_type(subject) {
                 Type::List | Type::ListOf(_) => "List".to_string(),
-                Type::Map | Type::MapOf(_) => "Map".to_string(),
+                Type::Map | Type::MapOf(_, _) => "Map".to_string(),
                 Type::Set | Type::SetOf(_) => "Set".to_string(),
                 _ => return Type::Any,
             }
         };
         match base.as_str() {
             "List" => Type::ListOf(Box::new(elem)),
-            "Map" => Type::MapOf(Box::new(elem)),
+            // `Map.of:X` tags the VALUE type; keys stay an open belief.
+            "Map" => Type::MapOf(Box::new(Type::Any), Box::new(elem)),
             "Set" => Type::SetOf(Box::new(elem)),
             _ => Type::Any,
         }

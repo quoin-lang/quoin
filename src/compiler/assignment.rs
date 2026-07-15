@@ -136,7 +136,9 @@ impl Compiler {
                 // below stays as the enforcement backstop for the rest.
                 self.check_literal_elements(&decl.rvalue, expected);
                 let inner = match expected {
-                    Type::ListOf(t) | Type::MapOf(t) | Type::SetOf(t) => t,
+                    Type::ListOf(t) | Type::SetOf(t) => t,
+                    // The runtime tag is the VALUE type; `K` is checker-only.
+                    Type::MapOf(_, v) => v,
                     _ => unreachable!("gated by generic_literal_decl"),
                 };
                 if let Some(tag) = self.enforceable_elem_tag_of_type(inner, decl) {
@@ -181,7 +183,7 @@ impl Compiler {
                         | Type::List
                         | Type::Map
                         | Type::ListOf(_)
-                        | Type::MapOf(_) => true,
+                        | Type::MapOf(_, _) => true,
                         // `Bool` is excluded even though `if:else:` inlines it — that inline has no
                         // runtime fallback, so a stale `Bool` hint would be unsound. `Set` has no
                         // devirt op (its `contains?:`/`add:` dispatch `==:` per element).

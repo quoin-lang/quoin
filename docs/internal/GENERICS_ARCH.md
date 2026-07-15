@@ -99,7 +99,7 @@ answer (§7). Sieve then compiles with no new AOT machinery.
   `select:`, `flatten`, `zip:`, `partition:`, `reverse`, `groupBy:`, set
   algebra, …) builds through those natives — **instrumenting three
   selectors covers the whole derived surface for free**. Map has one write
-  (`at:put:`, String keys only); Set has `add:`/`remove:` (which already
+  (`at:put:`, value-checked); Set has `add:`/`remove:` (which already
   dispatch `==:` per element, so a tag check is cheap by comparison).
 - **`Array` is precedent, not substrate.** `Array` (ofInts:/ofFloats:) is
   a packed numeric column that already does insertion-time `TypeError`s
@@ -155,11 +155,18 @@ parse and exist in the checker's lattice, but are not runtime-enforceable
 in v1** — the resolver warns and the runtime tag degrades to the base
 (`List`); no false guarantee is ever recorded (§8, "guarantee honesty").
 
-`Map(K V)`: the settled syntax takes two parameters; keys are String-only
-at the representation level (`IndexMap<String, _>`), so v1 accepts
-`Map(String V)` and rejects any other key type at resolve time with a
-clear diagnostic. `Set(T)` works like `List(T)` (its `==:`-based
-membership walk is untouched).
+`Map(K V)`: the settled syntax takes two parameters. v1 pinned keys to
+String (the store was `IndexMap<String, _>` then) and rejected any other
+key type at resolve time; the any-value-key rebuild (the hash-ladder map
+store) retired that pin. Both parameters now resolve: `V` stays the
+runtime-tagged value type (unchanged enforcement), and `K` is a
+**checker-only belief** — the runtime accepts any key, so key claims are
+gradual (like Block shapes, §11.2): the checker warns on a definite
+off-`K` key at `at:`/`at:put:`/`containsKey?:`/`remove:` and in literal
+keys, `keys` answers `List(K)`, and nothing is ever tag-enforced. Runtime
+key tags (and a key-side `Map.of:` surface) remain a separately-motivated
+later pass. `Set(T)` works like `List(T)` (its `==:`-based membership
+walk is untouched).
 
 ## 4. Syntax and construction
 
@@ -182,9 +189,10 @@ The AST grows a real type shape — `TypeRefNode { base: IdentifierNode,
 args: Vec<TypeRefNode> }` — replacing the flat `Arc<IdentifierNode>` in
 the four `type_hint`/`return_type` slots. `annotation_name` renders it
 back (`"List(Integer)"`); the `Type` lattice gains `ListOf(Box<Type>)`,
-`MapOf(Box<Type>)` (value type; key pinned String), `SetOf(Box<Type>)`,
-recursing through `compatible_with`/`join`/`name` exactly as `Nullable`
-does today. Bare `List` remains the untagged/any-element type.
+`MapOf(Box<Type>, Box<Type>)` (key + value; the key half arrived with the
+key-generics pass), `SetOf(Box<Type>)`, recursing through
+`compatible_with`/`join`/`name` exactly as `Nullable` does today. Bare
+`List` remains the untagged/any-element type.
 (`Block(args ^Ret)` shares the grammar seam — built as G4, §11.)
 
 The IntelliJ plugin mirrors `type_ref` (Quoin.bnf:285) and needs the same
@@ -199,7 +207,7 @@ no inference magic:
    class as an ordinary Class value):
    ```
    var flags = List.of:Boolean;      "empty, tagged"
-   var index = Map.of:Integer;       "String keys implied"
+   var index = Map.of:Integer;       "value-tagged; keys unrestricted"
    var seen  = Set.of:String;
    ```
 2. **Annotation-driven literals**: a collection *literal* initializing a
@@ -213,7 +221,7 @@ no inference magic:
    in-place tagging: retagging an aliased list under someone else's feet
    is the kind of spooky action this design avoids). One generic
    selector across List/Map/Set — on a Map it ensures the *values*
-   (keys are pinned String). The name is verification-first ("this must
+   (keys carry no runtime tag). The name is verification-first ("this must
    be this type") rather than List-specialized; no relation to Ruby's
    `ensure` (Quoin's try/finally is already `finally:`).
 
@@ -437,8 +445,9 @@ positives" tripwire as always.
   annotation positions AND class/mixin definition headers), the
   `TypeRefNode` AST shape, rendering, `ListOf`/`MapOf`/`SetOf` plus a
   `Var(name)` form in the lattice with `compatible_with`/`join`/`name`
-  recursion, resolver rules (`Map(String V)` key pinning, declared-vs-
-  unknown variable names, nested-generic warnings). No runtime change;
+  recursion, resolver rules (`Map(String V)` key pinning — since retired
+  by the key-generics pass, §3 — declared-vs-unknown variable names,
+  nested-generic warnings). No runtime change;
   `warnings.qn` gallery grows. Plugin grammar PR filed alongside.
 - **G1 — runtime tags + enforcement:** `ElemTag` on the three native
   states; checks at the six write sites (3 List, 1 Map, 2 Set);
@@ -463,8 +472,10 @@ positives" tripwire as always.
   `collect:`'s `U`), inferred iteration-block params, typed Block
   signatures on Iterate. Checker-only by §4.4's line.
 - **Later, explicitly out of scope:** nested generic enforcement,
-  non-String Map keys, generic user classes, unions, runtime block
-  enforcement (§12). Each gets its own pass when motivated.
+  runtime Map KEY tags (static `Map(K V)` key checking landed with the
+  key-generics pass, §3 — enforcement and a key-side `Map.of:` did not),
+  generic user classes, unions, runtime block enforcement (§12). Each
+  gets its own pass when motivated.
 
 ## 10. Open questions (settled ones recorded)
 

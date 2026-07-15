@@ -72,9 +72,10 @@ struct ClassCtx {
 /// one breaks existing suppressions.
 pub const WARNING_KINDS: &[&str] = &[
     "allow-pragma", // a malformed `allow:` pragma itself (unknown kind, no kind, not trailing)
-    "annotation",   // type-annotation shape: generic arity, Map keys, checker-only nesting…
+    "annotation",   // type-annotation shape: generic arity, checker-only nesting…
     "caret-discard", // `^` ends a discarded `if:`/`else:` arm — control falls through
     "element-type", // a typed collection rejects an element (literal or insert)
+    "key-type",     // a `Map(K V)` key position gets an off-`K` key (checker-only belief)
     "mnu",          // the receiver's class does not respond to the selector
     "nil-receiver", // non-nil-safe send (or operator operand) on a maybe-nil value
     "no-variant",   // no multimethod variant accepts the argument types
