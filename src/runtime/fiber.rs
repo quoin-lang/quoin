@@ -5,8 +5,8 @@ use crate::fiber::run_vm_loop;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gc;
 use crate::value::{AnyCollect, NativeCall, NativeClassBuilder, Value};
+use crate::vm::scheduler::TaskId;
 use crate::vm::{AotTaskState, Frame};
-use crate::vm_scheduler::TaskId;
 
 use gc_arena::Gc;
 use gc_arena::collect::{DynCollect, Trace};

@@ -373,10 +373,11 @@ pub struct VmOptions {
     pub self_root: std::path::PathBuf,
 }
 
-// The scheduler / task / guest-fiber subsystem lives in `vm_scheduler.rs` (still
+// The scheduler / task / guest-fiber subsystem lives in `scheduler.rs` (still
 // intrinsically VM state); its public types are re-exported here so callers that
 // `use crate::vm::{Task, Wake, ...}` are unaffected by the move.
-pub use crate::vm_scheduler::{GatherState, Scheduler, Task, TaskId, Wake};
+pub mod scheduler;
+pub use scheduler::{GatherState, Scheduler, Task, TaskId, Wake};
 
 /// Which standard stream a write targets. Lets the output sink tag captured output with the
 /// matching DAP `output`-event category and route it instead of touching fd 1/2.
@@ -6744,5 +6745,4 @@ impl<'gc> VmState<'gc> {
 }
 
 #[cfg(test)]
-#[path = "vm_tests.rs"]
 mod tests;

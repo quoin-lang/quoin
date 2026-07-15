@@ -33,7 +33,7 @@ use crate::io_backend::{IoRequest, IoResult};
 use crate::runtime::extension::{value_to_wire, wire_to_value};
 use crate::value::{AnyCollect, Value};
 use crate::vm::VmState;
-use crate::vm_scheduler::{TaskId, Wake};
+use crate::vm::scheduler::{TaskId, Wake};
 use crate::worker::{ChanFrame, PendingChanOp};
 
 /// Remote-side endpoint state: which link the channel crossed on, its id in

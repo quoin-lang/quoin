@@ -78,7 +78,7 @@ use crate::runtime::worker::block_parts;
 use crate::symbol::Symbol;
 use crate::value::{AnyCollect, Value};
 use crate::vm::VmState;
-use crate::vm_scheduler::{TaskId, Wake};
+use crate::vm::scheduler::{TaskId, Wake};
 use crate::worker::{
     DispatchReq, OP_STOP, PortableBlock, note_message, rebuild_portable_value, snapshot_block,
     spawn_worker_service,
