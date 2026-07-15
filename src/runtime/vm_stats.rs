@@ -919,7 +919,7 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
             // The longest live wait-chain, across peers: a chain of length >1
             // is contention stacking up; a cycle would have raised already.
             let mut longest: Vec<String> = Vec::new();
-            for (&task, _) in waits.iter() {
+            for &task in waits.keys() {
                 let mut chain = Vec::new();
                 let mut current = Some(task);
                 let mut hops = 0;

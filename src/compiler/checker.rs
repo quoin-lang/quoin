@@ -241,14 +241,14 @@ impl Compiler {
     fn arg_check_receiver_class(&self, call: &MethodCallNode) -> Option<String> {
         let subject = call.subject.as_ref()?;
         let t = match &subject.value {
-            NodeValue::Identifier(id) => match NarrowKey::from_ident(id) {
-                Some(key) => self.narrowed_type(&key).or_else(|| match &key {
+            NodeValue::Identifier(id) => {
+                // `nil`/`true`/`false` receivers dispatch via eigenclasses; globals unknown.
+                let key = NarrowKey::from_ident(id)?;
+                self.narrowed_type(&key).or_else(|| match &key {
                     NarrowKey::Local(name) => self.declared_type(name),
                     NarrowKey::Field(_) => None,
-                })?,
-                // `nil`/`true`/`false` receivers dispatch via eigenclasses; globals unknown.
-                None => return None,
-            },
+                })?
+            }
             _ => self.static_type(subject),
         };
         match t {
