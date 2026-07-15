@@ -788,6 +788,11 @@ pub struct VmState<'gc> {
     /// second `events` ask answers the SAME channel (one consumer stream per
     /// peer). `None` until asked.
     pub life_channels: Vec<Option<Value<'gc>>>,
+    /// Channel values retained by service respawn recipes (SUPERVISION.md
+    /// slice 2): everything else in a recipe is plain data, but a channel arg
+    /// must be re-shipped as a VALUE at restart — this is its GC root. One
+    /// slot per recipe that has channel args, indexed by `ServiceRecipe`.
+    pub recipe_chans: Vec<Option<Vec<Value<'gc>>>>,
 }
 
 pub enum VmStatus<'gc> {
@@ -946,6 +951,7 @@ impl<'gc> VmState<'gc> {
             handle_table: crate::handle_table::HandleTable::new(),
             hosted: Vec::new(),
             life_channels: Vec::new(),
+            recipe_chans: Vec::new(),
             service_classes: Vec::new(),
             pending_host_block: None,
             hosted_announced: std::collections::HashSet::new(),

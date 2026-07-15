@@ -70,6 +70,11 @@ pub struct LifeSink {
     /// For extensions: the exit watch task has been armed (armed once, on the
     /// first `events` ask — unwatched peers pay nothing).
     pub watch_armed: AtomicBool,
+    /// Which incarnation this sink belongs to (SUPERVISION.md slice 2): a
+    /// restart mints a FRESH sink — the terminal closed this one's stream —
+    /// so `VM.peers` shows one row per incarnation. Stamped by the restart
+    /// before registration; 1 for an original spawn.
+    pub incarnation: AtomicU64,
     dropped: AtomicU64,
 }
 
@@ -91,6 +96,7 @@ impl LifeSink {
             status: Mutex::new(LifeStatus::Running),
             terminal: AtomicBool::new(false),
             watch_armed: AtomicBool::new(false),
+            incarnation: AtomicU64::new(1),
             dropped: AtomicU64::new(0),
         });
         sink.push(sink.record("spawned", None, ""));

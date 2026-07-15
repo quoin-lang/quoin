@@ -64,6 +64,11 @@ pub enum PeerDeathReason {
     Exited,
     /// A thread-backed worker's body panicked (caught at the thread boundary).
     Panicked,
+    /// The receiver belongs to an incarnation that died and was replaced
+    /// (`serviceRestart` — SUPERVISION.md §4 rule 6): sub-proxies, handles,
+    /// and shipped channels die with their incarnation, permanently; only the
+    /// root proxy rebinds.
+    StaleIncarnation,
 }
 
 impl PeerDeathReason {
@@ -72,6 +77,7 @@ impl PeerDeathReason {
         match self {
             PeerDeathReason::Exited => "exited",
             PeerDeathReason::Panicked => "panicked",
+            PeerDeathReason::StaleIncarnation => "staleIncarnation",
         }
     }
 }

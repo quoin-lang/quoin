@@ -333,6 +333,41 @@ record/replay run containing a supervised death + restart.
    manual trigger first (`service.restart` — supervision with a human in the loop),
    which proves the whole mechanism before any policy automates it — and stays as
    the library extension point (§10.1), not scaffolding.
+   **AS BUILT, services half (2026-07-15; extensions are the slice's second
+   commit).** `ServiceRecipe`, frozen at the original host: the `PortableBlock`
+   (captures froze at first ship — rule 2 for free), path/lanes/backing, the
+   spawn args as their classified `WorkerMsg`s re-sent verbatim — channels
+   excepted, retained as VALUES in the traced `vm.recipe_chans` root and
+   re-shipped against the new link (e2e: the fresh incarnation posts into the
+   same parent channel) — plus the ready manifest, which IS the rule-9 gate
+   (mismatch refuses to rebind with the full story and leaves the service
+   dead-but-retryable; the orphan worker shuts down when its lanes drop).
+   `serviceRestart` (the `serviceStop` naming family) lives only on the root
+   (the recipe holder), refuses on running/stopped (§2), and on success
+   rebinds the root state in place — fresh claims/convs/handles/stop flag,
+   new chan link, new lifecycle sink — and bumps the shared incarnation cell;
+   every proxy carries its mint stamp, checked BEFORE the state snapshot in
+   dispatch, so the dead incarnation's sub-proxies raise `#staleIncarnation`
+   forever. The rule-5 window is a `RestartGate` in the shared state: top-level
+   sends park pre-snapshot (nested calls skip — their conversation belongs to
+   the corpse and fails fast on its own lanes) and are woken all at once,
+   re-snapshotting into the new incarnation or the typed death. Deterministic
+   e2e for the window: the restart task sets the gate synchronously before its
+   first park, so a send after `sleep:1` provably lands inside it.
+   Bookkeeping per incarnation: fresh `PeerClaims` (label suffixed
+   "(incarnation N)"), a fresh `LifeSink` (`VM.peers` rows carry
+   `incarnation`; `serviceEvents` re-asked after a restart answers the new
+   stream — the old one closed at its terminal, by slice-1 law); boundary
+   rows deliberately MERGED across incarnations (§6's merged-row option).
+   One slice-1 revision forced by construction: `note_service_dead` now also
+   emits the death on the sink — the caller is about to CATCH the typed death,
+   so `serviceRestart`/`VM.peers` must already agree it happened; the mailbox
+   reader's own emission can lag on its thread, and first-terminal-wins
+   collapses the double observation. Residues: thread-backed respawn shares
+   every line but the spawn call, yet has no e2e (a thread service only dies
+   by panic, which nothing can script); restart under record/replay sits
+   behind the same external-timing boundary as deaths; the formal permanent
+   `gaveUp` state waits for slice 3's attempt-counting.
 3. **Policy:** the `Supervise` value + `supervise:` options + `quoin.toml`
    `[extension]` keys + backoff/intensity/give-up automation over slices 1+2.
 4. *(adjacency, not this arc unless pulled)*: `WorkerPool` crash-respawn

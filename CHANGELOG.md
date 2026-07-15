@@ -30,6 +30,24 @@ under **Changed**, with the migration.
   owner-side roots released — a later `send:` reaches a live receiver instead
   of vanishing into the closed lane.
 
+- **`serviceRestart` — manual restart of a dead hosted worker** (SUPERVISION.md
+  slice 2, the respawn mechanics; policy automation is the next slice). A hosted
+  worker's spawn is a frozen recipe — the portable block's captures froze when
+  it first shipped, and `args:` are retained (channels as live values, re-shipped
+  against the new incarnation's link) — so after a death, `svc.serviceRestart`
+  re-runs it in a fresh isolate and REBINDS the root proxy in place: new sends
+  just work, callers keep their reference. Restart follows *deaths only* (a
+  stopped or running service refuses); the new incarnation must present the
+  same class manifest, selector for selector, or the restart refuses to rebind
+  and the service stays dead-but-retryable. Sends arriving during the restart
+  window park and resume against the new incarnation (cancellable,
+  `Async.timeout:`-composable). Everything the dead incarnation minted —
+  sub-proxies, block handles, shipped endpoints — is permanently stale:
+  touching one raises `PeerDiedError` with the new reason `#staleIncarnation`.
+  Per-incarnation bookkeeping: fresh claims and lifecycle rows (`VM.peers` rows
+  carry an `incarnation` number; `serviceEvents` after a restart answers the
+  fresh incarnation's stream), merged boundary-profiling rows.
+
 - **Peer lifecycle events + `VM.peers`** (SUPERVISION.md slice 1). Every spawned
   peer — hosted worker, plain worker, extension — now has a lifecycle stream:
   `w.events` on worker handles, `e.events` on extensions, `svc.serviceEvents` on

@@ -129,6 +129,18 @@ pub struct NativeServiceState {
     /// worker-wide, shared by every proxy: `serviceEvents` reaches the sink
     /// through it.
     life_idx: usize,
+    /// Worker-wide CURRENT incarnation (SUPERVISION.md slice 2), bumped by a
+    /// successful `serviceRestart`.
+    incarnation: Rc<Cell<u64>>,
+    /// The incarnation this proxy was minted under: a mismatch with the
+    /// current cell is rule-6 staleness — the typed `#staleIncarnation`
+    /// death. Only the root proxy re-stamps at restart.
+    minted: u64,
+    /// The rule-5 restart-window gate, worker-wide.
+    restart: Rc<RefCell<RestartGate>>,
+    /// The respawn recipe — ROOT PROXY ONLY (sub-proxies are incarnation
+    /// state; they die with it and cannot restart anything).
+    recipe: Option<Rc<ServiceRecipe>>,
 }
 
 /// The channels of the conversation a task currently has open on a worker:
@@ -145,6 +157,50 @@ struct ActiveConv {
 /// The most deeply one task may nest calls on a worker conversation (mirrors
 /// the extension cap; each level is live frames on both sides).
 const MAX_CONV_DEPTH: u32 = 16;
+
+/// The frozen respawn recipe (SUPERVISION.md slice 2, §4 rule 2): everything
+/// `serviceRestart` re-runs, retained at the ORIGINAL host — the block's
+/// captures froze when it first shipped, and data/block args are the exact
+/// messages sent then, re-sent verbatim. Channel args are the one GC-bound
+/// part: their VALUES live in `vm.recipe_chans[chan_slot]` and re-ship
+/// against the new incarnation's link. The manifest fields are the rule-9
+/// equality gate: a new incarnation must present the same class or the
+/// restart refuses to rebind.
+#[derive(Debug)]
+struct ServiceRecipe {
+    /// The original claims/registry label; incarnations >1 suffix it.
+    label: String,
+    path: Option<String>,
+    pb: PortableBlock,
+    lanes: u32,
+    backing: &'static str,
+    args: Vec<RecipeArg>,
+    /// `vm.recipe_chans` slot holding the channel-arg values (None = none).
+    chan_slot: Option<usize>,
+    class_name: String,
+    instance_selectors: Vec<String>,
+    class_selectors: Vec<String>,
+}
+
+#[derive(Debug)]
+enum RecipeArg {
+    /// A data / portable-block arg: the spawn-time message, re-sent verbatim.
+    Plain(crate::worker::WorkerMsg),
+    /// A channel arg: index into the recipe's `vm.recipe_chans` slot —
+    /// re-shipped as a VALUE so the fresh endpoint binds the new link.
+    Channel(usize),
+}
+
+/// The rule-5 restart window: while a restart attempt is in flight, top-level
+/// sends park here instead of dispatching into the corpse; completion wakes
+/// them all — into the new incarnation on success, into the typed death on
+/// failure.
+#[derive(Debug, Default)]
+struct RestartGate {
+    active: bool,
+    /// `(task, park epoch)` — epoch identity filters cancelled waiters.
+    waiters: Vec<(usize, u64)>,
+}
 
 impl Drop for NativeServiceState {
     fn drop(&mut self) {
@@ -183,6 +239,9 @@ struct CallCtx {
     boundary: Rc<RefCell<BoundaryStats>>,
     chan_link: usize,
     life_idx: usize,
+    incarnation: Rc<Cell<u64>>,
+    minted: u64,
+    restart: Rc<RefCell<RestartGate>>,
 }
 
 fn snapshot(s: &NativeServiceState) -> CallCtx {
@@ -201,6 +260,9 @@ fn snapshot(s: &NativeServiceState) -> CallCtx {
         boundary: s.boundary.clone(),
         chan_link: s.chan_link,
         life_idx: s.life_idx,
+        incarnation: s.incarnation.clone(),
+        minted: s.minted,
+        restart: s.restart.clone(),
     }
 }
 
@@ -217,6 +279,19 @@ pub(crate) fn dispatch_service_method<'gc>(
     selector: Symbol,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
+    // SUPERVISION.md slice 2, BEFORE the state snapshot: rule-6 staleness
+    // (a sub-proxy of a died incarnation raises the typed #staleIncarnation)
+    // and the rule-5 restart window (a parked waiter re-snapshots on wake,
+    // so it sees the rebound transport).
+    let anchor = if receiver
+        .with_native_state::<NativeServiceState, _, _>(|_| ())
+        .is_ok()
+    {
+        receiver
+    } else {
+        service
+    };
+    await_restart_window(vm, anchor, selector)?;
     if let Ok(ctx) = receiver.with_native_state::<NativeServiceState, _, _>(snapshot) {
         return service_call(vm, mc, receiver, ctx, selector, &args);
     }
@@ -287,6 +362,7 @@ pub(crate) fn installed_service_class<'gc>(
         &[
             ("serviceStop", service_stop),
             ("serviceEvents", service_events),
+            ("serviceRestart", service_restart),
             ("==:", service_eq),
         ],
     );
@@ -447,7 +523,7 @@ fn service_call<'gc>(
         .is_err()
     {
         end_call_and_wake(vm, &ctx, me);
-        note_service_dead(vm, &ctx);
+        note_service_dead(vm, &ctx, PeerDeathReason::Exited, "the service has exited");
         return Err(QuoinError::peer_died(
             ctx.class_name.clone(),
             PeerDeathReason::Exited,
@@ -481,8 +557,12 @@ fn service_call<'gc>(
     );
     ctx.convs.borrow_mut().remove(&me);
     end_call_and_wake(vm, &ctx, me);
-    if matches!(&outcome, Err(QuoinError::PeerDied { .. })) {
-        note_service_dead(vm, &ctx);
+    if let Err(QuoinError::PeerDied {
+        reason, message, ..
+    }) = &outcome
+    {
+        let (reason, message) = (*reason, message.clone());
+        note_service_dead(vm, &ctx, reason, &message);
     }
     record_boundary_row(
         &ctx.boundary,
@@ -620,14 +700,19 @@ pub(crate) fn claim_peer_object<'gc>(
 /// idempotent — every death-detection seam calls it. Releases the parent-held
 /// block handles the worker's stored `HostBlock`s addressed (only the worker
 /// could ever invoke them, and it is dead; `service_stop` releases the same
-/// list on the clean path) and marks the peer's claim rows dead so
-/// `VM.claims`/`VM.claimsReport` say so instead of leaving it implicit in the
-/// unwinding waiters.
-fn note_service_dead(vm: &mut VmState<'_>, ctx: &CallCtx) {
+/// list on the clean path), marks the peer's claim rows dead, and records the
+/// death on the lifecycle sink — the caller is about to CATCH the typed
+/// death, so `serviceRestart`/`VM.peers` must already agree it happened (the
+/// mailbox reader's own emission may lag on another thread; first terminal
+/// wins, so the double observation collapses).
+fn note_service_dead(vm: &mut VmState<'_>, ctx: &CallCtx, reason: PeerDeathReason, detail: &str) {
     for id in ctx.block_handles.borrow_mut().drain(..) {
         vm.hosted_release(id);
     }
     ctx.claims.borrow_mut().gone = Some("died");
+    if let Some(sink) = vm.io.lives.borrow().get(ctx.life_idx) {
+        sink.emit_died(reason, detail);
+    }
 }
 
 fn end_call_and_wake<'gc>(vm: &mut VmState<'gc>, ctx: &CallCtx, task: usize) {
@@ -714,8 +799,12 @@ fn nested_call<'gc>(
         c.depth = c.depth.saturating_sub(1);
     }
     end_call_and_wake(vm, ctx, me);
-    if matches!(&outcome, Err(QuoinError::PeerDied { .. })) {
-        note_service_dead(vm, ctx);
+    if let Err(QuoinError::PeerDied {
+        reason, message, ..
+    }) = &outcome
+    {
+        let (reason, message) = (*reason, message.clone());
+        note_service_dead(vm, ctx, reason, &message);
     }
     record_boundary_row(
         &ctx.boundary,
@@ -938,6 +1027,10 @@ fn sub_proxy<'gc>(
             boundary: ctx.boundary.clone(),
             chan_link: ctx.chan_link,
             life_idx: ctx.life_idx,
+            incarnation: ctx.incarnation.clone(),
+            minted: ctx.minted,
+            restart: ctx.restart.clone(),
+            recipe: None,
         },
     )
 }
@@ -995,7 +1088,7 @@ pub(crate) fn host_block<'gc>(
             let payload = crate::worker::portable_block_to_wire(&pb)
                 .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
             let (ch, pid, _grip) = crate::worker::spawn_worker_process(
-                path,
+                path.clone(),
                 crate::worker::ProcessBody::Block(payload),
                 lanes,
             )
@@ -1003,7 +1096,7 @@ pub(crate) fn host_block<'gc>(
             (ch, Some(pid))
         }
         _ => (
-            crate::worker::spawn_worker_hosted_block(path, pb, lanes),
+            crate::worker::spawn_worker_hosted_block(path.clone(), pb.clone(), lanes),
             None,
         ),
     };
@@ -1016,13 +1109,52 @@ pub(crate) fn host_block<'gc>(
         ch.chan_tx.clone(),
         ch.chan_rx.clone(),
     );
-    for (i, v) in arg_values.into_iter().enumerate() {
-        let msg = spawn_arg(vm, mc, v, chan_link, process).map_err(|e| {
+    let mut recipe_args = Vec::with_capacity(arg_values.len());
+    let mut chan_positions: Vec<usize> = Vec::new();
+    for (i, v) in arg_values.iter().enumerate() {
+        let msg = spawn_arg(vm, mc, *v, chan_link, process).map_err(|e| {
             QuoinError::Other(format!("Worker.host:with:args: element {}: {e}", i + 1))
         })?;
+        // Retain the recipe form (SUPERVISION.md slice 2): data/blocks are the
+        // message itself, re-sent verbatim at restart; a channel is retained
+        // as a VALUE (below) and re-shipped against the new link.
+        recipe_args.push(match &msg {
+            crate::worker::WorkerMsg::Channel(_) => {
+                chan_positions.push(i);
+                RecipeArg::Channel(chan_positions.len() - 1)
+            }
+            other => RecipeArg::Plain(other.clone()),
+        });
         let _ = ch.inbox_tx.try_send(msg);
     }
-    finish_host(vm, mc, ch, pid, backing, lanes, &label_path, chan_link)
+    let seed = RecipeSeed {
+        path,
+        pb,
+        args: recipe_args,
+        chan_values: chan_positions.iter().map(|&i| arg_values[i]).collect(),
+    };
+    finish_host(
+        vm,
+        mc,
+        ch,
+        pid,
+        backing,
+        lanes,
+        &label_path,
+        chan_link,
+        seed,
+    )
+}
+
+/// What `host_block` hands `finish_host` toward the respawn recipe: the parts
+/// known before the ready manifest (which completes it). `chan_values` are
+/// the channel args as VALUES — rooted into `vm.recipe_chans` once the host
+/// succeeds.
+struct RecipeSeed<'gc> {
+    path: Option<String>,
+    pb: PortableBlock,
+    args: Vec<RecipeArg>,
+    chan_values: Vec<Value<'gc>>,
 }
 
 /// Classify one spawn-time `args:` element into its crossing form: a channel
@@ -1057,6 +1189,42 @@ pub(crate) fn spawn_arg<'gc>(
 /// handshake, claim + boundary + relay registration, and the installed-class
 /// two-step that mints the root proxy. The hosted class is whatever the
 /// ready message names — the block's answer.
+/// Park for the worker's ready message and answer the hosted class's manifest
+/// (name + sorted selector lists). A closed lane means boot/compile/
+/// instantiation failed before ready — flattened to an ordinary error (a peer
+/// that never lived didn't die; SUPERVISION.md §2). Shared by the original
+/// host and `serviceRestart`, whose rule-9 gate compares this against the
+/// installed class.
+fn await_ready_manifest<'gc>(
+    vm: &mut VmState<'gc>,
+    ch: &crate::worker::WorkerChannels,
+    what: &str,
+) -> Result<(String, Vec<String>, Vec<String>), QuoinError> {
+    let (ready_class, instance_selectors, class_selectors) =
+        match vm.await_io(IoRequest::WorkerRecv(ch.outbox_rx.clone()))? {
+            IoResult::WorkerMsg(Some(msg)) => parse_ready_manifest(&msg),
+            IoResult::WorkerMsg(None) => {
+                let why = match vm.await_io(IoRequest::WorkerJoin(ch.done_rx.clone()))? {
+                    IoResult::WorkerDone(Err(WorkerExit::Failed(msg))) => msg,
+                    IoResult::WorkerDone(Err(WorkerExit::Died { detail, .. })) => detail,
+                    _ => "the worker exited before reporting ready".to_string(),
+                };
+                return Err(QuoinError::Other(format!("{what}: {why}")));
+            }
+            other => {
+                return Err(QuoinError::Other(format!(
+                    "{what}: unexpected result {other:?}"
+                )));
+            }
+        };
+    match ready_class {
+        Some(n) => Ok((n, instance_selectors, class_selectors)),
+        None => Err(QuoinError::Other(format!(
+            "{what}: the worker did not report a hosted class"
+        ))),
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // hosting threads its full spawn context
 fn finish_host<'gc>(
     vm: &mut VmState<'gc>,
@@ -1067,6 +1235,7 @@ fn finish_host<'gc>(
     lanes: u32,
     path: &str,
     chan_link: usize,
+    seed: RecipeSeed<'gc>,
 ) -> Result<Value<'gc>, QuoinError> {
     // Disambiguate the display label when several services host the same
     // unit: the first keeps the bare label, later ones gain an ordinal —
@@ -1102,41 +1271,15 @@ fn finish_host<'gc>(
     // hosted class's MANIFEST (name + selector lists — ACTOR_OBJECTS.md §2); a
     // closed lane instead means boot/compile/instantiation failed — the done
     // lane says why. Parks, so slow boots don't block other tasks.
-    let (ready_class, instance_selectors, class_selectors) =
-        match vm.await_io(IoRequest::WorkerRecv(ch.outbox_rx.clone()))? {
-            IoResult::WorkerMsg(Some(msg)) => parse_ready_manifest(&msg),
-            IoResult::WorkerMsg(None) => {
-                // Boot failure, either flavor: a spawn/compile that never got
-                // to ready is not the death of a live peer (SUPERVISION.md §2)
-                // — flatten to the why for an ordinary error.
-                let why = match vm.await_io(IoRequest::WorkerJoin(ch.done_rx.clone()))? {
-                    IoResult::WorkerDone(Err(WorkerExit::Failed(msg))) => msg,
-                    IoResult::WorkerDone(Err(WorkerExit::Died { detail, .. })) => detail,
-                    _ => "the worker exited before reporting ready".to_string(),
-                };
-                return Err(QuoinError::Other(format!("Worker.host: {why}")));
-            }
-            other => {
-                return Err(QuoinError::Other(format!(
-                    "Worker.host: unexpected result {other:?}"
-                )));
-            }
-        };
-    let class_name = match ready_class {
-        Some(n) => n,
-        None => {
-            return Err(QuoinError::Other(
-                "Worker.host: the worker did not report a hosted class".into(),
-            ));
-        }
-    };
+    let (class_name, instance_selectors, class_selectors) =
+        await_ready_manifest(vm, &ch, "Worker.host")?;
     // Claims: the §5.1 machinery, one per worker, registered for VM.claims
     // and the cross-peer cycle walk; boundary rows registered beside the
     // extensions' (§7 — one diagnosis surface).
     let claims = Rc::new(RefCell::new(PeerClaims::new(label.clone(), lanes)));
     vm.io.claim_peers.borrow_mut().push(claims.clone());
     let boundary = Rc::new(RefCell::new(BoundaryStats {
-        peer: label,
+        peer: label.clone(),
         rows: HashMap::new(),
     }));
     vm.io.ext_stats.borrow_mut().push(boundary.clone());
@@ -1149,6 +1292,27 @@ fn finish_host<'gc>(
         lives.push(ch.life.clone());
         lives.len() - 1
     };
+    // Complete + freeze the respawn recipe (SUPERVISION.md slice 2): the
+    // manifest fields double as the rule-9 equality gate; the channel-arg
+    // values get their GC root now that the host is definitely succeeding.
+    let chan_slot = if seed.chan_values.is_empty() {
+        None
+    } else {
+        vm.recipe_chans.push(Some(seed.chan_values));
+        Some(vm.recipe_chans.len() - 1)
+    };
+    let recipe = Rc::new(ServiceRecipe {
+        label: label.clone(),
+        path: seed.path,
+        pb: seed.pb,
+        lanes,
+        backing,
+        args: seed.args,
+        chan_slot,
+        class_name: class_name.clone(),
+        instance_selectors: instance_selectors.clone(),
+        class_selectors: class_selectors.clone(),
+    });
     // Install the hosted class from its manifest (the two-step: the shell
     // exists first so the root proxy can be its instance, then the method
     // nodes — which carry the proxy — fill it in).
@@ -1171,6 +1335,10 @@ fn finish_host<'gc>(
             boundary,
             chan_link,
             life_idx,
+            incarnation: Rc::new(Cell::new(1)),
+            minted: 1,
+            restart: Rc::new(RefCell::new(RestartGate::default())),
+            recipe: Some(recipe),
         },
     );
     vm.service_classes.push(crate::vm::ServiceClassEntry {
@@ -1187,6 +1355,7 @@ fn finish_host<'gc>(
         &[
             ("serviceStop", service_stop),
             ("serviceEvents", service_events),
+            ("serviceRestart", service_restart),
             ("==:", service_eq),
         ],
     );
@@ -1294,6 +1463,286 @@ pub(crate) fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, Quoin
             "Worker.host: {what} must be a String"
         ))),
     }
+}
+
+/// The slice-2 pre-dispatch checks (SUPERVISION.md §4): raise the typed
+/// staleness for a proxy of a died incarnation, and park top-level sends
+/// through an in-flight restart attempt (rule 5) — woken into the new
+/// incarnation on success, into the typed death on failure. Nested calls
+/// (an open conversation) skip the gate: their conversation belongs to the
+/// dead incarnation and fails fast on its own lanes.
+fn await_restart_window<'gc>(
+    vm: &mut VmState<'gc>,
+    anchor: Value<'gc>,
+    selector: Symbol,
+) -> Result<(), QuoinError> {
+    loop {
+        let (minted, incarnation, restart, convs, class_name) = anchor
+            .with_native_state::<NativeServiceState, _, _>(|s| {
+                (
+                    s.minted,
+                    s.incarnation.clone(),
+                    s.restart.clone(),
+                    s.convs.clone(),
+                    s.class_name.clone(),
+                )
+            })
+            .map_err(QuoinError::Other)?;
+        let cur = incarnation.get();
+        if minted != cur {
+            return Err(QuoinError::peer_died(
+                class_name.clone(),
+                PeerDeathReason::StaleIncarnation,
+                format!(
+                    "service call '{}': this proxy belongs to incarnation {minted} of \
+                     `{class_name}`, which died; the service is now incarnation {cur} — \
+                     hold the root proxy and re-fetch what you need from it",
+                    selector.as_str()
+                ),
+            ));
+        }
+        let me = vm.sched.current_task;
+        if convs.borrow().contains_key(&me.0) {
+            return Ok(());
+        }
+        let epoch = vm.current_park_epoch();
+        {
+            let mut g = restart.borrow_mut();
+            if !g.active {
+                return Ok(());
+            }
+            g.waiters.push((me.0, epoch));
+        }
+        if let Some(t) = vm.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
+            t.parked_on_channel = true;
+        }
+        vm.set_park_info("service restart wait".to_string(), Some(anchor));
+        if let Some(yielder) = unsafe { vm.get_yielder() } {
+            yielder.suspend(YieldReason::ChannelPark);
+        } else {
+            restart.borrow_mut().waiters.retain(|&(t, _)| t != me.0);
+            return Err(QuoinError::Other(format!(
+                "service call '{}' parked on a restart outside the VM scheduler",
+                selector.as_str()
+            )));
+        }
+        let woken = matches!(vm.sched.wake.take(), Some(Wake::ServiceClaim { .. }));
+        if vm.sched.cancel_current {
+            restart.borrow_mut().waiters.retain(|&(t, _)| t != me.0);
+            return Err(vm.take_cancellation());
+        }
+        if !woken {
+            return Err(QuoinError::Other(
+                "service restart wait resumed without a wake".to_string(),
+            ));
+        }
+        // Loop: re-read the gate (another restart could already be running)
+        // and the incarnation (this proxy may have gone stale meanwhile).
+    }
+}
+
+/// The proxy-owned `serviceRestart` (SUPERVISION.md slice 2 — the manual
+/// trigger, and permanently the library extension point, §10.1): re-run the
+/// root's frozen recipe in a fresh isolate and REBIND the root proxy in
+/// place. Only follows a DEATH (§2: stop means stop); only the root holds a
+/// recipe. On success the incarnation bumps — sub-proxies, handles, and
+/// endpoints minted by the dead incarnation raise `#staleIncarnation`
+/// forever; parked restart-window senders wake into the new incarnation.
+/// On failure they wake into the typed death, the service stays dead, and
+/// another restart may be attempted.
+pub(crate) fn service_restart<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    _args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let (recipe, incarnation, restart, life_idx, class_name, minted) = receiver
+        .with_native_state::<NativeServiceState, _, _>(|s| {
+            (
+                s.recipe.clone(),
+                s.incarnation.clone(),
+                s.restart.clone(),
+                s.life_idx,
+                s.class_name.clone(),
+                s.minted,
+            )
+        })
+        .map_err(QuoinError::Other)?;
+    let Some(recipe) = recipe else {
+        return Err(QuoinError::Other(
+            "serviceRestart: only the root proxy holds the respawn recipe \
+             (sub-proxies are incarnation state and die with it)"
+                .into(),
+        ));
+    };
+    let cur = incarnation.get();
+    if minted != cur {
+        return Err(QuoinError::peer_died(
+            class_name.clone(),
+            PeerDeathReason::StaleIncarnation,
+            format!("serviceRestart: this root belongs to dead incarnation {minted}"),
+        ));
+    }
+    // Rule 1: only death restarts. A stop was an instruction (§2).
+    let status = vm.io.lives.borrow().get(life_idx).map(|l| l.status());
+    match status {
+        Some(crate::runtime::lifecycle::LifeStatus::Died { .. }) => {}
+        Some(crate::runtime::lifecycle::LifeStatus::Stopped(_)) => {
+            return Err(QuoinError::Other(format!(
+                "serviceRestart: `{class_name}` was STOPPED, not died — stop means stop \
+                 (SUPERVISION.md §2); host it again instead"
+            )));
+        }
+        _ => {
+            return Err(QuoinError::Other(format!(
+                "serviceRestart: `{class_name}` is running — restart only follows a death"
+            )));
+        }
+    }
+    {
+        let mut g = restart.borrow_mut();
+        if g.active {
+            return Err(QuoinError::Other(
+                "serviceRestart: a restart is already in flight".into(),
+            ));
+        }
+        g.active = true;
+    }
+    let outcome = restart_attempt(vm, mc, receiver, &recipe, cur);
+    // Release the gate and wake every parked sender EITHER WAY: into the new
+    // incarnation, or into the typed death (the rule-5/give-up wake).
+    let waiters = {
+        let mut g = restart.borrow_mut();
+        g.active = false;
+        std::mem::take(&mut g.waiters)
+    };
+    for (task, epoch) in waiters {
+        if vm.channel_waiter_live(TaskId(task), epoch) {
+            vm.wake_channel_task(TaskId(task), Wake::ServiceClaim { lane: None });
+        }
+    }
+    outcome.map(|_| vm.new_nil(mc))
+}
+
+/// The respawn body: spawn from the frozen recipe, re-ship the args (channels
+/// against the NEW link), gate the ready manifest against the installed class
+/// (rule 9), mint the per-incarnation rows, and rebind the root state.
+fn restart_attempt<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    recipe: &Rc<ServiceRecipe>,
+    cur: u64,
+) -> Result<(), QuoinError> {
+    let next = cur + 1;
+    let process = recipe.backing == "process";
+    let (ch, pid) = match recipe.backing {
+        "process" => {
+            let payload = crate::worker::portable_block_to_wire(&recipe.pb)
+                .map_err(|e| QuoinError::Other(format!("serviceRestart: {e}")))?;
+            let (ch, pid, _grip) = crate::worker::spawn_worker_process(
+                recipe.path.clone(),
+                crate::worker::ProcessBody::Block(payload),
+                recipe.lanes,
+            )
+            .map_err(QuoinError::Other)?;
+            (ch, Some(pid))
+        }
+        _ => (
+            crate::worker::spawn_worker_hosted_block(
+                recipe.path.clone(),
+                recipe.pb.clone(),
+                recipe.lanes,
+            ),
+            None,
+        ),
+    };
+    let chan_link = crate::runtime::channel_relay::register_chan_link(
+        vm,
+        ch.chan_tx.clone(),
+        ch.chan_rx.clone(),
+    );
+    for (i, arg) in recipe.args.iter().enumerate() {
+        let msg = match arg {
+            RecipeArg::Plain(m) => m.clone(),
+            RecipeArg::Channel(idx) => {
+                let v = recipe
+                    .chan_slot
+                    .and_then(|slot| vm.recipe_chans.get(slot))
+                    .and_then(|slot| slot.as_ref())
+                    .and_then(|list| list.get(*idx))
+                    .copied()
+                    .ok_or_else(|| {
+                        QuoinError::Other(
+                            "serviceRestart: a channel argument's recipe root vanished".into(),
+                        )
+                    })?;
+                spawn_arg(vm, mc, v, chan_link, process).map_err(|e| {
+                    QuoinError::Other(format!("serviceRestart: args element {}: {e}", i + 1))
+                })?
+            }
+        };
+        let _ = ch.inbox_tx.try_send(msg);
+    }
+    // Rule 9: the new incarnation must be the SAME class, selector for
+    // selector — a differing manifest means the recipe isn't deterministic
+    // (or the code changed underfoot); refuse to rebind. Dropping `ch`
+    // orphans the new worker, whose lanes closing shut it down.
+    let (name, inst, cls) = await_ready_manifest(vm, &ch, "serviceRestart")?;
+    if name != recipe.class_name
+        || inst != recipe.instance_selectors
+        || cls != recipe.class_selectors
+    {
+        return Err(QuoinError::Other(format!(
+            "serviceRestart: the new incarnation's manifest does not match the installed \
+             class `{}` (it reported `{name}`) — the recipe is not deterministic, or the \
+             code changed underfoot; refusing to rebind (SUPERVISION.md §4 rule 9)",
+            recipe.class_name
+        )));
+    }
+    // Per-incarnation rows: fresh claims (rule 8 — empty mailboxes, fresh
+    // lane pool), a registry row, and the fresh lifecycle sink the spawn
+    // minted (its `spawned` event is already staged). Boundary rows stay
+    // shared: one merged cost table per service across incarnations.
+    let label = format!("{} (incarnation {next})", recipe.label);
+    let claims = Rc::new(RefCell::new(PeerClaims::new(label.clone(), recipe.lanes)));
+    vm.io.claim_peers.borrow_mut().push(claims.clone());
+    vm.worker_registry.push(crate::worker::WorkerReg {
+        unit: label.clone(),
+        label,
+        backing: recipe.backing,
+        pid,
+        inbox_tx: ch.inbox_tx.clone(),
+        outbox_rx: ch.outbox_rx.clone(),
+        control_tx: ch.control_tx.clone(),
+    });
+    ch.life
+        .incarnation
+        .store(next, std::sync::atomic::Ordering::Relaxed);
+    let life_idx = {
+        let lives = vm.io.lives.clone();
+        let mut lives = lives.borrow_mut();
+        lives.push(ch.life.clone());
+        lives.len() - 1
+    };
+    // Rule 3: rebind the ROOT in place and bump the incarnation — everything
+    // the dead incarnation minted goes #staleIncarnation from here.
+    receiver
+        .with_native_state_mut::<NativeServiceState, _, _>(mc, |s| {
+            s.dispatch_tx = ch.dispatch_tx;
+            s.done_rx = ch.done_rx;
+            s.claims = claims;
+            s.stopped = Rc::new(Cell::new(false));
+            s.reap = Rc::new(RefCell::new(Vec::new()));
+            s.convs = Rc::new(RefCell::new(HashMap::new()));
+            s.block_handles = Rc::new(RefCell::new(Vec::new()));
+            s.chan_link = chan_link;
+            s.life_idx = life_idx;
+            s.minted = next;
+            s.incarnation.set(next);
+        })
+        .map_err(QuoinError::Other)?;
+    Ok(())
 }
 
 /// The proxy-owned `serviceEvents` (installed on every service class beside

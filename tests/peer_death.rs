@@ -255,3 +255,138 @@ VM.peers.each:{{ |p| ((p.at:'kind') == 'extension').if:{{ marked = p.at:'status'
     );
     assert_passes("extwatch", &script, &[], true);
 }
+
+#[test]
+fn service_restart_rebinds_the_root_and_stales_the_rest() {
+    // Slice 2 (SUPERVISION.md §4): restart refuses while running; after a hard
+    // death, `serviceRestart` re-runs the frozen recipe and REBINDS the root in
+    // place — new sends work; the dead incarnation's sub-proxy raises the typed
+    // #staleIncarnation; the roster shows one row per incarnation.
+    let script = r#"
+var svc = Worker.host:'@kaboom.qn@' with:{ Kaboom.new } backing:'process';
+var ok = true;
+(svc.ping == 'pong').else:{ ok = false; 'e1'.print };
+var sub = svc.mate;
+(sub.ping == 'pong').else:{ ok = false; 'e2'.print };
+var early = { svc.serviceRestart; 'no' }.catch:{ |e| 'refused-running' };
+(early == 'refused-running').else:{ ok = false; 'e3'.print };
+var pid = ((VM.ps.at:'workers').at:0).at:'pid';
+[IO]File.write:pid.s to:'@pidfile@';
+var t1 = { svc.sleepLong }.catch:{ |e:PeerDiedError| 'died' };
+(t1 == 'died').else:{ ok = false; 'e4'.print };
+svc.serviceRestart;
+(svc.ping == 'pong').else:{ ok = false; 'e5'.print };
+var t2 = { sub.ping }.catch:{ |e:PeerDiedError|
+    (e.reason == #staleIncarnation).if:{ 'stale' } else:{ 'wrong-reason' } };
+(t2 == 'stale').else:{ ok = false; ('e6 ' + t2).print };
+var one = nil;
+var two = nil;
+VM.peers.each:{ |p| ((p.at:'kind') == 'hosted').if:{
+    ((p.at:'incarnation') == 1).if:{ one = p.at:'status' };
+    ((p.at:'incarnation') == 2).if:{ two = p.at:'status' } } };
+((one == 'died') && (two == 'running')).else:{ ok = false; 'e7'.print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let kaboom = r#"
+Kaboom <- {
+    sleepLong -> { Async.sleep:60000; 'unreachable' }
+    ping -> { 'pong' }
+    mate -> { Kaboom.new }
+}
+"#;
+    assert_passes("restart", script, &[("kaboom.qn", kaboom)], true);
+}
+
+#[test]
+fn restart_window_parks_senders_into_the_new_incarnation() {
+    // Rule 5: the restart task sets the gate synchronously before its first
+    // park, so a send after sleep:1 provably lands INSIDE the window — it must
+    // park through the respawn and answer from the fresh incarnation.
+    let script = r#"
+var svc = Worker.host:'@kaboom.qn@' with:{ Kaboom.new } backing:'process';
+var pid = ((VM.ps.at:'workers').at:0).at:'pid';
+[IO]File.write:pid.s to:'@pidfile@';
+var t1 = { svc.sleepLong }.catch:{ |e:PeerDiedError| 'died' };
+var results = Async.gather:#(
+    { svc.serviceRestart; 'restarted' }
+    { Async.sleep:1; { svc.ping }.catch:{ |e:PeerDiedError| 'window-error' } }
+);
+((t1 == 'died') && (results == #( 'restarted' 'pong' )))
+    .if:{ 'PASS'.print } else:{ ('FAIL ' + t1 + ' ' + results.s).print };
+"#;
+    let kaboom = r#"
+Kaboom <- {
+    sleepLong -> { Async.sleep:60000; 'unreachable' }
+    ping -> { 'pong' }
+}
+"#;
+    assert_passes("window", script, &[("kaboom.qn", kaboom)], true);
+}
+
+#[test]
+fn restart_manifest_gate_refuses_a_changed_recipe_outcome() {
+    // Rule 9: a recipe whose re-run answers a DIFFERENT class refuses to
+    // rebind with a clear error and leaves the service dead but retryable.
+    let script = r#"
+var marker = '@pidfile@.marker';
+var svc = Worker.host:'@twoclass.qn@'
+    with:{ |m| ([IO]File.exists?:m).if:{ KabB.new } else:{ KabA.new } }
+    args:#( marker )
+    backing:'process';
+var ok = true;
+(svc.ping == 'a').else:{ ok = false; 'e1'.print };
+var pid = ((VM.ps.at:'workers').at:0).at:'pid';
+[IO]File.write:pid.s to:'@pidfile@';
+var t1 = { svc.sleepLong }.catch:{ |e:PeerDiedError| 'died' };
+(t1 == 'died').else:{ ok = false; 'e2'.print };
+[IO]File.write:'x' to:marker;
+var r = { svc.serviceRestart; 'rebound' }.catch:{ |e| e.s };
+(r.contains?:'does not match the installed class').else:{ ok = false; ('e3 ' + r).print };
+var again = { svc.ping }.catch:{ |e:PeerDiedError| 'still-dead' };
+(again == 'still-dead').else:{ ok = false; 'e4'.print };
+[IO]File.delete:marker;
+svc.serviceRestart;
+(svc.ping == 'a').else:{ ok = false; 'e5'.print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let twoclass = r#"
+KabA <- {
+    sleepLong -> { Async.sleep:60000; 'unreachable' }
+    ping -> { 'a' }
+}
+KabB <- {
+    ping -> { 'b' }
+}
+"#;
+    assert_passes("manifest", script, &[("twoclass.qn", twoclass)], true);
+}
+
+#[test]
+fn channel_args_reship_across_restart() {
+    // Rule 2: the recipe's channel arg is retained as a VALUE and re-ships
+    // against the new incarnation's link — the fresh worker holds a live
+    // endpoint to the SAME parent channel.
+    let script = r#"
+var pipe = Channel.buffered:8;
+var svc = Worker.host:'@notifier.qn@' with:{ |ch| Notifier.new:{ var out = ch } }
+    args:#( pipe ) backing:'process';
+var ok = true;
+(svc.poke == 'ok').else:{ ok = false; 'e1'.print };
+(pipe.receive == 'hi').else:{ ok = false; 'e2'.print };
+var pid = ((VM.ps.at:'workers').at:0).at:'pid';
+[IO]File.write:pid.s to:'@pidfile@';
+var t1 = { svc.sleepLong }.catch:{ |e:PeerDiedError| 'died' };
+(t1 == 'died').else:{ ok = false; 'e3'.print };
+svc.serviceRestart;
+(svc.poke == 'ok').else:{ ok = false; 'e4'.print };
+(pipe.receive == 'hi').else:{ ok = false; 'e5'.print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let notifier = r#"
+Notifier <- { |@out|
+    poke -> { @out.send:'hi'; 'ok' }
+    sleepLong -> { Async.sleep:60000 }
+}
+"#;
+    assert_passes("chanrecipe", script, &[("notifier.qn", notifier)], true);
+}
