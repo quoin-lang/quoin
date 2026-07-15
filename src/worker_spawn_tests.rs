@@ -11,7 +11,7 @@ use crate::worker::WorkerExit;
 
 #[test]
 fn a_panicking_worker_body_is_a_death() {
-    let ch = spawn_worker_with(|_link| panic!("boom"));
+    let ch = spawn_worker_with("t".to_string(), "worker", |_link| panic!("boom"));
     match ch.done_rx.recv_blocking() {
         Ok(Err(WorkerExit::Died { reason, detail })) => {
             assert_eq!(reason, PeerDeathReason::Panicked);
@@ -23,7 +23,9 @@ fn a_panicking_worker_body_is_a_death() {
 
 #[test]
 fn a_reporting_worker_body_is_a_failure_not_a_death() {
-    let ch = spawn_worker_with(|_link| Err("unit refused".to_string()));
+    let ch = spawn_worker_with("t".to_string(), "worker", |_link| {
+        Err("unit refused".to_string())
+    });
     match ch.done_rx.recv_blocking() {
         Ok(Err(WorkerExit::Failed(msg))) => assert_eq!(msg, "unit refused"),
         other => panic!("expected a Failed report, got {other:?}"),

@@ -125,6 +125,10 @@ pub struct NativeServiceState {
     boundary: Rc<RefCell<BoundaryStats>>,
     /// This link's index in `vm.io.chan_links` (§6 channel relay).
     chan_link: usize,
+    /// This worker's index in `vm.io.lives` (SUPERVISION.md slice 1) —
+    /// worker-wide, shared by every proxy: `serviceEvents` reaches the sink
+    /// through it.
+    life_idx: usize,
 }
 
 /// The channels of the conversation a task currently has open on a worker:
@@ -178,6 +182,7 @@ struct CallCtx {
     block_handles: Rc<RefCell<Vec<u64>>>,
     boundary: Rc<RefCell<BoundaryStats>>,
     chan_link: usize,
+    life_idx: usize,
 }
 
 fn snapshot(s: &NativeServiceState) -> CallCtx {
@@ -195,6 +200,7 @@ fn snapshot(s: &NativeServiceState) -> CallCtx {
         block_handles: s.block_handles.clone(),
         boundary: s.boundary.clone(),
         chan_link: s.chan_link,
+        life_idx: s.life_idx,
     }
 }
 
@@ -278,7 +284,11 @@ pub(crate) fn installed_service_class<'gc>(
         anchor,
         instance_selectors,
         class_selectors,
-        &[("serviceStop", service_stop), ("==:", service_eq)],
+        &[
+            ("serviceStop", service_stop),
+            ("serviceEvents", service_events),
+            ("==:", service_eq),
+        ],
     );
     shell
 }
@@ -927,6 +937,7 @@ fn sub_proxy<'gc>(
             block_handles: ctx.block_handles.clone(),
             boundary: ctx.boundary.clone(),
             chan_link: ctx.chan_link,
+            life_idx: ctx.life_idx,
         },
     )
 }
@@ -1129,6 +1140,15 @@ fn finish_host<'gc>(
         rows: HashMap::new(),
     }));
     vm.io.ext_stats.borrow_mut().push(boundary.clone());
+    // Lifecycle roster row (SUPERVISION.md slice 1): the sink was created at
+    // spawn (its producers live in the spawn machinery); the parent registers
+    // it here, beside the claims and boundary rows.
+    let life_idx = {
+        let lives = vm.io.lives.clone();
+        let mut lives = lives.borrow_mut();
+        lives.push(ch.life.clone());
+        lives.len() - 1
+    };
     // Install the hosted class from its manifest (the two-step: the shell
     // exists first so the root proxy can be its instance, then the method
     // nodes — which carry the proxy — fill it in).
@@ -1150,6 +1170,7 @@ fn finish_host<'gc>(
             block_handles: Rc::new(RefCell::new(Vec::new())),
             boundary,
             chan_link,
+            life_idx,
         },
     );
     vm.service_classes.push(crate::vm::ServiceClassEntry {
@@ -1163,7 +1184,11 @@ fn finish_host<'gc>(
         proxy,
         &instance_selectors,
         &class_selectors,
-        &[("serviceStop", service_stop), ("==:", service_eq)],
+        &[
+            ("serviceStop", service_stop),
+            ("serviceEvents", service_events),
+            ("==:", service_eq),
+        ],
     );
     Ok(proxy)
 }
@@ -1269,6 +1294,23 @@ pub(crate) fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, Quoin
             "Worker.host: {what} must be a String"
         ))),
     }
+}
+
+/// The proxy-owned `serviceEvents` (installed on every service class beside
+/// `serviceStop` — a hosted class's own manifest may legitimately contain
+/// `events`, whence the prefix): the worker's lifecycle events channel
+/// (SUPERVISION.md slice 1). Worker-wide, so every proxy of one worker
+/// answers the same channel.
+pub(crate) fn service_events<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    _args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let life_idx = receiver
+        .with_native_state::<NativeServiceState, _, _>(|s| s.life_idx)
+        .map_err(QuoinError::Other)?;
+    crate::runtime::worker::life_events_channel(vm, mc, life_idx)
 }
 
 /// The proxy-owned `serviceStop` (installed on every service class): flag +

@@ -219,13 +219,16 @@ user code on the death path.
   supervisor-of-supervisors is user code. This is deliberately the *entire* tree
   story for v1: Erlang-style trees are a loop over these events, in qnlib or user
   code, later.
-- **`VM.services`** (or `VM.ps` enrichment, bikeshed): per supervised peer —
-  status (`running` / `restarting` / `dead` / `gaveUp`), incarnation, restart count,
-  last death reason, policy. `VM.claims` rows gain an explicit dead-peer marker
-  (today a dead peer is only implicit in its unwinding waiters). Counters (restarts,
-  give-ups) join the `ext_stats`-style registry; `VM.boundaryStats` rows already
-  survive death per incarnation — they gain the incarnation in the key or a merged
-  row, bikeshed.
+- **`VM.peers`** (renamed from the draft's `VM.services` in review — Damon,
+  2026-07-15: "services" was stale vocabulary once WorkerService was removed, and
+  the roster covers plain workers and extensions too; "peers" matches
+  `PeerDiedError`/`PeerClaims` and the stance's "one protocol, three peer
+  kinds"): per peer — status (`running` / `restarting` / `dead` / `gaveUp`),
+  incarnation, restart count, last death reason, policy. `VM.claims` rows gain
+  an explicit dead-peer marker (today a dead peer is only implicit in its
+  unwinding waiters). Counters (restarts, give-ups) join the `ext_stats`-style
+  registry; `VM.boundaryStats` rows already survive death per incarnation —
+  they gain the incarnation in the key or a merged row, bikeshed.
 
 ## 7. Interaction with replay (guarantee 8)
 
@@ -267,7 +270,56 @@ record/replay run containing a supervised death + restart.
    death event can reclassify it.
 1. **Death events:** reactor child-exit watch for process children (kqueue/pidfd),
    thread done-lane unification, lifecycle event records + per-service `events`
-   channel, `VM.services`, replay divergence coverage.
+   channel, `VM.peers`, replay divergence coverage.
+   **AS BUILT (2026-07-15).** One `Arc<LifeSink>` per spawned peer
+   (`src/runtime/lifecycle.rs`, registered in `vm.io.lives`): status +
+   bounded(64) staging of wire-data event records, emitted SINGLE-SOURCE at
+   the done-lane producers (thread wrapper, process mailbox reader, extension
+   death seams, the exit watch) with a first-terminal-wins flag, so racing
+   observers collapse to one death. Consumers: `w.events` / `e.events` /
+   `svc.serviceEvents` (the `serviceStop` naming precedent) answer a Quoin
+   Channel pumped by a `LifecycleBoot` task parking on the ordinary
+   `WorkerRecv` request — guarantee 8 with no new wake machinery; history from
+   spawn time; the terminal closes the stream; one channel per peer
+   (`vm.life_channels` is cache + GC root). The exit watch is
+   `IoRequest::ChildExit{pid}` (macOS: a dedicated kqueue's
+   `EVFILT_PROC`/`NOTE_EXIT`, the kqueue fd polled via `Async::new_nonblocking`
+   — plain `Async::new` runs an `fcntl` the kqueue fd rejects, and treating
+   that as "child gone" made the watch fire instantly on live children, caught
+   by unit test; Linux: `pidfd_open`; elsewhere: peek-polling), guarded by a
+   `waitid(WNOHANG|WNOWAIT)` peek before AND after registration (a kqueue
+   `NOTE_EXIT` does not fire retroactively on a zombie) — pure observation,
+   the owner's reap discipline untouched.
+   *Race analysis (asked in review, recorded here).* The peek/arm/re-peek
+   sandwich is sound for exit timing by interval walk: an exit before the
+   first peek is seen (WNOWAIT sees a zombie; ECHILD = already reaped); an
+   exit between peek and registration is the dangerous window (NOTE_EXIT
+   never fires retroactively) and is exactly what the RE-peek — which runs
+   strictly after the `kevent` registration returns — catches; an exit after
+   the re-peek necessarily post-dates the armed knote, so it fires. There is
+   no fourth interval. Two theoretical residues, both missed-wakeup-shaped
+   (never false deaths): (1) the peek does not retry `EINTR` and reads it as
+   "running" — practically unreachable, since `WNOHANG` never blocks and
+   non-blocking syscalls have essentially no interruption window; (2) `waitid`
+   keys on the PID, not the process, so an exit + reap + pid-recycle to
+   another of our children could misdirect the peek — irrelevant on the armed
+   paths (the knote and the Linux pidfd pin the PROCESS, and the exit event is
+   already pending), and neutralized on the poll-only fallback by the reap
+   discipline: the only reapers (`note_if_exited`, `kill_now`, `Drop`) all
+   emit the sink's terminal before or at the reap, so a recycled pid implies
+   the death/stop is already recorded and first-terminal-wins makes the
+   watch's late-or-never firing harmless (worst case: a leaked parked watch
+   task, which dies with the process like any relay agent). Armed once per extension on the
+   first `events` ask ("arming = asking"; package extensions get roster rows
+   but no watch until slice 3's policy). `terminate` and extension-handle drop
+   quiet-stop the sink FIRST, so the supervision surface reads them as stops
+   while `join` still raises the honest `PeerDiedError`. Deviations, recorded:
+   staging drops NEWEST on overflow (+`eventsDropped`), not the drop-oldest
+   above (`async_channel` cannot evict; events are rare); the events pump
+   re-mints `reason` as a symbol at the boundary (wire data cannot carry
+   symbols); the watch task marks only the sink — the claims `gone` marker
+   still updates on lazy detection, not on watch fire (slice-2 material,
+   where the watch consumer becomes the supervisor).
 2. **Respawn mechanics:** retained recipes (worker block+args are already held;
    extensions retain their spawn recipe), rebind-in-place with incarnation stamps,
    park-during-restart, give-up state, manifest-equality gate. Surface: `restart`

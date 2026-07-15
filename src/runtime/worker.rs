@@ -45,6 +45,9 @@ pub struct NativeWorkerHandle {
     inbox_tx: async_channel::Sender<WorkerMsg>,
     outbox_rx: async_channel::Receiver<WorkerMsg>,
     done_rx: async_channel::Receiver<Result<WireData, crate::worker::WorkerExit>>,
+    /// This peer's index in `vm.io.lives` (SUPERVISION.md slice 1) — the
+    /// lifecycle sink `events` and `terminate` reach.
+    life_idx: usize,
     /// This link's index in `vm.io.chan_links` (§6 channel relay).
     chan_link: usize,
     /// `join` consumes the done lane (its channel holds exactly one value);
@@ -267,6 +270,31 @@ fn start_block_worker<'gc>(
     )
 }
 
+/// Answer the peer's lifecycle events Channel (SUPERVISION.md slice 1),
+/// creating it — and its pump task — on the first ask via the qnlib
+/// `LifecycleBoot` helper (native code mints tasks and channels only through
+/// a Quoin block). Later asks answer the SAME channel: one consumer stream
+/// per peer; `vm.life_channels` is both the cache and the GC root.
+pub(crate) fn life_events_channel<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    life_idx: usize,
+) -> Result<Value<'gc>, QuoinError> {
+    if let Some(Some(ch)) = vm.life_channels.get(life_idx) {
+        return Ok(*ch);
+    }
+    let boot = crate::runtime::extension::resolve_global(vm, "LifecycleBoot").ok_or_else(|| {
+        QuoinError::Other("lifecycle events: LifecycleBoot is not installed (qnlib)".into())
+    })?;
+    let idx_val = vm.new_int(mc, life_idx as i64);
+    let ch = vm.call_method(mc, boot, "start:", vec![idx_val])?;
+    if vm.life_channels.len() <= life_idx {
+        vm.life_channels.resize(life_idx + 1, None);
+    }
+    vm.life_channels[life_idx] = Some(ch);
+    Ok(ch)
+}
+
 /// Wrap freshly spawned lanes in a Worker-class handle instance.
 #[allow(clippy::too_many_arguments)] // handle-wrapping helper threads the worker/channel context
 fn wrap_handle<'gc>(
@@ -284,6 +312,12 @@ fn wrap_handle<'gc>(
         return Err(QuoinError::Other("Worker: bad receiver".into()));
     };
     let reg_idx = vm.worker_registry.len();
+    let life_idx = {
+        let lives = vm.io.lives.clone();
+        let mut lives = lives.borrow_mut();
+        lives.push(ch.life.clone());
+        lives.len() - 1
+    };
     vm.worker_registry.push(crate::worker::WorkerReg {
         unit: unit.to_string(),
         label: unit.to_string(),
@@ -311,6 +345,7 @@ fn wrap_handle<'gc>(
             inbox_tx: ch.inbox_tx,
             outbox_rx: ch.outbox_rx,
             done_rx: ch.done_rx,
+            life_idx,
             chan_link,
             joined: std::cell::Cell::new(false),
         },
@@ -1129,7 +1164,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
         // handle.terminate — REAL cancellation, process backing only (a
         // thread worker cannot be killed; orphan it instead). Idempotent;
         // join afterwards reports the exit as an error.
-        .instance_method("terminate", |_vm, _mc, receiver, _args| {
+        .instance_method("terminate", |vm, _mc, receiver, _args| {
             let (grip, backing) = receiver
                 .with_native_state::<NativeWorkerHandle, _, _>(|h| (h.grip.clone(), h.backing))
                 .map_err(QuoinError::Other)?;
@@ -1139,6 +1174,16 @@ pub fn build_worker_class() -> NativeClassBuilder {
                      (this one is {backing}-backed) — orphan or join it instead"
                 )));
             };
+            // An explicit kill is an instruction, not a failure
+            // (SUPERVISION.md §2): mark the peer STOPPED before the mailbox
+            // reader can observe the corpse and call it died. `join` still
+            // reports the death honestly (the done lane is untouched).
+            let life_idx = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| h.life_idx)
+                .map_err(QuoinError::Other)?;
+            if let Some(sink) = vm.io.lives.borrow().get(life_idx) {
+                sink.emit_stopped("terminated");
+            }
             if let Some(c) = grip.lock().expect("child grip").as_mut() {
                 let _ = c.kill();
             }
@@ -1190,6 +1235,100 @@ pub fn build_worker_class() -> NativeClassBuilder {
             "Park until the worker finishes. A `Worker.start:` block worker answers the \
              block's value (copied); a unit worker answers nil. Raises the worker's error, \
              catchably, if it failed. A handle can be joined once -- a second join raises.",
+        )
+        .instance_method("events", |vm, mc, receiver, _args| {
+            let life_idx = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| h.life_idx)
+                .map_err(QuoinError::Other)?;
+            life_events_channel(vm, mc, life_idx)
+        })
+        .doc(
+            "This worker's lifecycle events, as a Channel of Maps -- 'kind' is 'spawned', \
+             'stopped' (a clean finish, a reported failure, `terminate`), or 'died' (the \
+             isolate VANISHED -- with 'reason' and 'message'; SUPERVISION.md). The channel \
+             closes after the terminal event. Events are kept from spawn time, so a late \
+             consumer still sees the history; asking twice answers the same channel.",
+        )
+        // ---- lifecycle plumbing (SUPERVISION.md slice 1, internal) ----
+        .class_method("lifeNext:", |vm, mc, _receiver, args| {
+            let idx = args[0]
+                .as_i64()
+                .ok_or_else(|| QuoinError::Other("Worker.lifeNext: expects a peer index".into()))?
+                as usize;
+            let rx = vm
+                .io
+                .lives
+                .borrow()
+                .get(idx)
+                .map(|sink| sink.rx.clone())
+                .ok_or_else(|| QuoinError::Other("Worker.lifeNext: unknown peer".into()))?;
+            match vm.await_io(IoRequest::WorkerRecv(rx))? {
+                // Build the record map directly rather than through the wire
+                // walkers: `reason` is a SYMBOL on every other surface
+                // (`PeerDiedError.reason`, `VM.peers`) and wire data cannot
+                // carry symbols, so the staging carries its name and the
+                // boundary re-mints it here.
+                IoResult::WorkerMsg(Some(WorkerMsg::Data(WireData::Map(fields)))) => {
+                    let entries: Vec<(String, Value)> = fields
+                        .iter()
+                        .map(|(k, v)| {
+                            let text = match v {
+                                WireData::Str(t) => t.clone(),
+                                other => format!("{other:?}"),
+                            };
+                            let val = if k == "reason" {
+                                vm.new_symbol(mc, text)
+                            } else {
+                                vm.new_string(mc, text)
+                            };
+                            (k.clone(), val)
+                        })
+                        .collect();
+                    Ok(vm.new_map(mc, entries))
+                }
+                // Staging closed (the terminal event was delivered): end of stream.
+                IoResult::WorkerMsg(_) => Ok(Value::Nil),
+                other => Err(QuoinError::Other(format!(
+                    "Worker.lifeNext: unexpected result {other:?}"
+                ))),
+            }
+        })
+        .doc(
+            "Internal (SUPERVISION.md slice 1): park for the next staged lifecycle event of \
+             peer N, nil when the stream ends. The `LifecycleBoot` pump's wait -- the \
+             `events` channels are fed through this; not a user-facing surface.",
+        )
+        .class_method("lifeWatch:", |vm, _mc, _receiver, args| {
+            let idx = args[0]
+                .as_i64()
+                .ok_or_else(|| QuoinError::Other("Worker.lifeWatch: expects a peer index".into()))?
+                as usize;
+            let sink = vm
+                .io
+                .lives
+                .borrow()
+                .get(idx)
+                .cloned()
+                .ok_or_else(|| QuoinError::Other("Worker.lifeWatch: unknown peer".into()))?;
+            let Some(pid) = sink.pid else {
+                return Ok(Value::Nil);
+            };
+            if sink.is_terminal() {
+                return Ok(Value::Nil);
+            }
+            let _ = vm.await_io(IoRequest::ChildExit { pid })?;
+            // First terminal wins: a death the lazy path (or a stop) already
+            // observed makes this a no-op.
+            sink.emit_died(
+                crate::error::PeerDeathReason::Exited,
+                "process exited (observed by the exit watch)",
+            );
+            Ok(Value::Nil)
+        })
+        .doc(
+            "Internal (SUPERVISION.md slice 1): park until peer N's child process exits \
+             (kqueue/pidfd -- observation, never a reap) and record the death. Armed once \
+             per extension by the first `events` ask; not a user-facing surface.",
         )
         // ---- worker side (class-side lanes, live only inside a worker) ----
         .class_method("receive", |vm, mc, _receiver, _args| {

@@ -10,18 +10,25 @@ use super::*;
 /// travel the done lane. The thread is detached — its lifecycle is observed
 /// through the lanes (`join`), and process exit ends unjoined workers.
 pub fn spawn_worker(path: String) -> WorkerChannels {
-    spawn_worker_with(move |link| run_worker_unit(&path, link))
+    let label = path.clone();
+    spawn_worker_with(label, "worker", move |link| run_worker_unit(&path, link))
 }
 
 /// Spawn a worker running a portable block (docs/internal/CONCURRENCY_ARCH.md §10):
 /// same lanes, same lifecycle; `join` returns the BLOCK'S VALUE (copied),
 /// unlike unit workers' nil.
 pub fn spawn_worker_block(job: PortableBlock) -> WorkerChannels {
-    spawn_worker_with(move |link| run_worker_block(job, link))
+    spawn_worker_with("<block>".to_string(), "worker", move |link| {
+        run_worker_block(job, link)
+    })
 }
 
 /// The shared thread + lane setup; `body` is the worker's whole life.
+/// `label`/`kind` seed the peer's lifecycle sink (SUPERVISION.md slice 1) —
+/// this wrapper is the single event source for thread backing.
 fn spawn_worker_with(
+    label: String,
+    kind: &'static str,
     body: impl FnOnce(WorkerLink) -> Result<WireData, String> + Send + 'static,
 ) -> WorkerChannels {
     let (inbox_tx, inbox_rx) = async_channel::unbounded();
@@ -35,6 +42,8 @@ fn spawn_worker_with(
     let (chan_to_worker_tx, chan_to_worker_rx) = async_channel::unbounded();
     let (chan_to_parent_tx, chan_to_parent_rx) = async_channel::unbounded();
     let id = SPAWNED.fetch_add(1, Ordering::Relaxed);
+    let life = crate::runtime::lifecycle::LifeSink::new(label, kind, "thread", None);
+    let thread_life = life.clone();
     std::thread::Builder::new()
         .name(format!("qn-worker-{id}"))
         .spawn(move || {
@@ -69,6 +78,11 @@ fn spawn_worker_with(
                 },
                 |r| r.map_err(WorkerExit::Failed),
             );
+            match &out {
+                Ok(_) => thread_life.emit_stopped(""),
+                Err(WorkerExit::Failed(msg)) => thread_life.emit_stopped(msg),
+                Err(WorkerExit::Died { reason, detail }) => thread_life.emit_died(*reason, detail),
+            }
             COMPLETED.fetch_add(1, Ordering::Relaxed);
             let _ = done_tx.send_blocking(out);
         })
@@ -81,6 +95,7 @@ fn spawn_worker_with(
         dispatch_tx,
         chan_tx: chan_to_worker_tx,
         chan_rx: chan_to_parent_rx,
+        life,
     }
 }
 
@@ -92,7 +107,10 @@ pub fn spawn_worker_hosted_block(
     pb: PortableBlock,
     lanes: u32,
 ) -> WorkerChannels {
-    spawn_worker_with(move |link| run_worker_hosted_block(path.as_deref(), pb, lanes, link))
+    let label = format!("svc:{}", path.as_deref().unwrap_or("{host block}"));
+    spawn_worker_with(label, "hosted", move |link| {
+        run_worker_hosted_block(path.as_deref(), pb, lanes, link)
+    })
 }
 
 fn run_worker_hosted_block(
@@ -661,6 +679,23 @@ pub fn spawn_worker_process(
         .map_err(|e| format!("spawn worker process: {e}"))?;
     let pid = child.id();
     let grip: ChildGrip = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+    // The lifecycle sink (SUPERVISION.md slice 1): the mailbox reader below is
+    // the single event source for process backing — it sees clean terminals
+    // and EOF-without-terminal (death) alike.
+    let life = crate::runtime::lifecycle::LifeSink::new(
+        match &body {
+            ProcessBody::Block(_) => format!("svc:{}", unit.as_deref().unwrap_or("{host block}")),
+            ProcessBody::Job(_) => "<block>".to_string(),
+            ProcessBody::Plain => unit.clone().unwrap_or_else(|| "@none".to_string()),
+        },
+        if matches!(body, ProcessBody::Block(_)) {
+            "hosted"
+        } else {
+            "worker"
+        },
+        "process",
+        Some(pid),
+    );
 
     // Accept with a bounded wait: poll the listener in nonblocking mode so a
     // child that dies pre-connect becomes an error, not a hang. The child
@@ -878,6 +913,7 @@ pub fn spawn_worker_process(
     {
         let mut sock = mail_sock;
         let reader_grip = grip.clone();
+        let reader_life = life.clone();
         std::thread::spawn(move || {
             let mut done_sent = false;
             while let Ok(msg) = read_msg_frame(&mut sock) {
@@ -890,12 +926,14 @@ pub fn spawn_worker_process(
                         let _ = outbox_tx.send_blocking(WorkerMsg::Channel(recv));
                     }
                     Msg::CallReturnData { value } => {
+                        reader_life.emit_stopped("");
                         let _ = done_tx.send_blocking(Ok(value));
                         done_sent = true;
                     }
                     Msg::CallReturnError { message, .. } => {
                         // The child ran and REPORTED (a unit compile error, the
                         // body raising) — an ordinary failure, not a death.
+                        reader_life.emit_stopped(&message);
                         let _ = done_tx.send_blocking(Err(WorkerExit::Failed(message)));
                         done_sent = true;
                     }
@@ -912,9 +950,11 @@ pub fn spawn_worker_process(
                     .and_then(|c| c.try_wait().ok().flatten())
                     .map(|s| format!(" ({s})"))
                     .unwrap_or_default();
+                let detail = format!("worker process exited{status}");
+                reader_life.emit_died(crate::error::PeerDeathReason::Exited, &detail);
                 let _ = done_tx.send_blocking(Err(WorkerExit::Died {
                     reason: crate::error::PeerDeathReason::Exited,
-                    detail: format!("worker process exited{status}"),
+                    detail,
                 }));
             }
             COMPLETED.fetch_add(1, Ordering::Relaxed);
@@ -934,6 +974,7 @@ pub fn spawn_worker_process(
             dispatch_tx,
             chan_tx: chan_to_worker_tx,
             chan_rx: chan_to_parent_rx,
+            life,
         },
         pid,
         grip,

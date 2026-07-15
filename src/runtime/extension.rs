@@ -416,6 +416,12 @@ pub struct NativeExtension {
     namespace: Option<String>,
     /// Boundary-profiling counters (shared with `vm.io.ext_stats`, which outlives us).
     stats: Rc<RefCell<BoundaryStats>>,
+    /// Lifecycle sink (shared with `vm.io.lives`; SUPERVISION.md slice 1):
+    /// the death seams below emit through it — single source, first terminal
+    /// wins, so the exit watch and the lazy detection never double-report.
+    life: std::sync::Arc<crate::runtime::lifecycle::LifeSink>,
+    /// Its index in `vm.io.lives` — what `events` hands the pump and watch.
+    life_idx: usize,
 }
 
 /// One open conversation, pinned to a lane socket (keyed by task in
@@ -466,6 +472,10 @@ impl NativeExtension {
     fn kill_now(&mut self) {
         self.dead = true;
         self.claims.borrow_mut().gone = Some("died");
+        self.life.emit_died(
+            crate::error::PeerDeathReason::Exited,
+            "killed after a cancelled call desynced the connection",
+        );
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.sock_path);
@@ -479,10 +489,13 @@ impl NativeExtension {
             Ok(Some(status)) => {
                 self.dead = true;
                 self.claims.borrow_mut().gone = Some("died");
-                Some(match status.code() {
+                let detail = match status.code() {
                     Some(code) => format!("exited with status {code}"),
                     None => "terminated by signal".to_string(),
-                })
+                };
+                self.life
+                    .emit_died(crate::error::PeerDeathReason::Exited, &detail);
+                Some(detail)
             }
             _ => None,
         }
@@ -502,6 +515,9 @@ impl AnyCollect for NativeExtension {
 
 impl Drop for NativeExtension {
     fn drop(&mut self) {
+        // Dropping the handle is the owner letting go — a STOP, not a death
+        // (first terminal wins: the teardown kill below must not read as one).
+        self.life.emit_stopped("extension handle dropped");
         // Best-effort teardown: enqueue every lane fd and this extension's handles for the
         // driver to reap, kill + reap the child, and remove the socket file.
         self.reap.borrow_mut().extend(self.socks.iter().copied());
@@ -1708,8 +1724,18 @@ fn spawn_and_connect<'gc>(
         rows: HashMap::new(),
     }));
     vm.io.ext_stats.borrow_mut().push(stats.clone());
-    let claims = Rc::new(RefCell::new(PeerClaims::new(peer, lanes)));
+    let claims = Rc::new(RefCell::new(PeerClaims::new(peer.clone(), lanes)));
     vm.io.claim_peers.borrow_mut().push(claims.clone());
+    // Lifecycle sink (SUPERVISION.md slice 1): the roster row for `VM.peers`
+    // and the staging behind `e.events`; the exit watch arms lazily there.
+    let life =
+        crate::runtime::lifecycle::LifeSink::new(peer, "extension", "process", Some(child.id()));
+    let life_idx = {
+        let lives = vm.io.lives.clone();
+        let mut lives = lives.borrow_mut();
+        lives.push(life.clone());
+        lives.len() - 1
+    };
 
     let class = vm.get_or_create_builtin_class(mc, "Extension");
     let ext_val = vm.new_native_state(
@@ -1730,6 +1756,8 @@ fn spawn_and_connect<'gc>(
             resource_reap: Rc::new(RefCell::new(Vec::new())),
             namespace,
             stats,
+            life,
+            life_idx,
         },
     );
     Ok((ext_val, manifest))
@@ -1983,6 +2011,44 @@ pub fn build_extension_class() -> NativeClassBuilder {
              Extension handle. The unmanaged escape hatch for dev/testing: the manifest's \
              class names install VERBATIM as globals (no namespace enforcement); the \
              managed path is `loadPackage:`.",
+        )
+        .instance_method("events", |vm, mc, receiver, _args| {
+            // Catch up with a death nobody observed yet (a dead-idle child is
+            // a zombie until someone looks), arm the exit watch ONCE so
+            // future idle deaths surface without a call, then hand out the
+            // channel. Watch first, channel last: the channel Value must not
+            // sit on this frame across the watch spawn's possible yield.
+            let life_idx = receiver
+                .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+                    let _ = e.note_if_exited();
+                    e.life_idx
+                })
+                .map_err(QuoinError::Other)?;
+            let sink = vm.io.lives.borrow().get(life_idx).cloned();
+            if let Some(sink) = sink
+                && sink.pid.is_some()
+                && !sink.is_terminal()
+                && !sink
+                    .watch_armed
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let boot = resolve_global(vm, "LifecycleBoot").ok_or_else(|| {
+                    QuoinError::Other(
+                        "lifecycle events: LifecycleBoot is not installed (qnlib)".into(),
+                    )
+                })?;
+                let idx_val = vm.new_int(mc, life_idx as i64);
+                vm.call_method(mc, boot, "watch:", vec![idx_val])?;
+            }
+            crate::runtime::worker::life_events_channel(vm, mc, life_idx)
+        })
+        .doc(
+            "This extension's lifecycle events, as a Channel of Maps -- 'kind' is 'spawned', \
+             'stopped' (the handle was dropped), or 'died' (the process is GONE -- with \
+             'reason' and 'message'; SUPERVISION.md). The first ask arms an OS exit watch, \
+             so an idle crash surfaces here without anyone calling the extension; the \
+             channel closes after the terminal event, history is kept from spawn time, and \
+             asking twice answers the same channel.",
         )
         // `Extension loadPackage: '<dir>'` -> load an extension *package* (a folder with an
         // `quoin.toml` launch/identity spec + an optional `init.qn` of Quoin-side glue;

@@ -8,6 +8,10 @@
 //!
 //! The extension flavors of the same seams live in `extension.rs`
 //! (`extension_crash_isolation`, `extension_death_while_queued_fails_fast`).
+//!
+//! Slice 1 rides the same harness: lifecycle events (`events` /
+//! `serviceEvents`), the `VM.peers` roster, and the extension exit watch —
+//! whose whole point (gap c) is observing an idle death no call would find.
 
 use std::process::Command;
 
@@ -141,4 +145,66 @@ var got = jobs.receive;
     .if:{ 'PASS'.print } else:{ ('FAIL ' + j + ' ' + got.s).print };
 "#;
     assert_passes("chan", script, &[], true);
+}
+
+#[test]
+fn lifecycle_events_tell_the_stop_from_the_death() {
+    // SUPERVISION.md slice 1: events + roster. A thread worker finishing is
+    // 'stopped'; a terminated process worker is 'stopped'("terminated") on the
+    // supervision surface even though `join` honestly raises the typed death;
+    // history is kept for late consumers; asking twice answers one channel.
+    let script = r#"
+var ok = true;
+var w1 = Worker.start:{ 41 + 1 };
+(w1.join == 42).else:{ ok = false };
+var ev1 = w1.events;
+((ev1.receive.at:'kind') == 'spawned').else:{ ok = false; 'e1'.print };
+((ev1.receive.at:'kind') == 'stopped').else:{ ok = false; 'e2'.print };
+(ev1.receive == nil).else:{ ok = false; 'e3'.print };
+
+var w2 = Worker.start:{ Async.sleep:60000 } backing:'process';
+w2.terminate;
+var j = { w2.join; 'no-error' }.catch:{ |e:PeerDiedError| 'typed' };
+(j == 'typed').else:{ ok = false; 'e4'.print };
+var ev2 = w2.events;
+(w2.events == ev2).else:{ ok = false; 'e5'.print };
+((ev2.receive.at:'kind') == 'spawned').else:{ ok = false; 'e6'.print };
+var t = ev2.receive;
+(((t.at:'kind') == 'stopped') && ((t.at:'message') == 'terminated'))
+    .else:{ ok = false; ('e7 ' + t.s).print };
+
+var stopped = 0;
+VM.peers.each:{ |p| ((p.at:'status') == 'stopped').if:{ stopped = stopped + 1 } };
+(stopped == 2).else:{ ok = false; 'e8'.print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_passes("events", script, &[], false);
+}
+
+#[test]
+fn extension_idle_death_surfaces_through_the_exit_watch() {
+    // Gap (c) closed: NOBODY calls the extension after it dies — the armed
+    // exit watch alone must deliver the death event, type the next call's
+    // fail-fast, and mark the roster row.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
+    let script = format!(
+        r#"
+var e = Extension.spawn:'{ext_bin}';
+((e.call:'ping' with:'') == 'pong').else:{{ 'FAIL ping'.print }};
+var ev = e.events;
+((ev.receive.at:'kind') == 'spawned').else:{{ 'FAIL spawned'.print }};
+var pid = nil;
+VM.peers.each:{{ |p| ((p.at:'kind') == 'extension').if:{{ pid = p.at:'pid' }} }};
+[IO]File.write:pid.s to:'@pidfile@';
+var d = ev.receive;
+var deadCall = {{ e.call:'ping' with:'' }}.catch:{{ |ex:PeerDiedError| 'typed' }};
+var marked = nil;
+VM.peers.each:{{ |p| ((p.at:'kind') == 'extension').if:{{ marked = p.at:'status' }} }};
+((((d.at:'kind') == 'died') && ((d.at:'reason') == #exited))
+    && ((deadCall == 'typed') && (marked == 'died')))
+    .if:{{ 'PASS'.print }}
+    else:{{ ('FAIL ' + d.s + ' ' + deadCall.s + ' ' + marked.s).print }};
+"#
+    );
+    assert_passes("extwatch", &script, &[], true);
 }

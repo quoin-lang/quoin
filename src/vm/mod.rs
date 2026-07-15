@@ -513,6 +513,11 @@ pub struct Io {
     /// worker VM's entry 0 is its parent link; a parent VM gains one entry
     /// per spawned worker (registered when the handle/proxy is minted).
     pub chan_links: Vec<crate::worker::ChanLink>,
+    /// Lifecycle sinks, one per spawned peer — hosted worker, plain worker,
+    /// extension (SUPERVISION.md slice 1) — registered at spawn and read by
+    /// `VM.peers` and the per-peer events pumps. Entries outlive their peer:
+    /// the roster is also the post-mortem.
+    pub lives: crate::runtime::lifecycle::LifeRegistry,
 }
 
 /// Per-instruction instrumentation hooks, grouped out of `VmState`. Both `None` on a normal run, so
@@ -778,6 +783,11 @@ pub struct VmState<'gc> {
     /// later returns of the same class carry only the name.
     #[collect(require_static)]
     pub hosted_announced: std::collections::HashSet<String>,
+    /// The per-peer lifecycle events Channels, indexed like `vm.io.lives`
+    /// (SUPERVISION.md slice 1): the GC root and the ask-twice cache — a
+    /// second `events` ask answers the SAME channel (one consumer stream per
+    /// peer). `None` until asked.
+    pub life_channels: Vec<Option<Value<'gc>>>,
 }
 
 pub enum VmStatus<'gc> {
@@ -926,6 +936,7 @@ impl<'gc> VmState<'gc> {
                 ext_stats: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 claim_peers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                 chan_links: Vec::new(),
+                lives: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             },
             instrumentation: Instrumentation {
                 debug: None,
@@ -934,6 +945,7 @@ impl<'gc> VmState<'gc> {
             options,
             handle_table: crate::handle_table::HandleTable::new(),
             hosted: Vec::new(),
+            life_channels: Vec::new(),
             service_classes: Vec::new(),
             pending_host_block: None,
             hosted_announced: std::collections::HashSet::new(),

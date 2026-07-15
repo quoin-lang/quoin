@@ -1,0 +1,22 @@
+"* Peer lifecycle events boot (docs/internal/SUPERVISION.md slice 1, internal).
+"* Native code cannot mint a channel or a task directly — a task always runs a
+"* Quoin block — so these are those blocks: `events` / `serviceEvents` call
+"* `start:` for the channel and its pump task (`Worker.lifeNext:` parks for
+"* each staged record; nil ends the stream), and an extension's first `events`
+"* ask calls `watch:` to arm the OS exit watch (`Worker.lifeWatch:` parks on
+"* the child's exit and records the death). Not a user-facing surface.
+LifecycleBoot <- {
+    .meta <-- {
+        start: -> { |i:Integer|
+            var ch = Channel.buffered:16
+            Task.spawn:{
+                var m = Worker.lifeNext:i
+                { m != nil }.whileDo:{ ch.send:m; m = Worker.lifeNext:i }
+                ch.close
+            }
+            ch
+        }
+
+        watch: -> { |i:Integer| Task.spawn:{ Worker.lifeWatch:i }; nil }
+    }
+}

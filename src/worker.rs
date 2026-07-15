@@ -352,6 +352,10 @@ pub struct WorkerChannels {
     pub inbox_tx: async_channel::Sender<WorkerMsg>,
     pub outbox_rx: async_channel::Receiver<WorkerMsg>,
     pub done_rx: async_channel::Receiver<Result<WireData, WorkerExit>>,
+    /// The peer's lifecycle sink (SUPERVISION.md slice 1), created at spawn so
+    /// events staged before anyone asks for `events` are kept; the parent
+    /// registers it in `vm.io.lives` when the handle/proxy is minted.
+    pub life: std::sync::Arc<crate::runtime::lifecycle::LifeSink>,
     pub control_tx: async_channel::Sender<ControlReq>,
     /// Hosted-object dispatch (the service proxy's lane); unused by plain
     /// workers, whose serve loop never reads the other end.
@@ -783,6 +787,9 @@ fn dead_letter_channels() -> WorkerChannels {
     let _ = done_tx.try_send(Err(WorkerExit::Failed(
         "workers are not supported on this platform".to_string(),
     )));
+    let life =
+        crate::runtime::lifecycle::LifeSink::new("<wasm>".to_string(), "worker", "thread", None);
+    life.emit_stopped("workers are not supported on this platform");
     WorkerChannels {
         inbox_tx,
         outbox_rx,
@@ -791,6 +798,7 @@ fn dead_letter_channels() -> WorkerChannels {
         dispatch_tx,
         chan_tx,
         chan_rx,
+        life,
     }
 }
 

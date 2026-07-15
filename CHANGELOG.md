@@ -30,6 +30,24 @@ under **Changed**, with the migration.
   owner-side roots released — a later `send:` reaches a live receiver instead
   of vanishing into the closed lane.
 
+- **Peer lifecycle events + `VM.peers`** (SUPERVISION.md slice 1). Every spawned
+  peer — hosted worker, plain worker, extension — now has a lifecycle stream:
+  `w.events` on worker handles, `e.events` on extensions, `svc.serviceEvents` on
+  hosted-object proxies answer a Channel of event Maps (`kind` =
+  `spawned` / `stopped` / `died`, plus `reason` symbol and `message` for
+  deaths). History is kept from spawn time, so a late consumer still sees the
+  whole story; the channel closes after the terminal event; asking twice
+  answers the same channel. An extension's first `events` ask arms an **OS
+  child-exit watch** (kqueue on macOS, pidfd on Linux — observation only, never
+  a reap), so an *idle* extension crash finally surfaces without anyone calling
+  it. `terminate` and a dropped extension handle count as *stops*, not deaths —
+  the supervision surface distinguishes an instruction from a failure even
+  while `join` still reports the kill honestly as `PeerDiedError`. The roster
+  is `VM.peers`: one row per peer with kind, backing, pid, status
+  (`running`/`stopped`/`died`), the death reason/message, and an
+  `eventsDropped` counter. All lifecycle wakes ride the logged scheduler path:
+  a run that consumes events records and replays identically.
+
 - **Generic Map keys** — `Map(K V)` annotations now take any key type; the old
   "Map keys are String" resolve-time warning is gone (the runtime has keyed by
   any value since the hash-ladder map store). `V` stays runtime-tag-enforced

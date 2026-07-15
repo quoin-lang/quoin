@@ -658,6 +658,12 @@ impl IoBackend for SmolBackend {
                     })
                 }))
             }),
+            // The extension exit watch (SUPERVISION.md slice 1): observation
+            // only, never a reap.
+            IoRequest::ChildExit { pid } => Box::pin(async move {
+                await_child_exit(pid).await;
+                IoResult::ChildExited
+            }),
             IoRequest::Write { id, bytes } => Box::pin(async move {
                 // Leased like Read. An aborted write may leave the peer with a
                 // partial message — the canceller's problem — but the stream itself
@@ -1214,3 +1220,125 @@ impl IoBackend for SmolBackend {
         }
     }
 }
+
+/// True when `pid` has already exited — a zombie (`waitid` with `WNOWAIT`
+/// peeks exit state without consuming it, so the owner's later reap still
+/// works) or already reaped (`ECHILD`). Only ever called on pids this process
+/// spawned (extension children).
+fn child_already_exited(pid: u32) -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let r = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if r == 0 {
+        // With WNOHANG, "still running" is success with the siginfo left blank.
+        siginfo_pid(&info) != 0
+    } else {
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn siginfo_pid(info: &libc::siginfo_t) -> i32 {
+    // The linux libc exposes the union member behind an unsafe accessor.
+    unsafe { info.si_pid() }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn siginfo_pid(info: &libc::siginfo_t) -> i32 {
+    info.si_pid
+}
+
+/// Park until child `pid` exits (SUPERVISION.md slice 1's exit watch):
+/// pure observation — no reap, so kill/wait/Drop ownership is untouched. The
+/// peek/arm/re-peek dance closes the race where the child exits before (or
+/// while) the watch registers, which would otherwise wait forever on an event
+/// that already fired (a kqueue `NOTE_EXIT` does not fire retroactively).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn await_child_exit(pid: u32) {
+    if child_already_exited(pid) {
+        return;
+    }
+    match child_exit_watch(pid) {
+        Ok(watch) => {
+            if !child_already_exited(pid) {
+                let _ = watch.readable().await;
+            }
+        }
+        // The fd machinery failed — which is NOT the child being gone (the
+        // peek owns that question): degrade to polling it. Coarse but never
+        // a false death.
+        Err(_) => poll_child_exit(pid).await,
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn await_child_exit(pid: u32) {
+    poll_child_exit(pid).await;
+}
+
+/// Portable fallback: poll the peek. Coarse but correct.
+async fn poll_child_exit(pid: u32) {
+    while !child_already_exited(pid) {
+        Timer::after(Duration::from_millis(200)).await;
+    }
+}
+
+/// A pollable fd that becomes readable when `pid` exits: a `pidfd` (readable
+/// on exit, holds a stable reference to the process — immune to pid reuse).
+#[cfg(target_os = "linux")]
+fn child_exit_watch(pid: u32) -> std::io::Result<async_io::Async<std::os::fd::OwnedFd>> {
+    use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
+    async_io::Async::new_nonblocking(owned)
+}
+
+/// A pollable fd that becomes readable when `pid` exits: a dedicated kqueue
+/// with an `EVFILT_PROC`/`NOTE_EXIT` knote — the kqueue fd itself polls
+/// readable once the event is pending.
+#[cfg(target_os = "macos")]
+fn child_exit_watch(pid: u32) -> std::io::Result<async_io::Async<std::os::fd::OwnedFd>> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let kq = unsafe { libc::kqueue() };
+    if kq < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(kq) };
+    let change = libc::kevent {
+        ident: pid as usize,
+        filter: libc::EVFILT_PROC,
+        flags: libc::EV_ADD | libc::EV_ENABLE,
+        fflags: libc::NOTE_EXIT,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let r = unsafe {
+        libc::kevent(
+            owned.as_raw_fd(),
+            &change,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // `new_nonblocking` skips the `fcntl` a kqueue fd rejects — this fd is
+    // only ever polled, never read.
+    async_io::Async::new_nonblocking(owned)
+}
+
+#[cfg(test)]
+#[path = "io_backend_smol_tests.rs"]
+mod tests;

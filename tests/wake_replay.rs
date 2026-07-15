@@ -166,3 +166,70 @@ fn wake_log_ring_dumps_on_deadlock() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// SUPERVISION.md slice 1 (guarantee 8): the lifecycle machinery's wakes — the
+/// events pump's staged-record waits, the hosted service's spawn/ready/stop
+/// traffic — all ride the logged Io path, so a run that consumes lifecycle
+/// events records and replays identically. (Deliberately THREAD backing with a
+/// clean stop: process/extension DEATHS involve real subprocess timing, the
+/// documented arc-4 injection boundary.)
+const LIFECYCLE_SCRIPT: &str = r#"var svc = Worker.with:{ Set.new };
+var ev = svc.serviceEvents;
+(ev.receive.at:'kind').print;
+svc.add:1;
+svc.add:2;
+('count: ' + svc.count.s).print;
+svc.serviceStop;
+(ev.receive.at:'kind').print;
+(ev.receive == nil).if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+
+#[test]
+fn lifecycle_events_replay_identically() {
+    let dir = scratch_dir("lifecycle");
+    let script = dir.join("prog.qn");
+    std::fs::write(&script, LIFECYCLE_SCRIPT).unwrap();
+
+    for seed in ["3", "20260715"] {
+        let log1 = dir.join(format!("record_{seed}.log"));
+        let log2 = dir.join(format!("replay_{seed}.log"));
+        let rec = run_qn(
+            &script,
+            &[
+                ("QN_SCHED_STRESS", seed),
+                ("QN_WAKE_RECORD", log1.to_str().unwrap()),
+            ],
+        );
+        let rec_out = String::from_utf8_lossy(&rec.stdout).to_string();
+        assert!(
+            rec.status.success() && rec_out.contains("PASS"),
+            "record run (seed {seed}) failed.\nstdout:\n{rec_out}\nstderr:\n{}",
+            String::from_utf8_lossy(&rec.stderr)
+        );
+        let rep = run_qn(
+            &script,
+            &[
+                ("QN_SCHED_STRESS", seed),
+                ("QN_WAKE_REPLAY", log1.to_str().unwrap()),
+                ("QN_WAKE_RECORD", log2.to_str().unwrap()),
+            ],
+        );
+        let rep_out = String::from_utf8_lossy(&rep.stdout).to_string();
+        let rep_err = String::from_utf8_lossy(&rep.stderr).to_string();
+        assert!(
+            rep.status.success() && rep_out.contains("PASS"),
+            "replay run (seed {seed}) failed.\nstdout:\n{rep_out}\nstderr:\n{rep_err}"
+        );
+        assert!(
+            !rep_err.contains("divergence") && !rep_err.contains("unconsumed"),
+            "replay run (seed {seed}) diverged.\nstderr:\n{rep_err}"
+        );
+        assert_eq!(rec_out, rep_out, "stdout diverged (seed {seed})");
+        assert_eq!(
+            std::fs::read_to_string(&log1).unwrap(),
+            std::fs::read_to_string(&log2).unwrap(),
+            "event streams diverged (seed {seed})"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
