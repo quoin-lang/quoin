@@ -136,9 +136,14 @@ v1.
   error** carrying the driver message (and SQLSTATE where the driver provides it). A structured
   `[ADBC]Error` class with `.sqlState` / `.vendorCode` is a follow-up.
 - **Concurrency.** The ADBC sync API blocks the *extension* thread; the host fiber merely parks on the
-  socket reply, so the VM stays responsive while a query runs. One `adbc` process serializes its calls
-  (ADBC connections are single-threaded); multi-connection parallelism (threads / multiple processes)
-  is later.
+  socket reply, so the VM stays responsive while a query runs. The extension declares **8 lanes**
+  (`ext.lanes(8)`, `quoin-ext-proto/PROTOCOL.md` ‡): the host opens eight connections, each served on
+  its own SDK thread, and its per-instance claim (`ACTOR_OBJECTS.md` §5.1 as adopted for extensions)
+  serializes the calls to any ONE `Connection` — the ADBC single-threaded-connection requirement,
+  enforced host-side — while queries on different `Connection`s genuinely run in parallel.
+  Class-side sends contend only on lanes, so `connect`s overlap too. `Async.gather:` over two
+  connections is now real two-query parallelism, not queued turns; a Quoin host too old to open
+  lanes degrades to the previous serialized behavior.
 
 ## 7. v1 scope
 

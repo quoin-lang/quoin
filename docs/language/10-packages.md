@@ -111,6 +111,14 @@ hello-tool 0.2.0  [bin: hello]  A pure-Quoin program installed onto the PATH.
 >   `examples/greeter.rs`) or the Python SDK (`sdk/python/quoin_ext`); the VM cannot
 >   tell the two apart. The binary declares **simple** class names; the *package*
 >   namespace is applied by the host at install.
+> - **Extension concurrency is per instance, exactly like hosted objects** (chapter
+>   5): an extension that declares `lanes` (`Extension::lanes(8)` in Rust,
+>   `Extension(lanes=8)` in Python) serves that many connections at once, so calls
+>   to *different* instances run in parallel while calls to any *one* instance still
+>   serialize in arrival order — its mailbox. The in-repo `adbc` extension declares
+>   8: queries on two `Connection`s genuinely overlap. Deadlock detection and
+>   `VM.claims` / `VM.claimsReport` cover extension claims too. The default is 1 —
+>   today's one-call-at-a-time behavior, and what an undeclared extension keeps.
 > - An optional **`init.qn`** runs after an extension's classes install — Quoin-side
 >   glue like convenience methods reopened onto the installed classes
 >   (`[ADBC]Connection`'s `transaction:` sugar is exactly this). A both-kind package

@@ -90,7 +90,9 @@ namespace = "Vectors"     # optional; defaults to PascalCase of the directory na
 
 The launch follows the existing transport: the host appends the unix-socket path as the child's
 final argv (as `Extension spawn:` does today), the child binds it, and the manifest-at-spawn protocol
-(`GetManifest` → `ManifestReturn`) reports the provided classes.
+(`GetManifest` → `ManifestReturn`) reports the provided classes — plus the extension's declared
+`lanes` count, after which the host opens that many connections to the same path
+(`quoin-ext-proto/PROTOCOL.md` ‡; `ACTOR_OBJECTS.md` §5.1 as adopted for extensions).
 
 ## 4. Namespacing — extensions cannot pollute the globals
 
