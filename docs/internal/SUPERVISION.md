@@ -1,6 +1,7 @@
 # Supervision — restart is a property of the hosting relationship
 
-*Status: DESIGN DRAFT, 2026-07-15 — arc 3 of the concurrency road
+*Status: DESIGN, 2026-07-15, reviewed same day — every §10 question is decided;
+ready to slice. Arc 3 of the concurrency road
 (`CONCURRENCY_MODEL.md`). Grounded in an archaeology pass over the failure seams
 (`extension.rs`, `worker_spawn.rs`, `worker_service.rs`, `claims.rs`,
 `channel_relay.rs`) at main @ a378b39; file:line cites are from that pass. Companion
@@ -41,7 +42,10 @@ But the mechanisms — death detection without an in-flight call, proxy rebindin
 and mailbox semantics across a restart, reactor-integrated child watches — are runtime
 seams a library cannot reach. The split this document draws: **runtime owns death
 events + the respawn/rebind mechanics; the policy is data; trees are someone else's
-loop over the events.**
+loop over the events.** Sharpened in review (Damon, 2026-07-15): sane, predictable
+defaults ship built in, and the exposed primitives must be sufficient for a Quoin
+library to implement a robust supervision strategy of its own — see §10.1 for the
+contract this implies.
 
 ## 1. Today: fail-fast, no restart (the archaeology)
 
@@ -112,7 +116,7 @@ lines around `join` (which already reports the death, including a thread panic).
 A user-level actor built on `spawn:` + `receive` loops can be supervised in user code
 once lifecycle events exist (§7); the runtime does not guess which spawns are servers.
 
-Surface (bikeshed open, §11): a `supervise:` option beside `lanes:`/`backing:` on the
+Surface (bikeshed open, §10): a `supervise:` option beside `lanes:`/`backing:` on the
 hosting forms, and on `Extension spawn:`:
 
 ```quoin
@@ -192,11 +196,17 @@ user code on the death path.
 - **Thread workers:** the done-lane close *is* the event (already synthesized for
   panics via `catch_unwind`); the supervision task consumes it where `join` would.
 - **Typed death error (gap (d), slice 0):** one error shape for every seam —
-  proposal: `PeerDiedError` (Quoin class), carrying peer name/kind, incarnation,
-  exit status or panic text, and `remoteStack` when one exists. The extension path's
-  `IoError #closed` gains it as the same class or a subtype (bikeshed §11); the
-  worker paths' `Other` strings are replaced. Supervision code — ours and users' —
-  catches death as a kind, not a substring.
+  **DECIDED (Damon, 2026-07-15): a new ROOT error class, distinct from `IoError`.**
+  `IoError` is too broad and overlaps too much with ordinary user-catchable I/O
+  failures — "the socket you were reading closed" and "the isolate hosting your
+  object died" must not share a catch clause. Working name `PeerDiedError` (name
+  still open, §10), carrying peer name/kind, incarnation, exit status or panic text,
+  a `reason` symbol (`#exited` / `#panicked` / `#spawnFailed` / `#gaveUp` /
+  `#staleIncarnation`), and `remoteStack` when one exists. The extension death path
+  migrates off `IoError #closed` onto it (breaking, worth it before anyone depends
+  on catching `IoError` for a dead peer); the worker paths' `Other` strings are
+  replaced. Supervision code — ours and users' — catches death as a kind, not a
+  substring.
 
 ## 6. Events and observability
 
@@ -239,7 +249,8 @@ record/replay run containing a supervised death + restart.
    extensions retain their spawn recipe), rebind-in-place with incarnation stamps,
    park-during-restart, give-up state, manifest-equality gate. Surface: `restart`
    manual trigger first (`service.restart` — supervision with a human in the loop),
-   which proves the whole mechanism before any policy automates it.
+   which proves the whole mechanism before any policy automates it — and stays as
+   the library extension point (§10.1), not scaffolding.
 3. **Policy:** the `Supervise` value + `supervise:` options + `quoin.toml`
    `[extension]` keys + backoff/intensity/give-up automation over slices 1+2.
 4. *(adjacency, not this arc unless pulled)*: `WorkerPool` crash-respawn
@@ -257,28 +268,37 @@ catch, deliberately). No runtime supervision trees (events make them a library).
 half-open circuit retry after give-up (v1). No distributed supervision. Restart
 never resurrects sub-proxies, handles, or channels.
 
-## 10. Open questions (settle in review, before slices)
+## 10. Decisions (settled in review with Damon, 2026-07-15)
 
-1. **Runtime/library split** — as drawn in §0 (runtime: events + mechanics; data
-   policy; library: trees)? Or push policy interpretation itself into qnlib over the
-   events + a raw `respawn` primitive (purer, but the park-during-restart and
-   claims-integration semantics then live half in qnlib)?
-   **Recommendation: as drawn — runtime interprets the policy data.**
+1. **Runtime/library split** — **DECIDED in direction (Damon, 2026-07-15): sane
+   and predictable defaults built in, AND it must be possible to write a Quoin
+   library implementing a robust supervision strategy of its own.** So: the runtime
+   interprets the `Supervise` data policy (as drawn in §0), and the library-facing
+   surface — lifecycle events (§6), the manual `restart` trigger (slice 2),
+   give-up/incarnation introspection (`VM.services`), the typed death error — is a
+   first-class contract, not an internal convenience. A library strategy is
+   `Supervise.never` plus a loop over the events calling `restart`; the manual
+   trigger re-enters the same rebind/park machinery, so a library-driven restart
+   behaves identically from the moment it is requested (the gap between the death
+   and the library's decision fails fast, which is honest).
 2. **Rebind-in-place vs permanent-death-plus-new-proxy** (supervisor hands out fresh
    proxies via a registry). Rebinding keeps "objects are the only abstraction" — no
    registry concept — and matches Erlang's registered-name semantics.
-   **Recommendation: rebind-in-place, root only (rule 3/6).**
+   **DECIDED (Damon, 2026-07-15): rebind-in-place, root only (rules 3/6).**
 3. **Park vs fail-fast during the restart window** (rule 5).
-   **Recommendation: park** — cancellable, timeout-composable, labeled in `VM.ps`.
-4. **Error shape** — new `PeerDiedError` class vs widening `IoError #closed` with
-   structured fields. New class reads better in catch clauses; `IoError` keeps the
-   taxonomy small. **Recommendation: new class**, with the extension death migrating
-   to it (a breaking change to error class, worth it before anyone depends on
-   catching `IoError` for this).
+   **DECIDED (Damon, 2026-07-15): park** — cancellable, timeout-composable, labeled
+   in `VM.ps`.
+4. **Error shape** — **DECIDED (Damon, 2026-07-15): a new root error class,
+   distinct from `IoError`** (too broad; overlaps user I/O errors). Residual
+   bikeshed only: the name (`PeerDiedError` is the working name; `PeerError` if the
+   root should also own non-death supervision failures someday), and whether
+   give-up / stale-incarnation are `reason` symbols on the one class or subclasses.
+   **Recommendation: one class, `reason` symbols** — the `IoError`-kind precedent,
+   and catch clauses rarely want to split them.
 5. **Package-extension policy override** — may a consumer override the package's
    `quoin.toml` policy at `use` time (no call site exists)? Project-level
-   `quoin.toml` override table? **Recommendation: defer; package-declared only in
-   v1.**
+   `quoin.toml` override table? **DECIDED (Damon, 2026-07-15): defer;
+   package-declared only in v1.**
 6. **Thread workers in v1?** The mechanism is shared (recipe re-run; detection is
    the done-lane) and threads are the *easier* backing.
-   **Recommendation: yes, both backings from slice 2.**
+   **DECIDED (Damon, 2026-07-15): yes, both backings from slice 2.**
