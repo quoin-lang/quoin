@@ -165,6 +165,24 @@ struct CheckDiag {
     notes: Vec<CheckNote>,
 }
 
+/// One block literal's portability classification (`qn check --json`,
+/// `compiler::portability`): the language server's whole-block marking and
+/// hover feed. Same location conventions as [`CheckDiag`].
+#[derive(serde::Serialize)]
+struct CheckBlock {
+    file: String,
+    line: usize,
+    column: usize,
+    start: usize,
+    end: usize,
+    /// `"portable"` | `"conditional"` | `"non-portable"`.
+    state: &'static str,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    reason: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", rename = "unknownCaptures")]
+    unknown_captures: Vec<String>,
+}
+
 #[derive(serde::Serialize)]
 struct CheckNote {
     message: String,
@@ -1066,6 +1084,7 @@ impl VmRunner {
         // contract is unchanged.
         let json = self.options.check_json;
         let mut sink: Vec<CheckDiag> = Vec::new();
+        let mut blocks: Vec<CheckBlock> = Vec::new();
         let mut had_error = false;
         let mut asts = Vec::new();
         for f in &files {
@@ -1106,11 +1125,24 @@ impl VmRunner {
             prelude_asts(),
             asts.into_iter(),
             if json { Some(&mut sink) } else { None },
+            if json { Some(&mut blocks) } else { None },
         );
         if json {
+            // The v2 envelope: an OBJECT of {diagnostics, blocks}. (v1 emitted a bare
+            // diagnostics array; the language server sniffs the first byte, so both
+            // shapes stay consumable — the flag is hidden and the LSP is its consumer.)
+            #[derive(serde::Serialize)]
+            struct CheckOutput<'a> {
+                diagnostics: &'a [CheckDiag],
+                blocks: &'a [CheckBlock],
+            }
             println!(
                 "{}",
-                serde_json::to_string(&sink).expect("check diagnostics serialize")
+                serde_json::to_string(&CheckOutput {
+                    diagnostics: &sink,
+                    blocks: &blocks,
+                })
+                .expect("check output serialize")
             );
         }
         if had_error || had_diagnostics {
@@ -1609,6 +1641,7 @@ impl VmRunner {
         prelude: impl Iterator<Item = Node>,
         targets: impl Iterator<Item = Node>,
         mut sink: Option<&mut Vec<CheckDiag>>,
+        mut blocks: Option<&mut Vec<CheckBlock>>,
     ) -> bool {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
@@ -1657,6 +1690,11 @@ impl VmRunner {
                     _ => panic!("Error: Root AST node is not a ProgramNode"),
                 };
                 let mut compiler = unit_compiler();
+                if blocks.is_some() {
+                    // The JSON consumer (the language server) wants the
+                    // portable-block classification too — one compile, both feeds.
+                    compiler = compiler.with_portability();
+                }
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -1669,6 +1707,20 @@ impl VmRunner {
                             sink.extend(diags.iter().map(CheckDiag::from_warning));
                         } else {
                             vm.report_type_warnings(diags);
+                        }
+                        if let Some(blocks) = blocks.as_deref_mut() {
+                            blocks.extend(compiler.block_portability().iter().map(|bp| {
+                                CheckBlock {
+                                    file: bp.filename.clone(),
+                                    line: bp.line,
+                                    column: bp.column,
+                                    start: bp.start,
+                                    end: bp.end,
+                                    state: bp.state.slug(),
+                                    reason: bp.reason.clone(),
+                                    unknown_captures: bp.unknown_captures.clone(),
+                                }
+                            }));
                         }
                         compile_unit_aot(vm, &mut compiler);
                         had

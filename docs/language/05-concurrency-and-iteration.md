@@ -314,6 +314,13 @@ var hits = index.query:'quoin';
 index.serviceStop
 ```
 
+> **Tooling: portability is visible before you run.** The compiler classifies every
+> block literal with the same scan the boundary runs — editors using the Quoin
+> language server tint portable blocks (and hovering shows *why* a block isn't, or
+> which captures it depends on), and a block literal passed to `Worker.with:` /
+> `host:with:` / `start:` that can never cross warns at compile time with the
+> boundary's own message (`"* allow: portability` silences a deliberate one).
+>
 > **⚠ Gotcha — messages are copies.** A List sent to a worker (or received from
 > one) is deep-copied at the boundary: mutating it on one side never affects the
 > other. Isolation is the point — design worker protocols around values passed

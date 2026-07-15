@@ -26,7 +26,7 @@ fn gallery_warnings_match_reality() {
 
     // The full census: a NEW warning is a false positive, a LOST one is a regressed check.
     let count = stderr.lines().filter(|l| l.contains(": warning:")).count();
-    assert_eq!(count, 29, "gallery warning count drifted\n{stderr}");
+    assert_eq!(count, 30, "gallery warning count drifted\n{stderr}");
 
     // The historically drift-prone checks, by message.
     for needle in [
@@ -38,6 +38,8 @@ fn gallery_warnings_match_reality() {
         "`List(Integer)` rejects a `String` element",
         // compile-time MNU on a sealed class.
         "does not respond to `nopeMethod`",
+        // portability: a shipped block literal whose shape can never cross.
+        "crosses an isolate boundary (Worker.with:) but is not portable",
         // return-type covariance.
         "override of `defined?` returns `String`",
         // the `allow:` pragma polices itself: a typo'd kind…

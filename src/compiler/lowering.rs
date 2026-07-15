@@ -81,6 +81,7 @@ impl Compiler {
                 self.compile_unary_operator(op, bytecode)?;
             }
             NodeValue::Block(block) => {
+                self.next_block_is_expression = true;
                 self.compile_block(block, bytecode)?;
                 // B3a: a block LITERAL is a block-template candidate (method
                 // bodies are collected as Method candidates at their def site).
@@ -394,6 +395,9 @@ impl Compiler {
         // Phase 3c: a non-nil-safe send to a confidently-nullable, un-narrowed receiver.
         self.check_nil_misuse(call);
         self.check_generic_insertion(call);
+        // Portability: a block literal shipped by a boundary send registers for
+        // the shape scan once its template exists (`classify_block_literal`).
+        self.note_boundary_send(call);
         let args = &call.arguments;
         // A self-send (no explicit receiver, or an explicit `self`) — eligible for
         // devirtualization when the enclosing class is sealed (see `emit_call`).
@@ -803,6 +807,9 @@ impl Compiler {
         // `X.new:{ … }` argument) before anything can reset it; nested blocks compiled
         // within read it as `false`.
         let is_init = std::mem::take(&mut self.next_block_is_init);
+        // Consume the expression-literal flag likewise: nested literals set it
+        // for themselves; definition bodies arrive with it unset.
+        let is_expression = std::mem::take(&mut self.next_block_is_expression);
         // Phase 3c: a guard arm's narrowing, installed into this block's scope below. Taken here
         // (one-shot) so nested blocks don't inherit it.
         let block_narrowing = std::mem::take(&mut self.next_block_narrowing);
@@ -1034,7 +1041,11 @@ impl Compiler {
                 .then(crate::instruction::fresh_template_id),
         };
 
-        bytecode.push(Instruction::Push(Constant::Block(Arc::new(static_block))));
+        let template = Arc::new(static_block);
+        // Boundary warning + (opted-in) IDE classification — here, after
+        // `pop_scope`, so capture names resolve in the ENCLOSING scope.
+        self.classify_block_literal(block as *const BlockNode as usize, &template, is_expression);
+        bytecode.push(Instruction::Push(Constant::Block(template)));
         self.inline_carets = saved_inline;
         Ok(())
     }

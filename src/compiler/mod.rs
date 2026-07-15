@@ -21,6 +21,7 @@ mod assignment;
 mod bytecode;
 mod checker;
 mod lowering;
+mod portability;
 mod scope;
 
 // Items that moved into satellites but are referenced across the module (children see
@@ -28,6 +29,7 @@ mod scope;
 use annotations::{ident_name, type_from_ref_with_vars};
 use bytecode::{CodeBlock, fuse_bytecode, set_jump_offset};
 use checker::{NarrowKey, TypeProvenance};
+pub use portability::{BlockPortability, Portability};
 use scope::Scope;
 mod class_info;
 mod devirt;
@@ -76,6 +78,7 @@ pub const WARNING_KINDS: &[&str] = &[
     "mnu",          // the receiver's class does not respond to the selector
     "nil-receiver", // non-nil-safe send (or operator operand) on a maybe-nil value
     "no-variant",   // no multimethod variant accepts the argument types
+    "portability",  // a block literal at an isolate boundary cannot cross (the ship-time scan)
     "return-type",  // an override's return is incompatible with the inherited return
     "type-mismatch", // a value's type contradicts the declared/expected type
     "unknown-type", // an annotation names a type the checker has never seen
@@ -156,6 +159,24 @@ pub struct Compiler {
     /// expression and every real (non-inlined) `^` return — `^^` diverges the block and
     /// contributes nothing. Innermost last; drives block-return inference (§11.3).
     block_ret_harvest: Vec<Type>,
+    /// Portable-block classification (`portability.rs`): collected only when
+    /// [`with_portability`](Self::with_portability) opted in (`qn check`, the
+    /// language server) — a plain run skips the per-literal scan.
+    collect_portability: bool,
+    /// The collected classifications, span-keyed, in compile order.
+    block_portability: Vec<BlockPortability>,
+    /// One-shot: the next `compile_block` compiles an EXPRESSION-position
+    /// literal (a block VALUE — set at the `NodeValue::Block` arm). Method,
+    /// class, and guard-decl bodies also flow through `compile_block` but are
+    /// not shippable values, so only expression literals classify for
+    /// portability (an all-italic class file would be exactly the noise the
+    /// whole-block tint is meant to avoid).
+    next_block_is_expression: bool,
+    /// Block literals in the shipped position of a boundary send
+    /// (`Worker.with:`/`host:with:`/`start:`), keyed by `BlockNode` address —
+    /// registered by `note_boundary_send`, consumed by `classify_block_literal`
+    /// to warn at compile time when the shape can never cross. Always on.
+    boundary_block_literals: HashMap<usize, String>,
     /// One-shot request set right before compiling a guard arm block: the key whose narrowed type
     /// the arm's `compile_block` should snapshot at exit (into `captured_arm_exit`) so the join at
     /// the conditional's end can merge the arms' exit states (Phase 3c join/merge).
@@ -260,6 +281,10 @@ impl Compiler {
             next_block_expected: None,
             block_literal_types: HashMap::new(),
             block_ret_harvest: Vec::new(),
+            collect_portability: false,
+            block_portability: Vec::new(),
+            next_block_is_expression: false,
+            boundary_block_literals: HashMap::new(),
             next_block_capture: None,
             captured_arm_exit: None,
             inline_depth: 0,
@@ -287,6 +312,16 @@ impl Compiler {
     /// Opt this compile into template-id minting (shared inline-cache arrays).
     pub fn with_template_ids(mut self) -> Self {
         self.mint_template_ids = true;
+        self
+    }
+
+    /// Opt this compile into portable-block classification (`portability.rs`):
+    /// every block literal gets a three-state verdict from the real boundary
+    /// scan, read back via [`block_portability`](Self::block_portability).
+    /// `qn check` and the language server turn this on; plain runs skip the
+    /// extra per-literal bytecode walk.
+    pub fn with_portability(mut self) -> Self {
+        self.collect_portability = true;
         self
     }
 
@@ -511,6 +546,10 @@ impl Compiler {
             next_block_expected: None,
             block_literal_types: HashMap::new(),
             block_ret_harvest: Vec::new(),
+            collect_portability: false,
+            block_portability: Vec::new(),
+            next_block_is_expression: false,
+            boundary_block_literals: HashMap::new(),
             next_block_capture: None,
             captured_arm_exit: None,
             inline_depth: 0,
@@ -728,6 +767,12 @@ impl Compiler {
     /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    /// The portable-block classifications collected under
+    /// [`with_portability`](Self::with_portability), span-keyed.
+    pub fn block_portability(&self) -> &[BlockPortability] {
+        &self.block_portability
     }
 
     /// Use a shared class-name accumulator instead of this compiler's own. The runner threads

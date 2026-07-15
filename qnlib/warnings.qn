@@ -198,6 +198,11 @@ AllowGallery <- {
     "* a parenthesized rationale is encouraged.
     allowedNilReceiver: -> { |x: Integer?| x.abs }  "* allow: nil-receiver (gallery: deliberate)
 
+    "* portability: the block ships to a worker but writes a capture — it can never cross.
+    unportableShip -> { var n = 1; Worker.with:{ n = 2 } }
+    "* the allow pragma silences it like any other kind.
+    allowedShip -> { var n = 1; Worker.with:{ n = 2 } }  "* allow: portability (gallery: deliberate)
+
     "* a typo'd kind is itself flagged — and suppresses nothing, so both warnings fire.
     badAllowKind: -> { |x: Integer?| x.abs }  "* allow: nil-reciever
 

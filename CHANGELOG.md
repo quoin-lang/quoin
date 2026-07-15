@@ -10,6 +10,18 @@ under **Changed**, with the migration.
 
 ### Added
 
+- **Portable-block classification** — the portability rules are now visible at
+  compile time, computed by the same scan the isolate boundary runs (so tooling
+  can never disagree with the runtime). Every block literal classifies as
+  portable / conditional (naming the captures its verdict depends on) /
+  non-portable (with the boundary's reason); `qn check --json` emits the
+  classifications alongside diagnostics (the output is now an object of
+  `{diagnostics, blocks}`), which the Quoin language server renders as
+  whole-block highlighting with hover detail. And a block literal passed to
+  `Worker.with:`/`host:with:`/`start:` that can never cross now **warns at
+  compile time** (kind `portability`, suppressible with `"* allow:`) — the
+  ship-time error, moved to edit time.
+
 - **Boundary profiling** (`VM.boundaryStats` / `VM.boundaryReport`): every extension
   call is counted per (peer, class, selector) — calls, errors, bytes both ways, and a
   cost decomposition in microseconds: in-call wall time, time parked waiting for the
