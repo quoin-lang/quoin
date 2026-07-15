@@ -441,6 +441,47 @@ pub fn snapshot_block<'gc>(
     })
 }
 
+/// Encode a portable block for a PROCESS crossing: the block literal's SOURCE
+/// TEXT plus the wire-encoded capture snapshot and the global names. Source
+/// text is the crossing medium — bytecode is this process's compilation, and
+/// the child (the same binary, behind the version gate) re-parses and
+/// compiles the text against its own unit, then binds the shipped captures
+/// (`portable_block_from_wire`). Portability already guarantees the captures
+/// are wire data, so the only new refusal is a block with no recorded source
+/// (assembled at runtime, e.g. via eval) — loud, at ship time.
+pub fn portable_block_to_wire(pb: &PortableBlock) -> Result<WireData, String> {
+    let si = pb.template.source_info.as_ref();
+    let source = si.and_then(|s| s.source_text.clone()).ok_or_else(|| {
+        "the block carries no source text (assembled at runtime?) — it cannot \
+         cross a process boundary"
+            .to_string()
+    })?;
+    let filename = si.map(|s| s.filename.clone()).unwrap_or_default();
+    let mut captures = Vec::with_capacity(pb.captures.len());
+    for (sym, cap) in &pb.captures {
+        let name = ("name".to_string(), WireData::Str(sym.as_str().to_string()));
+        let payload = match cap {
+            PortableCapture::Data(d) => ("data".to_string(), d.clone()),
+            PortableCapture::Block(inner) => ("block".to_string(), portable_block_to_wire(inner)?),
+        };
+        captures.push(WireData::Map(vec![name, payload]));
+    }
+    Ok(WireData::Map(vec![
+        ("source".to_string(), WireData::Str(source)),
+        ("filename".to_string(), WireData::Str(filename)),
+        ("captures".to_string(), WireData::List(captures)),
+        (
+            "globals".to_string(),
+            WireData::List(
+                pb.globals
+                    .iter()
+                    .map(|n| WireData::Str(n.to_string()))
+                    .collect(),
+            ),
+        ),
+    ]))
+}
+
 /// Deep-copy a shipped template into WORKER-LOCAL allocations, recursing
 /// into nested block constants. Shipped `Arc<StaticBlock>`s are shared with
 /// the parent (and every sibling worker); each closure materialization
@@ -689,6 +730,17 @@ pub use worker_spawn::{
     spawn_worker_service, worker_serve_main,
 };
 
+/// What a spawned worker PROCESS runs, beyond its unit: nothing (a plain
+/// worker), a hosted service by class name, or a hosted BLOCK — shipped as
+/// source text + wire-encoded captures (`portable_block_to_wire`), which the
+/// child re-compiles against its own unit after the version gate.
+#[derive(Clone, Debug)]
+pub enum ProcessBody {
+    Plain,
+    Class(String),
+    Block(WireData),
+}
+
 #[cfg(target_arch = "wasm32")]
 fn dead_letter_channels() -> WorkerChannels {
     let (inbox_tx, _inbox_rx) = async_channel::unbounded();
@@ -738,8 +790,8 @@ pub fn spawn_worker_hosted_block(
 
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_worker_process(
-    _unit: String,
-    _service: Option<String>,
+    _unit: Option<String>,
+    _body: ProcessBody,
     _lanes: u32,
 ) -> Result<(WorkerChannels, u32, ChildGrip), String> {
     Err("workers are not supported on this platform".to_string())

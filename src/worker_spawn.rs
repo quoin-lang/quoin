@@ -131,6 +131,97 @@ Async.gather:#( {thunks});
     })
 }
 
+/// Parse + compile a shipped block literal's source in THIS process and hand
+/// back its template. The text is exactly the `{ … }` literal; compiled as a
+/// one-expression program it yields a wrapper whose bytecode pushes the block
+/// constant — that inner template is the block. The capture names pre-declare
+/// as locals (the strict undefined-name check would otherwise refuse the
+/// block's free reads — parent-side they were real bindings, and the rebuilt
+/// env provides them at run time); globals resolve at run time against the
+/// child's own unit. The checker's diagnostics are deliberately not reported
+/// here (the parent's compile of the same text already showed them).
+fn compile_block_source(
+    source: &str,
+    filename: &str,
+    capture_names: HashSet<String>,
+) -> Result<Arc<StaticBlock>, String> {
+    let ast = try_parse_quoin_string_named(source, filename)
+        .map_err(|e| format!("shipped block: parse error: {e}"))?;
+    let NodeValue::Program(program) = &ast.value else {
+        return Err("shipped block: root AST is not a program".to_string());
+    };
+    let wrapper = Compiler::new_with_locals(capture_names)
+        .with_template_ids()
+        .compile_program(program)
+        .map_err(|e| format!("shipped block: compile error: {e}"))?;
+    for inst in wrapper.bytecode.iter() {
+        if let Instruction::Push(Constant::Block(inner)) = inst {
+            return Ok(inner.clone());
+        }
+    }
+    Err("shipped block: the compiled source contains no block literal".to_string())
+}
+
+/// Rebuild a [`PortableBlock`] from its wire form (`portable_block_to_wire`):
+/// re-compile each level's source, intern the capture names (symbols are
+/// process-global), and re-parse the global names for the rebuild-time
+/// verification `rebuild_env` performs.
+fn portable_block_from_wire(w: &WireData) -> Result<PortableBlock, String> {
+    let WireData::Map(fields) = w else {
+        return Err("shipped block: malformed payload (not a map)".to_string());
+    };
+    let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    let Some(WireData::Str(source)) = get("source") else {
+        return Err("shipped block: payload has no source text".to_string());
+    };
+    let filename = match get("filename") {
+        Some(WireData::Str(f)) if !f.is_empty() => f.as_str(),
+        _ => "{shipped block}",
+    };
+    let mut captures = Vec::new();
+    if let Some(WireData::List(items)) = get("captures") {
+        for item in items {
+            let WireData::Map(kv) = item else {
+                return Err("shipped block: malformed capture entry".to_string());
+            };
+            let field = |k: &str| kv.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+            let Some(WireData::Str(name)) = field("name") else {
+                return Err("shipped block: capture entry has no name".to_string());
+            };
+            let cap = match (field("data"), field("block")) {
+                (Some(d), _) => PortableCapture::Data(d.clone()),
+                (None, Some(b)) => PortableCapture::Block(Box::new(
+                    portable_block_from_wire(b).map_err(|e| format!("capture '{name}': {e}"))?,
+                )),
+                (None, None) => {
+                    return Err(format!("shipped block: capture '{name}' has no payload"));
+                }
+            };
+            captures.push((Symbol::intern(name), cap));
+        }
+    }
+    let globals = match get("globals") {
+        Some(WireData::List(names)) => names
+            .iter()
+            .map(|n| match n {
+                WireData::Str(s) => Ok(NamespacedName::parse(s)),
+                _ => Err("shipped block: malformed global name".to_string()),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => Vec::new(),
+    };
+    let capture_names: HashSet<String> = captures
+        .iter()
+        .map(|(sym, _)| sym.as_str().to_string())
+        .collect();
+    let template = compile_block_source(source, filename, capture_names)?;
+    Ok(PortableBlock {
+        template,
+        captures,
+        globals,
+    })
+}
+
 pub(crate) fn run_worker_service(
     path: &str,
     class_name: &str,
@@ -533,8 +624,8 @@ fn parent_conv_pump(
 /// unchanged, one LIFO conversation at a time). Returns the standard channel
 /// ends plus the child's pid; the pump threads own the sockets.
 pub fn spawn_worker_process(
-    unit: String,
-    service: Option<String>,
+    unit: Option<String>,
+    body: ProcessBody,
     lanes: u32,
 ) -> Result<(WorkerChannels, u32, ChildGrip), String> {
     let lanes = lanes.max(1);
@@ -548,10 +639,22 @@ pub fn spawn_worker_process(
 
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("worker-serve").arg(&sock_path).arg(&unit);
-    if let Some(class) = &service {
-        cmd.arg(class);
-        cmd.arg(lanes.to_string());
+    // `@none` = unit-less (a hosted block booting bare qnlib); `@block` in the
+    // service slot = "a hosted-block payload follows the version gate". Both
+    // sentinels are unspellable as class names or sane unit paths.
+    cmd.arg("worker-serve")
+        .arg(&sock_path)
+        .arg(unit.as_deref().unwrap_or("@none"));
+    match &body {
+        ProcessBody::Plain => {}
+        ProcessBody::Class(class) => {
+            cmd.arg(class);
+            cmd.arg(lanes.to_string());
+        }
+        ProcessBody::Block(_) => {
+            cmd.arg("@block");
+            cmd.arg(lanes.to_string());
+        }
     }
     let child = cmd
         .spawn()
@@ -649,6 +752,38 @@ pub fn spawn_worker_process(
             ));
         }
         Err(e) => return Err(fail(&grip, format!("worker handshake: {e}"))),
+    }
+    // Hosted-block spawn: the payload rides the same gated exchange — one
+    // `Call{op:"hostBlock"}` carrying source + captures, acknowledged with a
+    // `CallReturn` terminal before any serving begins (still under the
+    // handshake read timeout, so a wedged child is an error, not a hang).
+    if let ProcessBody::Block(payload) = &body {
+        write_msg_frame(
+            conv_sock,
+            &Msg::Call {
+                op: "hostBlock".to_string(),
+                arg: String::new(),
+                handles: Vec::new(),
+                resources: Vec::new(),
+                releases: Vec::new(),
+                arrays: Vec::new(),
+                data: Some(payload.clone()),
+                class_name: String::new(),
+                recv: 0,
+                method_args: Vec::new(),
+            },
+        )
+        .map_err(|e| fail(&grip, format!("worker host-block payload: {e}")))?;
+        match read_msg_frame(conv_sock) {
+            Ok(Msg::CallReturn { .. }) => {}
+            Ok(other) => {
+                return Err(fail(
+                    &grip,
+                    format!("worker host-block payload: expected CallReturn, got {other:?}"),
+                ));
+            }
+            Err(e) => return Err(fail(&grip, format!("worker host-block payload: {e}"))),
+        }
     }
     conv_sock.set_read_timeout(None).ok();
 
@@ -975,6 +1110,35 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
             return 1;
         }
     }
+    // Hosted-block mode (`@block`): the payload frame is part of the gated
+    // exchange, read synchronously before the conversation loops spawn. Only
+    // receipt is acknowledged here — parse/compile errors surface later
+    // through the done lane, exactly like any unit error.
+    let mut host_block_payload: Option<WireData> = None;
+    if service == Some("@block") {
+        match read_msg_frame(conv_sock) {
+            Ok(Msg::Call { op, data, .. }) if op == "hostBlock" => {
+                let Some(payload) = data else {
+                    eprintln!("qn worker-serve: host-block payload carried no data");
+                    return 1;
+                };
+                host_block_payload = Some(payload);
+                if let Err(e) = write_msg_frame(
+                    conv_sock,
+                    &Msg::CallReturn {
+                        result: String::new(),
+                    },
+                ) {
+                    eprintln!("qn worker-serve: host-block ack: {e}");
+                    return 1;
+                }
+            }
+            other => {
+                eprintln!("qn worker-serve: expected the host-block payload, got {other:?}");
+                return 1;
+            }
+        }
+    }
 
     let (inbox_tx, inbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (outbox_tx, outbox_rx) = async_channel::unbounded::<WorkerMsg>();
@@ -988,6 +1152,15 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
         let dispatch_tx = dispatch_tx.clone();
         std::thread::spawn(move || child_conv_loop(sock, control_tx, dispatch_tx));
     }
+    // The conv threads now hold the only senders that matter: drop the
+    // originals so PARENT DEATH unwinds this process. When the parent dies,
+    // every conversation socket EOFs, the conv threads exit, their sender
+    // clones drop, the dispatch/control queues close, and the serve fibers'
+    // `DispatchRecv` unparks — the body ends and the child exits instead of
+    // lingering as an orphan (which also pins the parent's inherited stdio
+    // pipes open, wedging anything reading them).
+    drop(control_tx);
+    drop(dispatch_tx);
     // Mailbox reader: the parent's sends -> inbox.
     {
         let mut sock = match mail_sock.try_clone() {
@@ -1008,7 +1181,16 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
                     }
                 }
             }
-            // Parent gone: closing inbox_tx (drop) ends Worker.receive with nil.
+            // Mailbox EOF means the PARENT PROCESS IS GONE, nothing milder: the
+            // parent's registry pins a mailbox sender for its whole lifetime, so
+            // a dropped handle never closes the write half — only parent death
+            // (or `terminate`, where we are being killed anyway) lands here. A
+            // dead parent cannot consume the done terminal or anything else, and
+            // a lingering orphan pins the parent's inherited stdio pipes open,
+            // wedging whatever reads them — so exit NOW, deterministically. (A
+            // frame decode error also lands here; a desynced mailbox is equally
+            // unrecoverable.)
+            std::process::exit(0);
         });
     }
     // Mailbox writer — a funnel, because the done terminal (from this thread)
@@ -1094,9 +1276,14 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
         chan_rx,
         process: true,
     };
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match service {
-        Some(class) => run_worker_service(unit, class, lanes, link),
-        None => run_worker_unit(unit, link),
+    let unit_opt = (unit != "@none").then_some(unit);
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match (host_block_payload, service) {
+            (Some(payload), _) => portable_block_from_wire(&payload)
+                .and_then(|pb| run_worker_hosted_block(unit_opt, pb, lanes, link)),
+            (None, Some(class)) => run_worker_service(unit, class, lanes, link),
+            (None, None) => run_worker_unit(unit, link),
+        }
     }))
     .unwrap_or_else(|p| {
         let what = p

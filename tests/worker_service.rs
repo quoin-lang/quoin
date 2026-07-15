@@ -631,3 +631,54 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
     assert_service_script_passes("deadlock", script, &[("runner.qn", RUNNER_UNIT)]);
 }
+
+/// Block forms on PROCESS backing: the block crosses as source + capture
+/// snapshot, compiles in the child against its unit, and the object it
+/// answers is hosted — including a block-valued capture (nested source
+/// shipping) invoked worker-side, and a bare-qnlib unit-less actor.
+#[test]
+fn hosted_block_process_backing() {
+    let script = r#"
+var ok = true;
+
+"* data capture: k ships as a snapshot and lands in the constructor
+var k = 20;
+var adder = { |x| x + 40 };
+var svc = Worker.host:'@runner.qn@' with:{
+    var r = Runner.new;
+    r.tally:k;
+    r.stash:adder;
+    r
+} backing:'process' lanes:2;
+((svc.double:4) == 8).else:{ ok = false; 'FAIL double'.print };
+"* the constructor really ran with the captured value
+((svc.tally:1) == 21).else:{ ok = false; 'FAIL capture'.print };
+"* the block-valued capture crossed as nested source and runs worker-side
+((svc.runStash:2) == 42).else:{ ok = false; 'FAIL nested block'.print };
+svc.serviceStop;
+
+"* unit-less: a hosted stdlib Map in a bare-qnlib child process
+var cache = Worker.with:{ #{} } backing:'process';
+cache.at:'x' put:7;
+((cache.at:'x') == 7).else:{ ok = false; 'FAIL map actor'.print };
+
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("block_proc", script, &[("runner.qn", RUNNER_UNIT)]);
+}
+
+/// Process block-form refusals stay loud and catchable: a parent-defined
+/// global can't exist in the child, and the error names it.
+#[test]
+fn hosted_block_process_refusals() {
+    let script = r#"
+var ok = true;
+Local <- { ping -> { 'pong' } };
+var r = { Worker.with:{ Local.new } backing:'process'; 'hosted' }
+    .catch:{ |e| e.s };
+(r == 'hosted').if:{ ok = false; 'FAIL: parent global crossed?'.print };
+(r.contains?:'Local').else:{ ok = false; ('FAIL msg: ' + r).print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("block_proc_refuse", script, &[]);
+}

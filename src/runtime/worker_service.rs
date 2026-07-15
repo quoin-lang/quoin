@@ -901,9 +901,12 @@ pub(crate) fn host_class<'gc>(
     };
     let (ch, pid) = match backing {
         "process" => {
-            let (ch, pid, _grip) =
-                crate::worker::spawn_worker_process(path.clone(), Some(class_name.clone()), lanes)
-                    .map_err(QuoinError::Other)?;
+            let (ch, pid, _grip) = crate::worker::spawn_worker_process(
+                Some(path.clone()),
+                crate::worker::ProcessBody::Class(class_name.clone()),
+                lanes,
+            )
+            .map_err(QuoinError::Other)?;
             (ch, Some(pid))
         }
         _ => (
@@ -927,6 +930,7 @@ pub(crate) fn host_block<'gc>(
     path: Option<String>,
     block: Value<'gc>,
     lanes: u32,
+    backing: &'static str,
 ) -> Result<Value<'gc>, QuoinError> {
     let Value::Class(_) = receiver else {
         return Err(QuoinError::Other("Worker.host: bad receiver".into()));
@@ -939,8 +943,28 @@ pub(crate) fn host_block<'gc>(
     let pb = snapshot_block(template, parent_env, 0)
         .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
     let label_path = path.clone().unwrap_or_else(|| "{block}".to_string());
-    let ch = crate::worker::spawn_worker_hosted_block(path, pb, lanes);
-    finish_host(vm, mc, ch, None, "thread", lanes, &label_path, None)
+    let (ch, pid) = match backing {
+        // Process backing: the block crosses as SOURCE + captures (the same
+        // portability gate as thread backing — snapshot_block above — plus
+        // the source-text requirement) and the child compiles it against its
+        // own unit after the version gate.
+        "process" => {
+            let payload = crate::worker::portable_block_to_wire(&pb)
+                .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
+            let (ch, pid, _grip) = crate::worker::spawn_worker_process(
+                path,
+                crate::worker::ProcessBody::Block(payload),
+                lanes,
+            )
+            .map_err(QuoinError::Other)?;
+            (ch, Some(pid))
+        }
+        _ => (
+            crate::worker::spawn_worker_hosted_block(path, pb, lanes),
+            None,
+        ),
+    };
+    finish_host(vm, mc, ch, pid, backing, lanes, &label_path, None)
 }
 
 /// The shared back half of hosting: registry rows, the ready/manifest

@@ -833,8 +833,12 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 }
                 "process" => {
                     let reg = path.clone();
-                    let (ch, pid, grip) = crate::worker::spawn_worker_process(path, None, 1)
-                        .map_err(QuoinError::Other)?;
+                    let (ch, pid, grip) = crate::worker::spawn_worker_process(
+                        Some(path),
+                        crate::worker::ProcessBody::Plain,
+                        1,
+                    )
+                    .map_err(QuoinError::Other)?;
                     wrap_handle(vm, mc, receiver, &reg, "process", Some(pid), Some(grip), ch)
                 }
                 other => Err(QuoinError::Other(format!(
@@ -1146,13 +1150,22 @@ pub fn build_worker_class() -> NativeClassBuilder {
         )
         .class_method("host:with:", |vm, mc, receiver, args| {
             let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
-            crate::runtime::worker_service::host_block(vm, mc, receiver, Some(path), args[1], 1)
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                Some(path),
+                args[1],
+                1,
+                "thread",
+            )
         })
         .doc(
             "Host with an INIT BLOCK: spawn a worker running the unit, ship the \
              portable block, run it there, and host the object it answers -- real \
-             constructor arguments for hosted objects. Thread-backed only (a block \
-             cannot ship to a process).\n\n\
+             constructor arguments for hosted objects. On 'process' backing the \
+             block crosses as its SOURCE TEXT plus a snapshot of its captures, so \
+             it must come from source (not assembled at runtime).\n\n\
              ```\n\
              var pool = Worker.host:'db.qn' with:{ Pool.new:{ size = 8 } }\n\
              ```",
@@ -1160,26 +1173,85 @@ pub fn build_worker_class() -> NativeClassBuilder {
         .class_method("host:with:lanes:", |vm, mc, receiver, args| {
             let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
             let lanes = crate::runtime::worker_service::lanes_arg(args[2])?;
-            crate::runtime::worker_service::host_block(vm, mc, receiver, Some(path), args[1], lanes)
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                Some(path),
+                args[1],
+                lanes,
+                "thread",
+            )
         })
         .doc("As `host:with:` with N concurrent lanes.")
+        .class_method("host:with:backing:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let backing = crate::runtime::worker_service::backing_arg(args[2])?;
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                Some(path),
+                args[1],
+                1,
+                backing,
+            )
+        })
+        .doc(
+            "As `host:with:`, choosing the backing: 'thread' (the default) or \
+             'process' -- a child qn process; the block ships as source + captures.",
+        )
+        .class_method("host:with:backing:lanes:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let backing = crate::runtime::worker_service::backing_arg(args[2])?;
+            let lanes = crate::runtime::worker_service::lanes_arg(args[3])?;
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                Some(path),
+                args[1],
+                lanes,
+                backing,
+            )
+        })
+        .doc("As `host:with:backing:` with N concurrent lanes.")
         .class_method("with:", |vm, mc, receiver, args| {
-            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], 1)
+            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], 1, "thread")
         })
         .doc(
             "Host the object a portable block answers, with no unit -- `host:with:` \
              without the host: the block runs in a fresh worker that booted qnlib \
              only, so it can reach stdlib classes but not the parent's definitions \
-             (put those in a unit and use `host:with:`). Thread-backed only.\n\n\
+             (put those in a unit and use `host:with:`).\n\n\
              ```\n\
              var clock = Worker.with:{ Timer.new }\n\
              ```",
         )
         .class_method("with:lanes:", |vm, mc, receiver, args| {
             let lanes = crate::runtime::worker_service::lanes_arg(args[1])?;
-            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], lanes)
+            crate::runtime::worker_service::host_block(
+                vm, mc, receiver, None, args[0], lanes, "thread",
+            )
         })
         .doc("As `with:` with N concurrent lanes.")
+        .class_method("with:backing:", |vm, mc, receiver, args| {
+            let backing = crate::runtime::worker_service::backing_arg(args[1])?;
+            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], 1, backing)
+        })
+        .doc(
+            "As `with:`, choosing the backing: 'thread' (the default) or 'process' -- \
+             a child qn process booting bare qnlib; the block ships as source + \
+             captures.",
+        )
+        .class_method("with:backing:lanes:", |vm, mc, receiver, args| {
+            let backing = crate::runtime::worker_service::backing_arg(args[1])?;
+            let lanes = crate::runtime::worker_service::lanes_arg(args[2])?;
+            crate::runtime::worker_service::host_block(
+                vm, mc, receiver, None, args[0], lanes, backing,
+            )
+        })
+        .doc("As `with:backing:` with N concurrent lanes.")
         .class_method("worker?", |vm, mc, _receiver, _args| {
             Ok(vm.new_bool(mc, vm.worker_link.is_some()))
         })
