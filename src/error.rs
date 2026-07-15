@@ -53,6 +53,29 @@ impl IoErrorKind {
     }
 }
 
+/// The cause of a [`QuoinError::PeerDied`], surfaced to Quoin code as
+/// `PeerDiedError.reason` (a `#symbol`). Death is the peer *disappearing*
+/// (`docs/internal/SUPERVISION.md` §2) — an error a live peer reports is
+/// `ExtensionError` (or an ordinary raised error), never this. The set grows
+/// with the supervision slices (`#spawnFailed`, `#gaveUp`, `#staleIncarnation`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerDeathReason {
+    /// The peer's process exited, or its connection closed under a call.
+    Exited,
+    /// A thread-backed worker's body panicked (caught at the thread boundary).
+    Panicked,
+}
+
+impl PeerDeathReason {
+    /// The camelCase name used for the Quoin `#symbol`.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            PeerDeathReason::Exited => "exited",
+            PeerDeathReason::Panicked => "panicked",
+        }
+    }
+}
+
 impl From<std::io::ErrorKind> for IoErrorKind {
     fn from(k: std::io::ErrorKind) -> Self {
         use std::io::ErrorKind as E;
@@ -161,6 +184,21 @@ pub enum QuoinError {
     ExtensionError {
         message: String,
         remote_stack: String,
+    },
+    /// The isolate hosting the receiver DIED — a worker (thread or process) or an
+    /// extension process. Distinct from everything a live peer can *report* (an
+    /// `ExtensionError`, a hosted method raising): death is the peer disappearing
+    /// (`docs/internal/SUPERVISION.md` §2). Mapped to the typed Quoin
+    /// `PeerDiedError` — a root Error class deliberately distinct from `IoError`,
+    /// which is too user-error-adjacent to share a catch clause with — exposing
+    /// `reason` (a symbol) and `peer` (the peer's name). Plain data only — holds
+    /// no `Gc`.
+    PeerDied {
+        /// The peer's name: the hosted class, the worker's label, or the
+        /// extension's package/command.
+        peer: String,
+        reason: PeerDeathReason,
+        message: String,
     },
     /// Marker that a Quoin-level exception value has been parked in
     /// `VmState.active_exception` (set by `throw`). Carries no payload — the
@@ -314,6 +352,7 @@ impl fmt::Display for QuoinError {
             QuoinError::ClassError(msg) => write!(f, "{}", msg),
             QuoinError::NameError(msg) => write!(f, "{}", msg),
             QuoinError::ExtensionError { message, .. } => write!(f, "{}", message),
+            QuoinError::PeerDied { message, .. } => write!(f, "{}", message),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
             QuoinError::Cancelled => write!(f, "task cancelled"),
@@ -431,6 +470,21 @@ impl QuoinError {
         QuoinError::Io {
             kind: IoErrorKind::from(e.kind),
             message: e.message.clone(),
+        }
+    }
+
+    /// A peer-death error: the isolate named `peer` is gone
+    /// (`docs/internal/SUPERVISION.md` §2). Built lazily into the typed Quoin
+    /// `PeerDiedError` at the `catch:` boundary, like [`QuoinError::io`].
+    pub fn peer_died(
+        peer: impl Into<String>,
+        reason: PeerDeathReason,
+        message: impl Into<String>,
+    ) -> Self {
+        QuoinError::PeerDied {
+            peer: peer.into(),
+            reason,
+            message: message.into(),
         }
     }
 }

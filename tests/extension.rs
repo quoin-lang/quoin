@@ -369,10 +369,11 @@ fn extension_death_while_queued_fails_fast() {
 var ok = true;
 var e = Extension.spawn:'{ext_bin}';
 
+"* Every unwinding waiter sees the TYPED death (SUPERVISION.md slice 0), not a string.
 var r = Async.gather:#(
-    {{ {{ e.call:'crash' with:'' }}.catch:{{ |ex| 'caught' }} }}
-    {{ Async.sleep:10; {{ e.call:'echo' with:'B' }}.catch:{{ |ex| 'caught' }} }}
-    {{ Async.sleep:20; {{ e.call:'echo' with:'C' }}.catch:{{ |ex| 'caught' }} }}
+    {{ {{ e.call:'crash' with:'' }}.catch:{{ |ex:PeerDiedError| 'caught' }} }}
+    {{ Async.sleep:10; {{ e.call:'echo' with:'B' }}.catch:{{ |ex:PeerDiedError| 'caught' }} }}
+    {{ Async.sleep:20; {{ e.call:'echo' with:'C' }}.catch:{{ |ex:PeerDiedError| 'caught' }} }}
 );
 (r == #( 'caught' 'caught' 'caught' )).else:{{ ok = false; ('FAIL: ' + r.s).print }};
 
@@ -431,12 +432,15 @@ var e = Extension.spawn:'{ext_bin}';
 "* a normal call works
 ((e.call:'ping' with:'') == 'pong').else:{{ ok = false }};
 
-"* the extension exits mid-call: the host surfaces a catchable error (no hang), VM survives
-var crashed = {{ e.call:'crash' with:'' }}.catch:{{ |ex| 'caught' }};
-(crashed == 'caught').else:{{ ok = false }};
+"* the extension exits mid-call: the host surfaces the TYPED death (no hang), VM survives.
+"* PeerDiedError, reason #exited — the peer-death root class, deliberately not IoError
+"* (SUPERVISION.md slice 0).
+var crashed = {{ e.call:'crash' with:'' }}.catch:{{ |ex:PeerDiedError|
+    ((ex.reason == #exited) && (ex.peer != nil)).if:{{ 'caught' }} else:{{ 'bad-fields' }} }};
+(crashed == 'caught').else:{{ ok = false; ('crash: ' + crashed.s).print }};
 
-"* the extension is now dead: a follow-up call fails fast, also catchable
-var again = {{ e.call:'ping' with:'' }}.catch:{{ |ex| 'dead' }};
+"* the extension is now dead: a follow-up call fails fast, same typed death
+var again = {{ e.call:'ping' with:'' }}.catch:{{ |ex:PeerDiedError| 'dead' }};
 (again == 'dead').else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};

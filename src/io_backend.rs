@@ -193,7 +193,15 @@ pub enum IoRequest {
     },
     /// Park until the worker's done lane reports (its unit finished or
     /// failed); resolving the lane closed means the worker vanished.
-    WorkerJoin(async_channel::Receiver<Result<quoin_ext_proto::DataValue, String>>),
+    WorkerJoin(
+        async_channel::Receiver<Result<quoin_ext_proto::DataValue, crate::worker::WorkerExit>>,
+    ),
+    /// Park until the child process `pid` exits — the extension exit watch
+    /// (SUPERVISION.md slice 1): kqueue `EVFILT_PROC`/`NOTE_EXIT` on macOS,
+    /// `pidfd` on Linux, a poll loop elsewhere. Observation only — never
+    /// reaps, so the owner's kill/wait/Drop discipline is untouched. A pid
+    /// already dead (zombie or reaped) resolves immediately.
+    ChildExit { pid: u32 },
     /// Park until the next hosted-object dispatch request lands on this lane —
     /// the worker-side serve loop's wait (`Worker.hostServe:`). `None` means
     /// the lane closed (the parent side is gone).
@@ -343,9 +351,12 @@ pub enum IoResult {
     /// The next cross-worker message, or `None` if the lane is closed and
     /// drained (the far side exited).
     WorkerMsg(Option<crate::worker::WorkerMsg>),
-    /// A worker's terminal report: its unit's outcome, or an `Err` for the
-    /// lane closing unreported (the worker vanished).
-    WorkerDone(Result<quoin_ext_proto::DataValue, String>),
+    /// A worker's terminal report: its unit's outcome, or an `Err` — typed
+    /// `Failed` (the body reported) vs `Died` (the isolate vanished/panicked;
+    /// SUPERVISION.md §2), so `join` can raise the right error class.
+    WorkerDone(Result<quoin_ext_proto::DataValue, crate::worker::WorkerExit>),
+    /// The watched child exited (`ChildExit` resolved).
+    ChildExited,
     /// The next hosted-object dispatch request (`None` = lane closed).
     /// Boxed: a `Msg` is large, and `IoResult` travels the scheduler by value.
     DispatchMsg(Option<Box<crate::worker::DispatchReq>>),
@@ -409,6 +420,7 @@ impl IoRequest {
                 format!("worker receive (timeout {ms}ms)")
             }
             IoRequest::WorkerJoin(_) => "worker join".to_string(),
+            IoRequest::ChildExit { .. } => "child exit watch".to_string(),
             IoRequest::Close { .. } => "io: close".to_string(),
             IoRequest::TlsWrap { .. } => "io: tls handshake".to_string(),
             IoRequest::OpenFile { .. } => "io: open file".to_string(),
@@ -550,11 +562,14 @@ impl IoBackend for MockBackend {
             IoRequest::DispatchRecv(rx) => IoResult::DispatchMsg(rx.try_recv().ok().map(Box::new)),
             IoRequest::FrameRecv(rx) => IoResult::FrameMsg(rx.try_recv().ok().map(Box::new)),
             IoRequest::ChanRecv(rx) => IoResult::ChanFrame(rx.try_recv().ok().map(Box::new)),
-            IoRequest::WorkerJoin(rx) => {
-                IoResult::WorkerDone(rx.try_recv().unwrap_or_else(|_| {
-                    Err("worker vanished without reporting a result".to_string())
-                }))
-            }
+            IoRequest::WorkerJoin(rx) => IoResult::WorkerDone(rx.try_recv().unwrap_or_else(|_| {
+                Err(crate::worker::WorkerExit::Died {
+                    reason: crate::error::PeerDeathReason::Exited,
+                    detail: "worker vanished without reporting a result".to_string(),
+                })
+            })),
+            // The mock spawns no children: the watch reports fired.
+            IoRequest::ChildExit { .. } => IoResult::ChildExited,
             IoRequest::Connect { .. } | IoRequest::ConnectUnix { .. } => {
                 let id = StreamId(self.next_id.get());
                 self.next_id.set(self.next_id.get() + 1);

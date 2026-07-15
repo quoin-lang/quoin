@@ -3,8 +3,9 @@
 *Status: adopted 2026-07-13. This is the referee document: every future API, protocol,
 and scheduler change is measured against these guarantees. The mechanism-level survey
 lives in `CONCURRENCY_ARCH.md`; the extension protocol in `quoin-ext-proto/PROTOCOL.md`;
-the actor-objects design in `ACTOR_OBJECTS.md`. Rationale was settled in the 2026-07-13
-long-term planning discussion.*
+the actor-objects design in `ACTOR_OBJECTS.md`; the supervision design in
+`SUPERVISION.md`. Rationale was settled in the 2026-07-13 long-term planning
+discussion.*
 
 ## The model in one sentence
 

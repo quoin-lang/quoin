@@ -68,7 +68,7 @@ use gc_arena::Collect;
 use gc_arena::collect::Trace;
 use quoin_ext_proto::{Arg, DataValue as WireData, Msg};
 
-use crate::error::QuoinError;
+use crate::error::{PeerDeathReason, QuoinError};
 use crate::fiber::YieldReason;
 use crate::io_backend::{IoRequest, IoResult};
 use crate::runtime::claims::{Acquire, PeerClaims, WaitKind, would_deadlock};
@@ -81,7 +81,8 @@ use crate::value::{AnyCollect, Value};
 use crate::vm::VmState;
 use crate::vm::scheduler::{TaskId, Wake};
 use crate::worker::{
-    DispatchReq, OP_STOP, PortableBlock, note_message, rebuild_portable_value, snapshot_block,
+    DispatchReq, OP_STOP, PortableBlock, WorkerExit, note_message, rebuild_portable_value,
+    snapshot_block,
 };
 
 /// Proxy-side state: the worker's dispatch lane plus this proxy's hosted-object
@@ -91,7 +92,7 @@ use crate::worker::{
 #[derive(Debug)]
 pub struct NativeServiceState {
     dispatch_tx: async_channel::Sender<DispatchReq>,
-    done_rx: async_channel::Receiver<Result<WireData, String>>,
+    done_rx: async_channel::Receiver<Result<WireData, WorkerExit>>,
     /// The §5.1 claim machinery: per-object mailboxes + the lane pool.
     /// Registered in `vm.io.claim_peers` (`VM.claims`, cycle walks).
     claims: Rc<RefCell<PeerClaims>>,
@@ -124,6 +125,10 @@ pub struct NativeServiceState {
     boundary: Rc<RefCell<BoundaryStats>>,
     /// This link's index in `vm.io.chan_links` (§6 channel relay).
     chan_link: usize,
+    /// This worker's index in `vm.io.lives` (SUPERVISION.md slice 1) —
+    /// worker-wide, shared by every proxy: `serviceEvents` reaches the sink
+    /// through it.
+    life_idx: usize,
 }
 
 /// The channels of the conversation a task currently has open on a worker:
@@ -165,7 +170,7 @@ unsafe impl<'gc> Collect<'gc> for NativeServiceState {
 /// borrow ends before any park).
 struct CallCtx {
     dispatch_tx: async_channel::Sender<DispatchReq>,
-    done_rx: async_channel::Receiver<Result<WireData, String>>,
+    done_rx: async_channel::Receiver<Result<WireData, WorkerExit>>,
     claims: Rc<RefCell<PeerClaims>>,
     lanes: u32,
     stopped: Rc<Cell<bool>>,
@@ -177,6 +182,7 @@ struct CallCtx {
     block_handles: Rc<RefCell<Vec<u64>>>,
     boundary: Rc<RefCell<BoundaryStats>>,
     chan_link: usize,
+    life_idx: usize,
 }
 
 fn snapshot(s: &NativeServiceState) -> CallCtx {
@@ -194,6 +200,7 @@ fn snapshot(s: &NativeServiceState) -> CallCtx {
         block_handles: s.block_handles.clone(),
         boundary: s.boundary.clone(),
         chan_link: s.chan_link,
+        life_idx: s.life_idx,
     }
 }
 
@@ -277,7 +284,11 @@ pub(crate) fn installed_service_class<'gc>(
         anchor,
         instance_selectors,
         class_selectors,
-        &[("serviceStop", service_stop), ("==:", service_eq)],
+        &[
+            ("serviceStop", service_stop),
+            ("serviceEvents", service_events),
+            ("==:", service_eq),
+        ],
     );
     shell
 }
@@ -436,10 +447,15 @@ fn service_call<'gc>(
         .is_err()
     {
         end_call_and_wake(vm, &ctx, me);
-        return Err(QuoinError::Other(format!(
-            "service call '{}': the service has exited",
-            selector.as_str()
-        )));
+        note_service_dead(vm, &ctx);
+        return Err(QuoinError::peer_died(
+            ctx.class_name.clone(),
+            PeerDeathReason::Exited,
+            format!(
+                "service call '{}': the service has exited",
+                selector.as_str()
+            ),
+        ));
     }
     // Open the conversation (nested sends from host-op callbacks ride it),
     // pump it to the terminal, then close it and release the claim — on the
@@ -454,9 +470,20 @@ fn service_call<'gc>(
             reply_rx: reply_rx.clone(),
         },
     );
-    let outcome = conversation(vm, mc, selector, ctx.chan_link, &reply_rx, &hostop_tx);
+    let outcome = conversation(
+        vm,
+        mc,
+        &ctx.class_name,
+        selector,
+        ctx.chan_link,
+        &reply_rx,
+        &hostop_tx,
+    );
     ctx.convs.borrow_mut().remove(&me);
     end_call_and_wake(vm, &ctx, me);
+    if matches!(&outcome, Err(QuoinError::PeerDied { .. })) {
+        note_service_dead(vm, &ctx);
+    }
     record_boundary_row(
         &ctx.boundary,
         &ctx.class_name,
@@ -589,6 +616,20 @@ pub(crate) fn claim_peer_object<'gc>(
 
 /// Release one call's claim on the proxy's object (outermost release frees
 /// the lane too) and deliver the resulting handoffs.
+/// The parent-side "this worker is GONE" housekeeping (SUPERVISION.md slice 0),
+/// idempotent — every death-detection seam calls it. Releases the parent-held
+/// block handles the worker's stored `HostBlock`s addressed (only the worker
+/// could ever invoke them, and it is dead; `service_stop` releases the same
+/// list on the clean path) and marks the peer's claim rows dead so
+/// `VM.claims`/`VM.claimsReport` say so instead of leaving it implicit in the
+/// unwinding waiters.
+fn note_service_dead(vm: &mut VmState<'_>, ctx: &CallCtx) {
+    for id in ctx.block_handles.borrow_mut().drain(..) {
+        vm.hosted_release(id);
+    }
+    ctx.claims.borrow_mut().gone = Some("died");
+}
+
 fn end_call_and_wake<'gc>(vm: &mut VmState<'gc>, ctx: &CallCtx, task: usize) {
     end_peer_call_and_wake(vm, &ctx.claims, ctx.object_id, task);
 }
@@ -650,14 +691,19 @@ fn nested_call<'gc>(
     note_message();
     let started = Instant::now();
     let outcome = if conv.hostop_tx.try_send(frame).is_err() {
-        Err(QuoinError::Other(format!(
-            "service call '{}': the service exited mid-call",
-            selector.as_str()
-        )))
+        Err(QuoinError::peer_died(
+            ctx.class_name.clone(),
+            PeerDeathReason::Exited,
+            format!(
+                "service call '{}': the service exited mid-call",
+                selector.as_str()
+            ),
+        ))
     } else {
         conversation(
             vm,
             mc,
+            &ctx.class_name,
             selector,
             ctx.chan_link,
             &conv.reply_rx,
@@ -668,6 +714,9 @@ fn nested_call<'gc>(
         c.depth = c.depth.saturating_sub(1);
     }
     end_call_and_wake(vm, ctx, me);
+    if matches!(&outcome, Err(QuoinError::PeerDied { .. })) {
+        note_service_dead(vm, ctx);
+    }
     record_boundary_row(
         &ctx.boundary,
         &ctx.class_name,
@@ -684,9 +733,11 @@ fn nested_call<'gc>(
 /// either host-op `Call`s on a parent-held handle — serviced HERE, on the
 /// calling task's own fiber (so claims and stacks compose; §5.1) — or the
 /// `CallReturn*` terminal this level is waiting for.
+#[allow(clippy::too_many_arguments)] // the conversation pump threads the whole call context
 fn conversation<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
+    class_name: &str,
     selector: Symbol,
     chan_link: usize,
     reply_rx: &async_channel::Receiver<Msg>,
@@ -695,11 +746,17 @@ fn conversation<'gc>(
     loop {
         let msg = match vm.await_io(IoRequest::FrameRecv(reply_rx.clone()))? {
             IoResult::FrameMsg(Some(msg)) => *msg,
+            // The reply lane died under the call: the worker is GONE — the
+            // typed death (SUPERVISION.md §2); callers run `note_service_dead`.
             IoResult::FrameMsg(None) => {
-                return Err(QuoinError::Other(format!(
-                    "service call '{}': the service exited mid-call",
-                    selector.as_str()
-                )));
+                return Err(QuoinError::peer_died(
+                    class_name,
+                    PeerDeathReason::Exited,
+                    format!(
+                        "service call '{}': the service exited mid-call",
+                        selector.as_str()
+                    ),
+                ));
             }
             other => {
                 return Err(QuoinError::Other(format!(
@@ -880,6 +937,7 @@ fn sub_proxy<'gc>(
             block_handles: ctx.block_handles.clone(),
             boundary: ctx.boundary.clone(),
             chan_link: ctx.chan_link,
+            life_idx: ctx.life_idx,
         },
     )
 }
@@ -1048,8 +1106,12 @@ fn finish_host<'gc>(
         match vm.await_io(IoRequest::WorkerRecv(ch.outbox_rx.clone()))? {
             IoResult::WorkerMsg(Some(msg)) => parse_ready_manifest(&msg),
             IoResult::WorkerMsg(None) => {
+                // Boot failure, either flavor: a spawn/compile that never got
+                // to ready is not the death of a live peer (SUPERVISION.md §2)
+                // — flatten to the why for an ordinary error.
                 let why = match vm.await_io(IoRequest::WorkerJoin(ch.done_rx.clone()))? {
-                    IoResult::WorkerDone(Err(msg)) => msg,
+                    IoResult::WorkerDone(Err(WorkerExit::Failed(msg))) => msg,
+                    IoResult::WorkerDone(Err(WorkerExit::Died { detail, .. })) => detail,
                     _ => "the worker exited before reporting ready".to_string(),
                 };
                 return Err(QuoinError::Other(format!("Worker.host: {why}")));
@@ -1078,6 +1140,15 @@ fn finish_host<'gc>(
         rows: HashMap::new(),
     }));
     vm.io.ext_stats.borrow_mut().push(boundary.clone());
+    // Lifecycle roster row (SUPERVISION.md slice 1): the sink was created at
+    // spawn (its producers live in the spawn machinery); the parent registers
+    // it here, beside the claims and boundary rows.
+    let life_idx = {
+        let lives = vm.io.lives.clone();
+        let mut lives = lives.borrow_mut();
+        lives.push(ch.life.clone());
+        lives.len() - 1
+    };
     // Install the hosted class from its manifest (the two-step: the shell
     // exists first so the root proxy can be its instance, then the method
     // nodes — which carry the proxy — fill it in).
@@ -1099,6 +1170,7 @@ fn finish_host<'gc>(
             block_handles: Rc::new(RefCell::new(Vec::new())),
             boundary,
             chan_link,
+            life_idx,
         },
     );
     vm.service_classes.push(crate::vm::ServiceClassEntry {
@@ -1112,7 +1184,11 @@ fn finish_host<'gc>(
         proxy,
         &instance_selectors,
         &class_selectors,
-        &[("serviceStop", service_stop), ("==:", service_eq)],
+        &[
+            ("serviceStop", service_stop),
+            ("serviceEvents", service_events),
+            ("==:", service_eq),
+        ],
     );
     Ok(proxy)
 }
@@ -1220,6 +1296,23 @@ pub(crate) fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, Quoin
     }
 }
 
+/// The proxy-owned `serviceEvents` (installed on every service class beside
+/// `serviceStop` — a hosted class's own manifest may legitimately contain
+/// `events`, whence the prefix): the worker's lifecycle events channel
+/// (SUPERVISION.md slice 1). Worker-wide, so every proxy of one worker
+/// answers the same channel.
+pub(crate) fn service_events<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    _args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let life_idx = receiver
+        .with_native_state::<NativeServiceState, _, _>(|s| s.life_idx)
+        .map_err(QuoinError::Other)?;
+    crate::runtime::worker::life_events_channel(vm, mc, life_idx)
+}
+
 /// The proxy-owned `serviceStop` (installed on every service class): flag +
 /// drain (refuse new calls, wait for every in-flight conversation), then one
 /// stop op per lane, then join. Worker-wide — every proxy of the service
@@ -1265,8 +1358,23 @@ pub(crate) fn service_stop<'gc>(
         vm.hosted_release(id);
     }
     match joined {
-        IoResult::WorkerDone(Ok(_)) => Ok(vm.new_nil(mc)),
-        IoResult::WorkerDone(Err(msg)) => Err(QuoinError::Other(msg)),
+        IoResult::WorkerDone(Ok(_)) => {
+            ctx.claims.borrow_mut().gone = Some("stopped");
+            Ok(vm.new_nil(mc))
+        }
+        IoResult::WorkerDone(Err(WorkerExit::Failed(msg))) => {
+            ctx.claims.borrow_mut().gone = Some("stopped");
+            Err(QuoinError::Other(msg))
+        }
+        // The stop found a corpse (or the worker died during the drain).
+        IoResult::WorkerDone(Err(WorkerExit::Died { reason, detail })) => {
+            ctx.claims.borrow_mut().gone = Some("died");
+            Err(QuoinError::peer_died(
+                ctx.class_name.clone(),
+                reason,
+                detail,
+            ))
+        }
         other => Err(QuoinError::Other(format!(
             "serviceStop: unexpected result {other:?}"
         ))),

@@ -29,6 +29,7 @@ pub mod integer;
 pub mod io;
 pub mod json;
 pub mod lang_ast;
+pub mod lifecycle;
 pub mod list;
 pub mod map;
 pub mod math;

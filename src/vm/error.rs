@@ -528,6 +528,20 @@ impl<'gc> VmState<'gc> {
                     self.build_error_object(mc, "Error", message, &[("remoteStack", blob)])
                 }
             }
+            QuoinError::PeerDied {
+                peer,
+                reason,
+                message,
+            } => {
+                let reason_val = self.new_symbol(mc, reason.symbol().to_string());
+                let peer_val = self.new_string(mc, peer.clone());
+                self.build_error_object(
+                    mc,
+                    "PeerDiedError",
+                    message,
+                    &[("reason", reason_val), ("peer", peer_val)],
+                )
+            }
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             QuoinError::NotCallable(_)
             | QuoinError::StackUnderflow(_)

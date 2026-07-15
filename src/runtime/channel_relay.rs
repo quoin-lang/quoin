@@ -79,6 +79,7 @@ pub(crate) fn register_chan_link(
         next_corr: 1,
         pending: std::collections::HashMap::new(),
         reap: Rc::new(RefCell::new(Vec::new())),
+        shipped: std::collections::HashMap::new(),
     });
     vm.io.chan_links.len() - 1
 }
@@ -166,6 +167,11 @@ pub(crate) fn ship_channel<'gc>(
     link: usize,
 ) -> Result<u64, QuoinError> {
     let id = vm.channel_ship(mc, channel)?;
+    // Track the ref per LINK too: if the link dies, its endpoints can never
+    // `Release`, and this count is what the owner unroots by (`channel_link_died`).
+    if let Some(l) = vm.io.chan_links.get_mut(link) {
+        *l.shipped.entry(id).or_insert(0) += 1;
+    }
     ensure_relay_agent(vm, mc, link)?;
     Ok(id)
 }
@@ -410,6 +416,11 @@ pub(crate) fn relay_agent<'gc>(
                         vm.wake_channel_task(TaskId(p.task), Wake::ChannelClosed);
                     }
                 }
+                // OWNER side of the same death: the dead isolate's parked
+                // remote receivers and its endpoint refcounts on OUR channels
+                // (SUPERVISION.md slice 0 — a later send must not vanish into
+                // the closed lane, and the roots must not leak).
+                vm.channel_link_died(mc, link);
                 return Ok(());
             }
             other => {

@@ -724,6 +724,70 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
              flagged: batch the API or move the object (the cost gradient is placement- \
              controlled, CONCURRENCY_MODEL.md guarantee 5).",
         )
+        // `VM.peers` -> the lifecycle roster (SUPERVISION.md slice 1): one row
+        // per spawned peer — hosted worker, plain worker, extension — with its
+        // current status. Rows outlive their peer (the post-mortem roster);
+        // `VM.claims`/`VM.boundaryStats` are the per-peer detail views beside it.
+        .class_method("peers", |vm, mc, _receiver, _args| {
+            let lives = vm.io.lives.clone();
+            let mut out = Vec::new();
+            for sink in lives.borrow().iter() {
+                let (status, reason, message) = match sink.status() {
+                    crate::runtime::lifecycle::LifeStatus::Running => {
+                        ("running", None, String::new())
+                    }
+                    crate::runtime::lifecycle::LifeStatus::Stopped(m) => ("stopped", None, m),
+                    crate::runtime::lifecycle::LifeStatus::Died { reason, detail } => {
+                        ("died", Some(reason), detail)
+                    }
+                };
+                let m = vec![
+                    ("peer".to_string(), vm.new_string(mc, sink.label.clone())),
+                    ("kind".to_string(), vm.new_string(mc, sink.kind.to_string())),
+                    (
+                        "backing".to_string(),
+                        vm.new_string(mc, sink.backing.to_string()),
+                    ),
+                    (
+                        "pid".to_string(),
+                        match sink.pid {
+                            Some(p) => vm.new_int(mc, p as i64),
+                            None => vm.new_nil(mc),
+                        },
+                    ),
+                    ("status".to_string(), vm.new_string(mc, status.to_string())),
+                    (
+                        "reason".to_string(),
+                        match reason {
+                            Some(r) => vm.new_symbol(mc, r.symbol().to_string()),
+                            None => vm.new_nil(mc),
+                        },
+                    ),
+                    (
+                        "message".to_string(),
+                        if message.is_empty() {
+                            vm.new_nil(mc)
+                        } else {
+                            vm.new_string(mc, message)
+                        },
+                    ),
+                    (
+                        "eventsDropped".to_string(),
+                        vm.new_int(mc, sink.dropped() as i64),
+                    ),
+                ];
+                out.push(vm.new_map(mc, m));
+            }
+            Ok(vm.new_list(mc, out))
+        })
+        .doc(
+            "The peer roster (SUPERVISION.md): one Map per spawned peer -- hosted worker, \
+             plain worker, extension -- with 'peer', 'kind', 'backing', 'pid', 'status' \
+             ('running' / 'stopped' / 'died'), the death 'reason'/'message' when there is \
+             one, and 'eventsDropped' (staged lifecycle events lost to an undrained \
+             events channel). Rows outlive their peer: this is also the post-mortem \
+             roster. `VM.claims` and `VM.boundaryStats` are the detail views beside it.",
+        )
         // `VM.claims` -> the live claim shapes (docs/internal/ACTOR_OBJECTS.md §5.1):
         // per hosted-service peer, who holds which object, who waits, lane
         // occupancy, the waits-for edges, and the accumulated counters.
@@ -819,6 +883,15 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                 ];
                 let m = vec![
                     ("peer".to_string(), vm.new_string(mc, p.label.clone())),
+                    // nil while the peer lives; 'died' / 'stopped' once it is
+                    // gone (rows outlive the peer — the post-mortem).
+                    (
+                        "gone".to_string(),
+                        match p.gone {
+                            Some(how) => vm.new_string(mc, how.to_string()),
+                            None => vm.new_nil(mc),
+                        },
+                    ),
                     ("lanes".to_string(), vm.new_map(mc, lanes)),
                     ("objects".to_string(), vm.new_list(mc, objects)),
                     ("edges".to_string(), vm.new_list(mc, edges)),
@@ -880,9 +953,14 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                     "0 waiting now".to_string()
                 };
                 out.push_str(&format!(
-                    "[{}] lanes {}/{} free  {} acquisitions ({} contended, {waiting_now})  \
+                    "[{}]{} lanes {}/{} free  {} acquisitions ({} contended, {waiting_now})  \
                      granted waits {} total / {} max  queue high-water {}  depth max {}{}\n",
                     p.label,
+                    match p.gone {
+                        Some("died") => " DIED (post-mortem)",
+                        Some(_) => " STOPPED (post-mortem)",
+                        None => "",
+                    },
                     free,
                     total,
                     s.acquisitions,

@@ -10,6 +10,53 @@ under **Changed**, with the migration.
 
 ### Added
 
+- **`PeerDiedError` — peer deaths are typed** (SUPERVISION.md slice 0). When the
+  isolate hosting a receiver *dies* — its process exits, its connection closes
+  under a call, a thread worker's body panics — the raised error is now the new
+  root class `PeerDiedError`, carrying `reason` (`#exited` / `#panicked`) and
+  `peer` (the hosted class, worker label, or extension name). This covers every
+  seam: an extension crashing mid-call or found dead, a hosted service dying
+  mid-conversation or refusing as a corpse, and `Worker.join` on a vanished or
+  panicked worker (previously untyped strings). Errors a *live* peer reports are
+  unchanged — death is the peer disappearing, never a value it raised.
+  **Breaking**: an extension crash was previously an `IoError` of kind
+  `#closed`; a `catch:{ |e:IoError| … }` around extension calls that meant to
+  catch the crash should catch `PeerDiedError` instead (`IoError` was too
+  user-error-adjacent to share a catch clause with a dead isolate).
+  Death housekeeping rides along: a dead service now releases its parent-held
+  block handles (previously leaked until VM exit), `VM.claims` rows carry an
+  explicit `gone` marker (`died` / `stopped`; `VM.claimsReport` renders it),
+  and a dead link's parked remote channel receivers are purged with their
+  owner-side roots released — a later `send:` reaches a live receiver instead
+  of vanishing into the closed lane.
+
+- **Peer lifecycle events + `VM.peers`** (SUPERVISION.md slice 1). Every spawned
+  peer — hosted worker, plain worker, extension — now has a lifecycle stream:
+  `w.events` on worker handles, `e.events` on extensions, `svc.serviceEvents` on
+  hosted-object proxies answer a Channel of event Maps (`kind` =
+  `spawned` / `stopped` / `died`, plus `reason` symbol and `message` for
+  deaths). History is kept from spawn time, so a late consumer still sees the
+  whole story; the channel closes after the terminal event; asking twice
+  answers the same channel. An extension's first `events` ask arms an **OS
+  child-exit watch** (kqueue on macOS, pidfd on Linux — observation only, never
+  a reap), so an *idle* extension crash finally surfaces without anyone calling
+  it. `terminate` and a dropped extension handle count as *stops*, not deaths —
+  the supervision surface distinguishes an instruction from a failure even
+  while `join` still reports the kill honestly as `PeerDiedError`. The roster
+  is `VM.peers`: one row per peer with kind, backing, pid, status
+  (`running`/`stopped`/`died`), the death reason/message, and an
+  `eventsDropped` counter. All lifecycle wakes ride the logged scheduler path:
+  a run that consumes events records and replays identically.
+
+- **Fixed: the entombed-dispatch race.** A send racing a worker's death could
+  `try_send` into a dispatch queue whose pump had already decided to exit —
+  the request sat entombed in the closed channel's buffer, its reply lane
+  never dropped, and the caller parked forever with no deadlock report
+  (a live in-flight future kept the detector silent). The pumps now close and
+  drain their queues on exit, so the racing caller gets the typed death like
+  everyone else. Pre-existing since hosted dispatch; surfaced by CI load,
+  reproduced and verified in a Linux VM.
+
 - **Generic Map keys** — `Map(K V)` annotations now take any key type; the old
   "Map keys are String" resolve-time warning is gone (the runtime has keyed by
   any value since the hash-ladder map store). `V` stays runtime-tag-enforced
