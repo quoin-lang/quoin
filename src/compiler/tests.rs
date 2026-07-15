@@ -2968,3 +2968,108 @@ fn interpolated_literal_lowers_to_concatenation() {
     let err = Compiler::new().compile_program(p).unwrap_err();
     assert!(err.message.contains("%{…} interpolation"), "{err:?}");
 }
+
+// ---- portable-block classification (portability.rs) ----
+
+#[test]
+fn block_portability_classification() {
+    fn classify(src: &str) -> Vec<BlockPortability> {
+        let node = crate::parser::parse_quoin_string(src);
+        let NodeValue::Program(p) = &node.value else {
+            panic!("expected a program");
+        };
+        let mut c = Compiler::new().with_portability();
+        c.compile_program(p).unwrap();
+        c.block_portability().to_vec()
+    }
+
+    // A closed block and a portable-typed capture: definitively portable.
+    let bp = classify("var n = 3; var a = { 1 + 1 }; var b = { n * 2 }");
+    assert_eq!(bp.len(), 2);
+    assert!(
+        bp.iter().all(|b| b.state == Portability::Portable),
+        "{bp:?}"
+    );
+
+    // A capture the checker can't type: conditional, naming the capture.
+    let bp = classify("var f = { |x| x }; var g = { f.value:1 }");
+    let g = bp.last().unwrap();
+    assert_eq!(g.state, Portability::Conditional);
+    assert_eq!(g.unknown_captures, vec!["f".to_string()]);
+
+    // Shape violations: the scan's reason comes through verbatim.
+    let bp = classify("var n = 1; var w = { n = 2 }");
+    assert_eq!(bp[0].state, Portability::NonPortable);
+    assert!(
+        bp[0].reason.contains("writes captured binding 'n'"),
+        "{}",
+        bp[0].reason
+    );
+    let bp = classify("Foo <- { bump -> { { @count } } }");
+    let inner = bp
+        .iter()
+        .find(|b| b.state == Portability::NonPortable)
+        .unwrap();
+    assert!(inner.reason.contains("instance state"), "{}", inner.reason);
+
+    // A capture whose static type can never encode (Sets don't cross).
+    let bp = classify("var s: Set = Set.new; var t = { s.size }");
+    let t = bp.last().unwrap();
+    assert_eq!(t.state, Portability::NonPortable, "{t:?}");
+    assert!(t.reason.contains("'s'"), "{}", t.reason);
+
+    // Nested literal: classified standalone, outer locals count as captures.
+    let bp = classify("var n = 3; var outer = { var k = { n + 1 }; k }");
+    assert!(
+        bp.iter().all(|b| b.state == Portability::Portable),
+        "{bp:?}"
+    );
+}
+
+#[test]
+fn block_portability_collection_is_opt_in() {
+    let node = crate::parser::parse_quoin_string("var a = { 1 }");
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    c.compile_program(p).unwrap();
+    assert!(c.block_portability().is_empty());
+}
+
+#[test]
+fn boundary_send_warns_on_unportable_literal() {
+    fn diags(src: &str) -> Vec<(String, String)> {
+        let node = crate::parser::parse_quoin_string(src);
+        let NodeValue::Program(p) = &node.value else {
+            panic!("expected a program");
+        };
+        let mut c = Compiler::new();
+        c.compile_program(p).unwrap();
+        c.diagnostics()
+            .iter()
+            .map(|d| (d.kind.to_string(), d.message.clone()))
+            .collect()
+    }
+
+    // The warning is always on (no with_portability needed) and carries the reason.
+    let d = diags("var n = 1; Worker.with:{ n = 2 }");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0].0, "portability");
+    assert!(d[0].1.contains("Worker.with:"), "{}", d[0].1);
+    assert!(d[0].1.contains("writes captured binding"), "{}", d[0].1);
+
+    // The block position follows the selector: host:with: family ships arg 1.
+    let d = diags("var n = 1; Worker.host:'u.qn' with:{ n = 2 } lanes:2");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].1.contains("Worker.host:with:lanes:"), "{}", d[0].1);
+
+    // start: ships arg 0; a portable literal stays quiet.
+    assert!(diags("Worker.start:{ 1 + 1 }").is_empty());
+    let d = diags("Worker.start:{ ^^ 1 }");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].1.contains("non-local return"), "{}", d[0].1);
+
+    // The allow pragma silences it like any checker warning.
+    assert!(diags("var n = 1; Worker.with:{ n = 2 } \"* allow: portability").is_empty());
+}

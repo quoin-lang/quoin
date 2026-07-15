@@ -394,6 +394,9 @@ impl Compiler {
         // Phase 3c: a non-nil-safe send to a confidently-nullable, un-narrowed receiver.
         self.check_nil_misuse(call);
         self.check_generic_insertion(call);
+        // Portability: a block literal shipped by a boundary send registers for
+        // the shape scan once its template exists (`classify_block_literal`).
+        self.note_boundary_send(call);
         let args = &call.arguments;
         // A self-send (no explicit receiver, or an explicit `self`) — eligible for
         // devirtualization when the enclosing class is sealed (see `emit_call`).
@@ -1034,7 +1037,11 @@ impl Compiler {
                 .then(crate::instruction::fresh_template_id),
         };
 
-        bytecode.push(Instruction::Push(Constant::Block(Arc::new(static_block))));
+        let template = Arc::new(static_block);
+        // Boundary warning + (opted-in) IDE classification — here, after
+        // `pop_scope`, so capture names resolve in the ENCLOSING scope.
+        self.classify_block_literal(block as *const BlockNode as usize, &template);
+        bytecode.push(Instruction::Push(Constant::Block(template)));
         self.inline_carets = saved_inline;
         Ok(())
     }
