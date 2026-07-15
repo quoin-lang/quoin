@@ -439,6 +439,11 @@ pub struct Modules<'gc> {
     /// keeps meaning the entry script's root.
     #[collect(require_static)]
     pub load_stack: Vec<Option<String>>,
+    /// The unit-cache hash chain (`runtime::unit_cache`): folds in each loaded
+    /// unit's identity + source in load order, so a unit's cache key covers the
+    /// whole compile context that preceded it. Advanced by `load_unit`.
+    #[collect(require_static)]
+    pub unit_chain: u64,
     /// Loaded extension *packages* (`Extension loadPackage:`), keyed by canonical package directory →
     /// the live `Extension` value, so a repeat `loadPackage:` of the same folder is idempotent. The
     /// installed classes also root the extension, but this is its canonical owner for the session.
@@ -889,6 +894,7 @@ impl<'gc> VmState<'gc> {
                 resolver: Box::new(FsResolver::new(options.self_root.clone())),
                 loaded: Vec::new(),
                 load_stack: Vec::new(),
+                unit_chain: 0,
                 packages: gcl!(mc, HashMap::new()),
             },
             output: OutputCapture {
