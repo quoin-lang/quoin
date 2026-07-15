@@ -44,6 +44,7 @@ fn spawn_worker_with(
     let id = SPAWNED.fetch_add(1, Ordering::Relaxed);
     let life = crate::runtime::lifecycle::LifeSink::new(label, kind, "thread", None);
     let thread_life = life.clone();
+    let dispatch_drain = dispatch_rx.clone();
     std::thread::Builder::new()
         .name(format!("qn-worker-{id}"))
         .spawn(move || {
@@ -82,6 +83,15 @@ fn spawn_worker_with(
                 Ok(_) => thread_life.emit_stopped(""),
                 Err(WorkerExit::Failed(msg)) => thread_life.emit_stopped(msg),
                 Err(WorkerExit::Died { reason, detail }) => thread_life.emit_died(*reason, detail),
+            }
+            // The process pump's entombment guard, thread flavor: the worker
+            // is gone (its serve fibers dropped their queue ends when the
+            // body returned or panicked); close and drain the dispatch queue
+            // so a request that raced in mid-teardown drops its reply lane
+            // instead of parking its caller forever.
+            dispatch_drain.close();
+            while let Ok(req) = dispatch_drain.try_recv() {
+                drop(req);
             }
             COMPLETED.fetch_add(1, Ordering::Relaxed);
             let _ = done_tx.send_blocking(out);
@@ -633,6 +643,25 @@ fn parent_conv_pump(
                 }
             }
         }
+    }
+    // The pump exits only when its socket broke — the child is dead. Close
+    // the SHARED queues and DRAIN them: a dispatch that raced its way in
+    // after the last read (this thread was past its loop but not yet
+    // returned, and the OS descheduled it — caught live in the Lima VM after
+    // CI run 29440684016 wedged) would otherwise sit ENTOMBED in the
+    // closed-but-alive channel: the proxy's sender keeps the buffer alive,
+    // the entombed request's reply lane never drops, and its caller parks
+    // forever on a reply that cannot come — a live in-flight future, so not
+    // even the global-deadlock detector fires. Dropping each drained request
+    // drops its reply lane, which the parked caller observes as the typed
+    // death.
+    dispatch_rx.close();
+    while let Ok(req) = dispatch_rx.try_recv() {
+        drop(req);
+    }
+    control_rx.close();
+    while let Ok(req) = control_rx.try_recv() {
+        drop(req);
     }
 }
 

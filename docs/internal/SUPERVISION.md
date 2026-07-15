@@ -320,6 +320,13 @@ record/replay run containing a supervised death + restart.
    symbols); the watch task marks only the sink — the claims `gone` marker
    still updates on lazy detection, not on watch fire (slice-2 material,
    where the watch consumer becomes the supervisor).
+   *Postscript (2026-07-15): this slice's CI run wedged and led to the
+   entombed-dispatch race — a send racing the pump's death-exit window parks
+   forever on a reply entombed in the closed dispatch queue, invisible even
+   to the deadlock detector (a live in-flight future). Caught live in the
+   Lima VM by wake trace + gdb after ~100 CI-shaped iterations; fixed by the
+   pumps draining their queues on exit. Pre-existing since hosted dispatch —
+   load made it likely enough to see.*
 2. **Respawn mechanics:** retained recipes (worker block+args are already held;
    extensions retain their spawn recipe), rebind-in-place with incarnation stamps,
    park-during-restart, give-up state, manifest-equality gate. Surface: `restart`

@@ -48,6 +48,15 @@ under **Changed**, with the migration.
   `eventsDropped` counter. All lifecycle wakes ride the logged scheduler path:
   a run that consumes events records and replays identically.
 
+- **Fixed: the entombed-dispatch race.** A send racing a worker's death could
+  `try_send` into a dispatch queue whose pump had already decided to exit —
+  the request sat entombed in the closed channel's buffer, its reply lane
+  never dropped, and the caller parked forever with no deadlock report
+  (a live in-flight future kept the detector silent). The pumps now close and
+  drain their queues on exit, so the racing caller gets the typed death like
+  everyone else. Pre-existing since hosted dispatch; surfaced by CI load,
+  reproduced and verified in a Linux VM.
+
 - **Generic Map keys** — `Map(K V)` annotations now take any key type; the old
   "Map keys are String" resolve-time warning is gone (the runtime has keyed by
   any value since the hash-ladder map store). `V` stays runtime-tag-enforced
