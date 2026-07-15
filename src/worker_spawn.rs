@@ -275,6 +275,28 @@ fn run_worker_source_with(
     link: WorkerLink,
     prepare: impl FnOnce(&mut VmState<'_>),
 ) -> Result<WireData, String> {
+    run_worker_source_impl(path, source, link, prepare, false)
+}
+
+/// As [`run_worker_source_with`], but the program's VALUE (stack top at
+/// completion) is the result — the parameterized-job bootstrap needs the
+/// block's answer for `join`, where unit workers deliberately answer nil.
+fn run_worker_source_valued(
+    path: &str,
+    source: &str,
+    link: WorkerLink,
+    prepare: impl FnOnce(&mut VmState<'_>),
+) -> Result<WireData, String> {
+    run_worker_source_impl(path, source, link, prepare, true)
+}
+
+fn run_worker_source_impl(
+    path: &str,
+    source: &str,
+    link: WorkerLink,
+    prepare: impl FnOnce(&mut VmState<'_>),
+    result_from_stack: bool,
+) -> Result<WireData, String> {
     let ast = try_parse_quoin_string_named(source, path)
         .map_err(|e| format!("worker unit {path}: parse error: {e}"))?;
     let NodeValue::Program(program_node) = &ast.value else {
@@ -317,7 +339,14 @@ fn run_worker_source_with(
     }
 
     drive_main_task(&mut arena).map_err(|e| format!("worker unit {path}: {e}"))?;
-    Ok(WireData::Null)
+    if !result_from_stack {
+        return Ok(WireData::Null);
+    }
+    arena.mutate_root(|_mc, vm| {
+        let v = vm.stack.last().copied().unwrap_or(Value::Nil);
+        value_to_wire(v, None)
+            .map_err(|e| format!("the worker block's result is not portable data: {e}"))
+    })
 }
 
 /// Boot a fresh worker VM: arena + native builtins + the full qnlib prelude
@@ -369,6 +398,14 @@ fn boot_worker_arena(link: WorkerLink) -> Result<ReplArena, String> {
 /// rebuild the closure over a snapshot env frame, drive it as the main
 /// task, and copy its value back for `join`.
 fn run_worker_block(job: PortableBlock, link: WorkerLink) -> Result<WireData, String> {
+    // A parameterized job can't start directly — its arguments arrive as the
+    // first N mailbox messages, which only VM code can receive. `Worker.jobRoot`
+    // is that bootstrap: receive, rebuild, invoke; its value is the program's.
+    if !job.template.param_syms.is_empty() {
+        return run_worker_source_valued("{job}", "Worker.jobRoot\n", link, move |vm| {
+            vm.pending_host_block = Some(job);
+        });
+    }
     let mut arena = boot_worker_arena(link)?;
 
     let mut start_err = None;
@@ -655,6 +692,10 @@ pub fn spawn_worker_process(
             cmd.arg("@block");
             cmd.arg(lanes.to_string());
         }
+        ProcessBody::Job(_) => {
+            cmd.arg("@job");
+            cmd.arg(lanes.to_string());
+        }
     }
     let child = cmd
         .spawn()
@@ -757,7 +798,7 @@ pub fn spawn_worker_process(
     // `Call{op:"hostBlock"}` carrying source + captures, acknowledged with a
     // `CallReturn` terminal before any serving begins (still under the
     // handshake read timeout, so a wedged child is an error, not a hang).
-    if let ProcessBody::Block(payload) = &body {
+    if let ProcessBody::Block(payload) | ProcessBody::Job(payload) = &body {
         write_msg_frame(
             conv_sock,
             &Msg::Call {
@@ -845,10 +886,18 @@ pub fn spawn_worker_process(
                             break;
                         }
                     }
-                    // Refused at the send seams; unreachable in practice.
-                    WorkerMsg::Block(_) => {
-                        eprintln!("qn: dropped a block on a process-worker lane");
-                    }
+                    // Spawn-time `args:` blocks; the seam pre-validated the
+                    // encode (source text present), so a failure here is a bug.
+                    WorkerMsg::Block(pb) => match portable_block_to_wire(&pb) {
+                        Ok(dv) => {
+                            if write_msg_frame(&mut sock, &call_frame(OP_SEND_BLOCK, Some(dv)))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(e) => eprintln!("qn: dropped an unencodable block: {e}"),
+                    },
                     // A shipped channel endpoint: the id rides the mailbox as
                     // its own op; the relay traffic rides the chan socket.
                     WorkerMsg::Channel(chan) => {
@@ -1115,7 +1164,7 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
     // receipt is acknowledged here — parse/compile errors surface later
     // through the done lane, exactly like any unit error.
     let mut host_block_payload: Option<WireData> = None;
-    if service == Some("@block") {
+    if service == Some("@block") || service == Some("@job") {
         match read_msg_frame(conv_sock) {
             Ok(Msg::Call { op, data, .. }) if op == "hostBlock" => {
                 let Some(payload) = data else {
@@ -1178,6 +1227,15 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
                         let _ = inbox_tx.send_blocking(WorkerMsg::Data(dv));
                     } else if op == OP_SEND_CHAN {
                         let _ = inbox_tx.send_blocking(WorkerMsg::Channel(recv));
+                    } else if op == OP_SEND_BLOCK {
+                        match data.as_ref().map(portable_block_from_wire) {
+                            Some(Ok(pb)) => {
+                                let _ = inbox_tx.send_blocking(WorkerMsg::Block(pb));
+                            }
+                            other => eprintln!(
+                                "qn worker-serve: dropped a malformed shipped block: {other:?}"
+                            ),
+                        }
                     }
                 }
             }
@@ -1279,6 +1337,9 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
     let unit_opt = (unit != "@none").then_some(unit);
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match (host_block_payload, service) {
+            (Some(payload), Some("@job")) => {
+                portable_block_from_wire(&payload).and_then(|pb| run_worker_block(pb, link))
+            }
             (Some(payload), _) => portable_block_from_wire(&payload)
                 .and_then(|pb| run_worker_hosted_block(unit_opt, pb, lanes, link)),
             (None, Some(class)) => run_worker_service(unit, class, lanes, link),

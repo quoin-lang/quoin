@@ -914,15 +914,33 @@ pub(crate) fn host_class<'gc>(
             None,
         ),
     };
-    finish_host(vm, mc, ch, pid, backing, lanes, &path, Some(class_name))
+    let chan_link = crate::runtime::channel_relay::register_chan_link(
+        vm,
+        ch.chan_tx.clone(),
+        ch.chan_rx.clone(),
+    );
+    finish_host(
+        vm,
+        mc,
+        ch,
+        pid,
+        backing,
+        lanes,
+        &path,
+        Some(class_name),
+        chan_link,
+    )
 }
 
 /// The block forms — `Worker.host:'unit.qn' with:{ Pool.new:cfg }` and the
 /// unit-less `Worker.with:{ Timer.new }`: the PORTABLE block ships to the
 /// worker, runs there after its unit loads, and the object it answers is
-/// hosted as the root. Thread-only: a block cannot ship to a process, and
-/// the handle fallback would run it in the PARENT — precisely the wrong
-/// place to create the object being hosted.
+/// hosted as the root. On process backing the block crosses as source +
+/// captures. The `args:` list parameterizes the block: each element crosses
+/// by the spawn-arg rules ([`spawn_arg`]) as a mailbox message the worker
+/// consumes before invoking the block — channels become live relay
+/// endpoints, portable values snapshot, anything else refuses loudly here.
+#[allow(clippy::too_many_arguments)] // the host forms thread their full spawn context
 pub(crate) fn host_block<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -931,6 +949,7 @@ pub(crate) fn host_block<'gc>(
     block: Value<'gc>,
     lanes: u32,
     backing: &'static str,
+    args: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
     let Value::Class(_) = receiver else {
         return Err(QuoinError::Other("Worker.host: bad receiver".into()));
@@ -940,9 +959,23 @@ pub(crate) fn host_block<'gc>(
             "Worker.host:with: expects a Block (the object to host is its answer)".into(),
         ));
     };
+    // Arity first, before anything ships: the block's parameters are exactly
+    // the args: list (absent = a parameterless block).
+    let arg_values = match args {
+        Some(list) => crate::runtime::extension::extract_args(list)?,
+        None => Vec::new(),
+    };
+    if template.param_syms.len() != arg_values.len() {
+        return Err(QuoinError::Other(format!(
+            "Worker.host:with:args: the block takes {} parameter(s) but args: has {}",
+            template.param_syms.len(),
+            arg_values.len()
+        )));
+    }
     let pb = snapshot_block(template, parent_env, 0)
         .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
     let label_path = path.clone().unwrap_or_else(|| "{block}".to_string());
+    let process = backing == "process";
     let (ch, pid) = match backing {
         // Process backing: the block crosses as SOURCE + captures (the same
         // portability gate as thread backing — snapshot_block above — plus
@@ -964,7 +997,60 @@ pub(crate) fn host_block<'gc>(
             None,
         ),
     };
-    finish_host(vm, mc, ch, pid, backing, lanes, &label_path, None)
+    // The chan link registers BEFORE the args ship (a channel arg mints its
+    // relay bookkeeping against it), and the args ship BEFORE the ready wait
+    // (the worker consumes them before running the block — sending after
+    // would deadlock the handshake).
+    let chan_link = crate::runtime::channel_relay::register_chan_link(
+        vm,
+        ch.chan_tx.clone(),
+        ch.chan_rx.clone(),
+    );
+    for (i, v) in arg_values.into_iter().enumerate() {
+        let msg = spawn_arg(vm, mc, v, chan_link, process).map_err(|e| {
+            QuoinError::Other(format!("Worker.host:with:args: element {}: {e}", i + 1))
+        })?;
+        let _ = ch.inbox_tx.try_send(msg);
+    }
+    finish_host(
+        vm,
+        mc,
+        ch,
+        pid,
+        backing,
+        lanes,
+        &label_path,
+        None,
+        chan_link,
+    )
+}
+
+/// Classify one spawn-time `args:` element into its crossing form: a channel
+/// ships as a relay endpoint id (against the just-registered link), a
+/// portable block snapshots (pre-validating the source-text requirement for
+/// process backing, so the mailbox pump's encode cannot fail later), and
+/// anything else must be portable data. Errors name the reason; the caller
+/// prefixes the element index.
+pub(crate) fn spawn_arg<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    v: Value<'gc>,
+    chan_link: usize,
+    process: bool,
+) -> Result<crate::worker::WorkerMsg, QuoinError> {
+    if crate::runtime::channel_relay::is_channel_value(v) {
+        let chan = crate::runtime::channel_relay::ship_for_crossing(vm, mc, v, chan_link)?;
+        return Ok(crate::worker::WorkerMsg::Channel(chan));
+    }
+    if let Some((template, parent_env)) = crate::runtime::worker::block_parts(v) {
+        let pb = snapshot_block(template, parent_env, 0)?;
+        if process {
+            crate::worker::portable_block_to_wire(&pb).map_err(QuoinError::Other)?;
+        }
+        return Ok(crate::worker::WorkerMsg::Block(pb));
+    }
+    let dv = crate::runtime::extension::value_to_wire(v, None)?;
+    Ok(crate::worker::WorkerMsg::Data(dv))
 }
 
 /// The shared back half of hosting: registry rows, the ready/manifest
@@ -981,6 +1067,7 @@ fn finish_host<'gc>(
     lanes: u32,
     path: &str,
     class_name_hint: Option<String>,
+    chan_link: usize,
 ) -> Result<Value<'gc>, QuoinError> {
     // Disambiguate the display label when several services host the same
     // unit: the first keeps the bare label, later ones gain an ordinal —
@@ -1050,11 +1137,6 @@ fn finish_host<'gc>(
         rows: HashMap::new(),
     }));
     vm.io.ext_stats.borrow_mut().push(boundary.clone());
-    let chan_link = crate::runtime::channel_relay::register_chan_link(
-        vm,
-        ch.chan_tx.clone(),
-        ch.chan_rx.clone(),
-    );
     // Install the hosted class from its manifest (the two-step: the shell
     // exists first so the root proxy can be its instance, then the method
     // nodes — which carry the proxy — fill it in).

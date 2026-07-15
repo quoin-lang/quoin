@@ -682,3 +682,110 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
     assert_service_script_passes("block_proc_refuse", script, &[]);
 }
+
+/// Spawn-time `args:` — the 7c resolution: the block takes parameters instead
+/// of capturing live things. Data snapshots, a portable block crosses as a
+/// callable, and a CHANNEL becomes a live relay endpoint the hosted object
+/// keeps — sends from inside hosted methods reach the parent. Thread backing.
+#[test]
+fn hosted_block_args_thread() {
+    let script = r#"
+var ok = true;
+
+"* data + block args reach the constructor
+var mult = { |x| x * 3 };
+var svc = Worker.host:'@runner.qn@' with:{ |n f|
+    var r = Runner.new;
+    r.tally:n;
+    r.stash:f;
+    r
+} args:#( 21 mult );
+((svc.tally:1) == 22).else:{ ok = false; 'FAIL data arg'.print };
+((svc.runStash:5) == 15).else:{ ok = false; 'FAIL block arg'.print };
+svc.serviceStop;
+
+"* a channel arg is a LIVE endpoint: the hosted object sends on it mid-method
+var out = Channel.buffered:8;
+var svc2 = Worker.host:'@runner.qn@' with:{ |ch|
+    var r = Runner.new;
+    r.stash:{ |n| ch.send:n; n };
+    r
+} args:#( out );
+svc2.runStash:42;
+((out.receive) == 42).else:{ ok = false; 'FAIL channel arg'.print };
+svc2.serviceStop;
+
+"* arity is checked before anything ships
+var bad = { Worker.with:{ |a b| #{} } args:#( 1 ); 'spawned' }.catch:{ |e| e.s };
+(bad.contains?:'parameter').else:{ ok = false; ('FAIL arity: ' + bad).print };
+
+"* a non-portable arg refuses loudly, naming the element
+var t = Task.spawn:{ 1 };
+var np = { Worker.with:{ |x| #{} } args:#( t ); 'spawned' }.catch:{ |e| e.s };
+(np.contains?:'element 1').else:{ ok = false; ('FAIL non-portable: ' + np).print };
+t.join;
+
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("block_args_spawn", script, &[("runner.qn", RUNNER_UNIT)]);
+}
+
+/// Spawn-time `args:` over PROCESS backing: the same three kinds cross the
+/// socket — data and blocks ride the mailbox as wire forms, the channel as a
+/// relay endpoint on the chan socket.
+#[test]
+fn hosted_block_args_process() {
+    let script = r#"
+var ok = true;
+var mult = { |x| x * 3 };
+var out = Channel.buffered:8;
+var svc = Worker.host:'@runner.qn@' with:{ |n f ch|
+    var r = Runner.new;
+    r.tally:n;
+    r.stash:{ |v| ch.send:(f.value:v); v };
+    r
+} args:#( 21 mult out ) backing:'process';
+((svc.tally:1) == 22).else:{ ok = false; 'FAIL data arg'.print };
+svc.runStash:5;
+((out.receive) == 15).else:{ ok = false; 'FAIL chan+block args'.print };
+svc.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes(
+        "block_args_spawn_proc",
+        script,
+        &[("runner.qn", RUNNER_UNIT)],
+    );
+}
+
+/// The `start:` family joins the args + backing surface: a parameterized job
+/// block takes spawn args (channels included) on thread backing, and plain
+/// jobs now run on PROCESS backing too — the block crossing as source, the
+/// value coming home through `join`.
+#[test]
+fn start_block_args_and_process() {
+    let script = r#"
+var ok = true;
+
+"* a parameterized job: data + channel args, value via join
+var out = Channel.buffered:4;
+var w = Worker.start:{ |n ch| ch.send:(n * 2); n + 1 } args:#( 20 out );
+((out.receive) == 40).else:{ ok = false; 'FAIL chan arg'.print };
+((w.join) == 21).else:{ ok = false; 'FAIL join value'.print };
+
+"* a plain job on process backing: source ships, join carries the value home
+var p = Worker.start:{ var t = 0; (1..6).each:{ |i| t = t + i }; t } backing:'process';
+((p.join) == 15).else:{ ok = false; 'FAIL process job'.print };
+
+"* args over process backing
+var p2 = Worker.start:{ |a b| a * b } args:#( 6 7 ) backing:'process';
+((p2.join) == 42).else:{ ok = false; 'FAIL process args'.print };
+
+"* a parameterized block without args: names the fix
+var miss = { Worker.start:{ |x| x }; 'spawned' }.catch:{ |e| e.s };
+(miss.contains?:'start:args:').else:{ ok = false; ('FAIL arity msg: ' + miss).print };
+
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("start_args", script, &[]);
+}

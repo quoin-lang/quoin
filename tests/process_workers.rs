@@ -153,11 +153,11 @@ var j = { (Worker.spawn:'/nonexistent/nope.qn' backing:'process').join; 'ran' }
 var h = { Worker.host:'/nonexistent/nope.qn' class:'X' backing:'process'; 'hosted' }
     .catch:{ |e| (e.s.contains?:'nope.qn').if:{ 'named' } else:{ e.s } };
 (h == 'named').else:{ ok = false };
-"* start: with process backing points at the unit form
-var sb = { Worker.start:{ 1 } backing:'process'; 'started' }
-    .catch:{ |e| (e.s.contains?:'unit').if:{ 'refused' } else:{ e.s } };
-(sb == 'refused').else:{ ok = false };
-ok.if:{ 'PASS'.print } else:{ ('FAIL ' + j + '/' + h + '/' + sb).print };
+"* start: with process backing is REAL now: the block ships as source,
+"* runs in a child qn, and join carries its value home
+var sb = (Worker.start:{ 1 } backing:'process').join;
+(sb == 1).else:{ ok = false };
+ok.if:{ 'PASS'.print } else:{ ('FAIL ' + j + '/' + h + '/' + sb.s).print };
 "#;
     assert_proc_script_passes("boot", script, &[]);
 }

@@ -126,6 +126,147 @@ fn from_message<'gc>(
     }
 }
 
+/// Receive a spawned block's N spawn-time `args:` — the first N mailbox
+/// messages — as PLAIN data. Every park happens in here, and any relay agent
+/// is ensured before returning, so [`materialize_spawn_args`] can then build
+/// GC values with no yield in sight (the Arg::Chan yield-safety shape: this
+/// pair must stay split — the receive parks, and values must not exist on a
+/// frame that parks).
+fn receive_spawn_arg_msgs<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    n_args: usize,
+) -> Result<Vec<WorkerMsg>, QuoinError> {
+    let mut arg_msgs: Vec<WorkerMsg> = Vec::with_capacity(n_args);
+    if n_args > 0 {
+        let rx = match &vm.worker_link {
+            Some(link) => link.inbox_rx.clone(),
+            None => {
+                return Err(QuoinError::Other(
+                    "spawn args: only runs inside a worker".into(),
+                ));
+            }
+        };
+        for i in 0..n_args {
+            match vm.await_io(IoRequest::WorkerRecv(rx.clone()))? {
+                IoResult::WorkerMsg(Some(msg)) => arg_msgs.push(msg),
+                IoResult::WorkerMsg(None) => {
+                    return Err(QuoinError::Other(format!(
+                        "spawn args: the parent closed before sending argument {} of {n_args}",
+                        i + 1
+                    )));
+                }
+                other => {
+                    return Err(QuoinError::Other(format!(
+                        "spawn args: unexpected result {other:?}"
+                    )));
+                }
+            }
+        }
+    }
+    if arg_msgs.iter().any(|m| matches!(m, WorkerMsg::Channel(_))) {
+        let chan_link = vm.parent_chan_link.unwrap_or(0);
+        crate::runtime::channel_relay::ensure_relay_agent(vm, mc, chan_link)?;
+    }
+    Ok(arg_msgs)
+}
+
+/// The non-yielding half of the spawn-args pair: materialize received
+/// messages as live values (data via the wire walkers, blocks rebuilt,
+/// channels wrapped raw — the agent is already ensured).
+fn materialize_spawn_args<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    arg_msgs: &[WorkerMsg],
+) -> Result<Vec<Value<'gc>>, QuoinError> {
+    let chan_link = vm.parent_chan_link.unwrap_or(0);
+    let mut arg_vals: Vec<Value<'_>> = Vec::with_capacity(arg_msgs.len());
+    for msg in arg_msgs {
+        let v = match msg {
+            WorkerMsg::Data(dv) => wire_to_value(vm, mc, dv, None)?,
+            WorkerMsg::Block(apb) => {
+                rebuild_portable_value(vm, mc, apb).map_err(QuoinError::Other)?
+            }
+            WorkerMsg::Channel(chan) => {
+                crate::runtime::channel_relay::relay_endpoint_raw(vm, mc, chan_link, *chan)?
+            }
+        };
+        arg_vals.push(v);
+    }
+    Ok(arg_vals)
+}
+
+/// The shared body of the `start:` family: snapshot the block, spawn its
+/// worker on the chosen backing (a process job crosses as source +
+/// captures), ship the spawn-time `args:` by the [`spawn_arg`] rules against
+/// a pre-registered chan link, and wrap the handle. Arity is checked here,
+/// before anything ships.
+fn start_block_worker<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    block: Value<'gc>,
+    args_list: Option<Value<'gc>>,
+    backing: &'static str,
+) -> Result<Value<'gc>, QuoinError> {
+    let Some((template, parent_env)) = block_parts(block) else {
+        return Err(QuoinError::Other("Worker.start: expects a Block".into()));
+    };
+    let arg_values = match args_list {
+        Some(list) => crate::runtime::extension::extract_args(list)?,
+        None => Vec::new(),
+    };
+    if template.param_syms.len() != arg_values.len() {
+        return Err(QuoinError::Other(if args_list.is_none() {
+            format!(
+                "Worker.start: the block takes {} parameter(s) — pass them with \
+                 Worker.start:args: (or send data through the lanes)",
+                template.param_syms.len()
+            )
+        } else {
+            format!(
+                "Worker.start:args: the block takes {} parameter(s) but args: has {}",
+                template.param_syms.len(),
+                arg_values.len()
+            )
+        }));
+    }
+    let pb = snapshot_block(template, parent_env, 0)
+        .map_err(|e| QuoinError::Other(format!("Worker.start: {e}")))?;
+    let process = backing == "process";
+    let (ch, pid, grip) = if process {
+        let payload = crate::worker::portable_block_to_wire(&pb)
+            .map_err(|e| QuoinError::Other(format!("Worker.start: {e}")))?;
+        let (ch, pid, grip) =
+            crate::worker::spawn_worker_process(None, crate::worker::ProcessBody::Job(payload), 1)
+                .map_err(QuoinError::Other)?;
+        (ch, Some(pid), Some(grip))
+    } else {
+        (spawn_worker_block(pb), None, None)
+    };
+    let chan_link = crate::runtime::channel_relay::register_chan_link(
+        vm,
+        ch.chan_tx.clone(),
+        ch.chan_rx.clone(),
+    );
+    for (i, v) in arg_values.into_iter().enumerate() {
+        let msg = crate::runtime::worker_service::spawn_arg(vm, mc, v, chan_link, process)
+            .map_err(|e| QuoinError::Other(format!("Worker.start:args: element {}: {e}", i + 1)))?;
+        let _ = ch.inbox_tx.try_send(msg);
+    }
+    wrap_handle(
+        vm,
+        mc,
+        receiver,
+        "<block>",
+        backing,
+        pid,
+        grip,
+        ch,
+        Some(chan_link),
+    )
+}
+
 /// Wrap freshly spawned lanes in a Worker-class handle instance.
 #[allow(clippy::too_many_arguments)] // handle-wrapping helper threads the worker/channel context
 fn wrap_handle<'gc>(
@@ -137,6 +278,7 @@ fn wrap_handle<'gc>(
     pid: Option<u32>,
     grip: Option<crate::worker::ChildGrip>,
     ch: crate::worker::WorkerChannels,
+    chan_link: Option<usize>,
 ) -> Result<Value<'gc>, QuoinError> {
     let Value::Class(class) = receiver else {
         return Err(QuoinError::Other("Worker: bad receiver".into()));
@@ -151,11 +293,14 @@ fn wrap_handle<'gc>(
         outbox_rx: ch.outbox_rx.clone(),
         control_tx: ch.control_tx.clone(),
     });
-    let chan_link = crate::runtime::channel_relay::register_chan_link(
-        vm,
-        ch.chan_tx.clone(),
-        ch.chan_rx.clone(),
-    );
+    // Pre-registered when spawn-time args had to ship against the link first.
+    let chan_link = chan_link.unwrap_or_else(|| {
+        crate::runtime::channel_relay::register_chan_link(
+            vm,
+            ch.chan_tx.clone(),
+            ch.chan_rx.clone(),
+        )
+    });
     Ok(vm.new_native_state(
         mc,
         class,
@@ -671,10 +816,21 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     "Worker.hostBlockRoot: no host block was shipped".into(),
                 ));
             };
+            // The block's parameters arrive as the first N mailbox messages
+            // (spawn-time `args:` — the parent sends them before waiting for
+            // ready). Receive them as plain data FIRST — every park happens
+            // in there — then materialize with no yield in sight.
+            let arg_msgs = receive_spawn_arg_msgs(vm, mc, pb.template.param_syms.len())?;
             // Rebuild AFTER the unit (if any) loaded, so the block's global
             // references resolve against it; run it; host what it answers.
             let block_val = rebuild_portable_value(vm, mc, &pb).map_err(QuoinError::Other)?;
-            let root = vm.call_method_mnu(mc, block_val, "value", Vec::new())?;
+            let root = if arg_msgs.is_empty() {
+                vm.call_method_mnu(mc, block_val, "value", Vec::new())?
+            } else {
+                let arg_vals = materialize_spawn_args(vm, mc, &arg_msgs)?;
+                let list = vm.new_list(mc, arg_vals);
+                vm.call_method_mnu(mc, block_val, "valueWithArgs:", vec![list])?
+            };
             let Value::Object(obj) = root else {
                 return Err(QuoinError::Other(format!(
                     "Worker.host:with: the block must answer an object to host, got {root}"
@@ -689,6 +845,30 @@ pub fn build_worker_class() -> NativeClassBuilder {
             "Worker side of a block-form host (used by the synthesized unit): run the \
              shipped block, root the object it answers, and report ready with its \
              class's manifest. Not meant to be called directly.",
+        )
+        .class_method("jobRoot", |vm, mc, _receiver, _args| {
+            // The parameterized-job bootstrap (`Worker.start:args:`): receive
+            // the spawn args, rebuild the shipped block, run it — its value is
+            // the program's value, which `join` carries home.
+            let Some(pb) = vm.pending_host_block.take() else {
+                return Err(QuoinError::Other(
+                    "Worker.jobRoot: no job block was shipped".into(),
+                ));
+            };
+            let arg_msgs = receive_spawn_arg_msgs(vm, mc, pb.template.param_syms.len())?;
+            let block_val = rebuild_portable_value(vm, mc, &pb).map_err(QuoinError::Other)?;
+            if arg_msgs.is_empty() {
+                vm.call_method_mnu(mc, block_val, "value", Vec::new())
+            } else {
+                let arg_vals = materialize_spawn_args(vm, mc, &arg_msgs)?;
+                let list = vm.new_list(mc, arg_vals);
+                vm.call_method_mnu(mc, block_val, "valueWithArgs:", vec![list])
+            }
+        })
+        .doc(
+            "Worker side of a parameterized job (used by the synthesized job unit): \
+             receive the spawn args, run the shipped block, answer its value. Not \
+             meant to be called directly.",
         )
         .class_method("hostServeLane", |vm, mc, _receiver, _args| {
             let dispatch_rx = match &vm.worker_link {
@@ -801,6 +981,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 None,
                 None,
                 spawn_worker(path),
+                None,
             )
         })
         .doc(
@@ -829,6 +1010,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                         None,
                         None,
                         spawn_worker(path),
+                        None,
                     )
                 }
                 "process" => {
@@ -839,7 +1021,17 @@ pub fn build_worker_class() -> NativeClassBuilder {
                         1,
                     )
                     .map_err(QuoinError::Other)?;
-                    wrap_handle(vm, mc, receiver, &reg, "process", Some(pid), Some(grip), ch)
+                    wrap_handle(
+                        vm,
+                        mc,
+                        receiver,
+                        &reg,
+                        "process",
+                        Some(pid),
+                        Some(grip),
+                        ch,
+                        None,
+                    )
                 }
                 other => Err(QuoinError::Other(format!(
                     "Worker.spawn: unknown backing '{other}' (thread|process)"
@@ -854,66 +1046,39 @@ pub fn build_worker_class() -> NativeClassBuilder {
         // Portable blocks are in-process by nature; the explicit form
         // documents WHY rather than silently doing the wrong thing.
         .class_method("start:backing:", |vm, mc, receiver, args| {
-            let backing = args[1]
-                .as_string()
-                .ok_or_else(|| QuoinError::Other("backing: expects a String".into()))?;
-            match backing.as_str() {
-                "thread" => {
-                    // Same as Worker.start: — reuse its body via the send.
-                    vm.call_method(mc, receiver, "start:", vec![args[0]])
-                }
-                "process" => Err(QuoinError::Other(
-                    "Worker.start: blocks cannot cross a process boundary — put the \
-                     code in a unit and Worker.spawn:backing:'process' it"
-                        .into(),
-                )),
-                other => Err(QuoinError::Other(format!(
-                    "Worker.start: unknown backing '{other}' (thread|process)"
-                ))),
-            }
+            let backing = crate::runtime::worker_service::backing_arg(args[1])?;
+            start_block_worker(vm, mc, receiver, args[0], None, backing)
         })
         .doc(
-            "As `start:` for 'thread' backing. Blocks cannot cross a process boundary \
-             (templates are in-process references), so 'process' refuses loudly -- put the \
-             code in a unit and `Worker.spawn:backing:` it instead.",
+            "As `start:`, choosing the backing: 'thread' (the default) or 'process' -- \
+             a child qn process; the block crosses as its SOURCE TEXT plus a snapshot \
+             of its captures, so it must come from source (not assembled at runtime).",
         )
+        .class_method("start:args:", |vm, mc, receiver, args| {
+            start_block_worker(vm, mc, receiver, args[0], Some(args[1]), "thread")
+        })
+        .doc(
+            "As `start:`, passing ARGUMENTS to the block's parameters: portable values \
+             snapshot, a Channel becomes a live endpoint in the worker, a portable \
+             block crosses as a callable; anything else refuses loudly. Arity is \
+             checked before anything ships.\n\n\
+             ```\n\
+             var jobs = Channel.buffered:16;\n\
+             var w = Worker.start:{ |ch| { ch.receive } .whileNotNil:{ |j| j.run } } args:#( jobs )\n\
+             ```",
+        )
+        .class_method("start:args:backing:", |vm, mc, receiver, args| {
+            let backing = crate::runtime::worker_service::backing_arg(args[2])?;
+            start_block_worker(vm, mc, receiver, args[0], Some(args[1]), backing)
+        })
+        .doc("As `start:args:`, choosing the backing: 'thread' (the default) or 'process'.")
         // Portable blocks (docs/internal/CONCURRENCY_ARCH.md §10): ship the block's
         // template by reference plus a deep-copied SNAPSHOT of its free
         // reads; join returns the block's value. The portability scan
         // refuses write-captures, ^^, self/@fields, guarded blocks, and
         // class/method definition — loudly, at submit time.
         .class_method("start:", |vm, mc, receiver, args| {
-            let Value::Object(obj) = args[0] else {
-                return Err(QuoinError::Other("Worker.start: expects a Block".into()));
-            };
-            let (template, parent_env) = {
-                let borrowed = obj.borrow();
-                match &borrowed.payload {
-                    ObjectPayload::Block(b) => (b.template.clone(), b.parent_env),
-                    _ => {
-                        return Err(QuoinError::Other("Worker.start: expects a Block".into()));
-                    }
-                }
-            };
-            if !template.param_syms.is_empty() {
-                return Err(QuoinError::Other(
-                    "Worker.start: the block takes no parameters (send it data through \
-                     the lanes instead)"
-                        .into(),
-                ));
-            }
-            let pb = snapshot_block(template, parent_env, 0)
-                .map_err(|e| QuoinError::Other(format!("Worker.start: {e}")))?;
-            wrap_handle(
-                vm,
-                mc,
-                receiver,
-                "<block>",
-                "thread",
-                None,
-                None,
-                spawn_worker_block(pb),
-            )
+            start_block_worker(vm, mc, receiver, args[0], None, "thread")
         })
         .doc(
             "Spawn a thread-backed worker from a portable BLOCK instead of a unit file: the \
@@ -1158,6 +1323,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 args[1],
                 1,
                 "thread",
+                None,
             )
         })
         .doc(
@@ -1181,6 +1347,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 args[1],
                 lanes,
                 "thread",
+                None,
             )
         })
         .doc("As `host:with:` with N concurrent lanes.")
@@ -1195,6 +1362,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 args[1],
                 1,
                 backing,
+                None,
             )
         })
         .doc(
@@ -1213,11 +1381,12 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 args[1],
                 lanes,
                 backing,
+                None,
             )
         })
         .doc("As `host:with:backing:` with N concurrent lanes.")
         .class_method("with:", |vm, mc, receiver, args| {
-            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], 1, "thread")
+            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], 1, "thread", None)
         })
         .doc(
             "Host the object a portable block answers, with no unit -- `host:with:` \
@@ -1231,13 +1400,13 @@ pub fn build_worker_class() -> NativeClassBuilder {
         .class_method("with:lanes:", |vm, mc, receiver, args| {
             let lanes = crate::runtime::worker_service::lanes_arg(args[1])?;
             crate::runtime::worker_service::host_block(
-                vm, mc, receiver, None, args[0], lanes, "thread",
+                vm, mc, receiver, None, args[0], lanes, "thread", None,
             )
         })
         .doc("As `with:` with N concurrent lanes.")
         .class_method("with:backing:", |vm, mc, receiver, args| {
             let backing = crate::runtime::worker_service::backing_arg(args[1])?;
-            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], 1, backing)
+            crate::runtime::worker_service::host_block(vm, mc, receiver, None, args[0], 1, backing, None)
         })
         .doc(
             "As `with:`, choosing the backing: 'thread' (the default) or 'process' -- \
@@ -1248,10 +1417,144 @@ pub fn build_worker_class() -> NativeClassBuilder {
             let backing = crate::runtime::worker_service::backing_arg(args[1])?;
             let lanes = crate::runtime::worker_service::lanes_arg(args[2])?;
             crate::runtime::worker_service::host_block(
-                vm, mc, receiver, None, args[0], lanes, backing,
+                vm, mc, receiver, None, args[0], lanes, backing, None,
             )
         })
         .doc("As `with:backing:` with N concurrent lanes.")
+        .class_method("host:with:args:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                Some(path),
+                args[1],
+                1,
+                "thread",
+                Some(args[2]),
+            )
+        })
+        .doc(
+            "As `host:with:`, passing ARGUMENTS to the block's parameters: each args: \
+             element crosses by the spawn rules -- portable values snapshot, a Channel \
+             becomes a live endpoint in the worker (the way to hand a hosted object a \
+             lane to talk on), a portable block crosses as a callable; anything else \
+             refuses loudly before the worker sees it. Arity is checked here, before \
+             anything ships.\n\n\
+             ```\n\
+             var results = Channel.buffered:16;\n\
+             var pool = Worker.host:'db.qn' with:{ |out| Pool.new.reportTo:out } args:#( results )\n\
+             ```",
+        )
+        .class_method("host:with:args:lanes:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let lanes = crate::runtime::worker_service::lanes_arg(args[3])?;
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                Some(path),
+                args[1],
+                lanes,
+                "thread",
+                Some(args[2]),
+            )
+        })
+        .doc("As `host:with:args:` with N concurrent lanes.")
+        .class_method("host:with:args:backing:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let backing = crate::runtime::worker_service::backing_arg(args[3])?;
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                Some(path),
+                args[1],
+                1,
+                backing,
+                Some(args[2]),
+            )
+        })
+        .doc("As `host:with:args:`, choosing the backing: 'thread' (the default) or 'process'.")
+        .class_method("host:with:args:backing:lanes:", |vm, mc, receiver, args| {
+            let path = crate::runtime::worker_service::string_arg(args[0], "the unit path")?;
+            let backing = crate::runtime::worker_service::backing_arg(args[3])?;
+            let lanes = crate::runtime::worker_service::lanes_arg(args[4])?;
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                Some(path),
+                args[1],
+                lanes,
+                backing,
+                Some(args[2]),
+            )
+        })
+        .doc("As `host:with:args:backing:` with N concurrent lanes.")
+        .class_method("with:args:", |vm, mc, receiver, args| {
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                None,
+                args[0],
+                1,
+                "thread",
+                Some(args[1]),
+            )
+        })
+        .doc(
+            "As `with:`, passing ARGUMENTS to the block's parameters (see \
+             `host:with:args:` for the crossing rules).\n\n\
+             ```\n\
+             var out = Channel.buffered:8;\n\
+             var agg = Worker.with:{ |ch| Aggregator.new.drain:ch } args:#( out )\n\
+             ```",
+        )
+        .class_method("with:args:lanes:", |vm, mc, receiver, args| {
+            let lanes = crate::runtime::worker_service::lanes_arg(args[2])?;
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                None,
+                args[0],
+                lanes,
+                "thread",
+                Some(args[1]),
+            )
+        })
+        .doc("As `with:args:` with N concurrent lanes.")
+        .class_method("with:args:backing:", |vm, mc, receiver, args| {
+            let backing = crate::runtime::worker_service::backing_arg(args[2])?;
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                None,
+                args[0],
+                1,
+                backing,
+                Some(args[1]),
+            )
+        })
+        .doc("As `with:args:`, choosing the backing: 'thread' (the default) or 'process'.")
+        .class_method("with:args:backing:lanes:", |vm, mc, receiver, args| {
+            let backing = crate::runtime::worker_service::backing_arg(args[2])?;
+            let lanes = crate::runtime::worker_service::lanes_arg(args[3])?;
+            crate::runtime::worker_service::host_block(
+                vm,
+                mc,
+                receiver,
+                None,
+                args[0],
+                lanes,
+                backing,
+                Some(args[1]),
+            )
+        })
+        .doc("As `with:args:backing:` with N concurrent lanes.")
         .class_method("worker?", |vm, mc, _receiver, _args| {
             Ok(vm.new_bool(mc, vm.worker_link.is_some()))
         })

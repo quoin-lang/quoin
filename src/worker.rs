@@ -279,6 +279,12 @@ pub(crate) const OP_SEND: &str = "send";
 /// over a process link): `recv` carries the owner-side channel id (§6).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const OP_SEND_CHAN: &str = "sendChan";
+/// Mailbox op: a portable block, encoded as source + captures
+/// (`portable_block_to_wire`) in the frame's `data`. Parent -> child only
+/// today (spawn-time `args:`); plain `Worker.send:` still refuses blocks on
+/// process backing at the send seam.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const OP_SEND_BLOCK: &str = "sendBlock";
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const OP_PS_TREE: &str = "psTree";
 /// Ends the hosted serve loop (`WorkerService`'s `serviceStop`). Shadows a
@@ -739,6 +745,10 @@ pub enum ProcessBody {
     Plain,
     Class(String),
     Block(WireData),
+    /// A plain JOB block (`Worker.start:` on process backing): same shipping
+    /// as `Block`, but the child runs it as its whole life and the done
+    /// terminal carries its value (`join`'s answer).
+    Job(WireData),
 }
 
 #[cfg(target_arch = "wasm32")]
