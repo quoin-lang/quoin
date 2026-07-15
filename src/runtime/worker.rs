@@ -44,7 +44,7 @@ pub struct NativeWorkerHandle {
     grip: Option<crate::worker::ChildGrip>,
     inbox_tx: async_channel::Sender<WorkerMsg>,
     outbox_rx: async_channel::Receiver<WorkerMsg>,
-    done_rx: async_channel::Receiver<Result<WireData, String>>,
+    done_rx: async_channel::Receiver<Result<WireData, crate::worker::WorkerExit>>,
     /// This link's index in `vm.io.chan_links` (§6 channel relay).
     chan_link: usize,
     /// `join` consumes the done lane (its channel holds exactly one value);
@@ -1165,7 +1165,22 @@ pub fn build_worker_class() -> NativeClassBuilder {
             };
             match vm.await_io(IoRequest::WorkerJoin(rx))? {
                 IoResult::WorkerDone(Ok(dv)) => wire_to_value(vm, mc, &dv, None),
-                IoResult::WorkerDone(Err(msg)) => Err(QuoinError::Other(msg)),
+                // The body ran and reported — an ordinary catchable error.
+                IoResult::WorkerDone(Err(crate::worker::WorkerExit::Failed(msg))) => {
+                    Err(QuoinError::Other(msg))
+                }
+                // The isolate is gone (process vanished, thread panicked):
+                // the typed death error (SUPERVISION.md §2), naming the
+                // worker by its registry label.
+                IoResult::WorkerDone(Err(crate::worker::WorkerExit::Died { reason, detail })) => {
+                    let peer = receiver
+                        .with_native_state::<NativeWorkerHandle, _, _>(|h| h.reg_idx)
+                        .ok()
+                        .and_then(|i| vm.worker_registry.get(i))
+                        .map(|r| r.label.clone())
+                        .unwrap_or_else(|| "worker".to_string());
+                    Err(QuoinError::peer_died(peer, reason, detail))
+                }
                 other => Err(QuoinError::Other(format!(
                     "Worker.join: unexpected result {other:?}"
                 ))),

@@ -41,7 +41,9 @@ fn spawn_worker_with(
             // A panic anywhere in the worker (parser internals, VM bugs)
             // must not tear down the process silently — it becomes the
             // done-lane error. The closure owns everything it touches, so
-            // unwind-safety is vacuous.
+            // unwind-safety is vacuous. A body that RAN and reported is
+            // `Failed` (an ordinary error); a panic is a DEATH — the isolate
+            // is gone (SUPERVISION.md §2) — typed so `join` can tell them apart.
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 body(WorkerLink {
                     inbox_rx,
@@ -53,14 +55,20 @@ fn spawn_worker_with(
                     process: false,
                 })
             }))
-            .unwrap_or_else(|p| {
-                let what = p
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                Err(format!("worker panicked: {what}"))
-            });
+            .map_or_else(
+                |p| {
+                    let what = p
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    Err(WorkerExit::Died {
+                        reason: crate::error::PeerDeathReason::Panicked,
+                        detail: format!("worker panicked: {what}"),
+                    })
+                },
+                |r| r.map_err(WorkerExit::Failed),
+            );
             COMPLETED.fetch_add(1, Ordering::Relaxed);
             let _ = done_tx.send_blocking(out);
         })
@@ -781,7 +789,7 @@ pub fn spawn_worker_process(
 
     let (inbox_tx, inbox_rx) = async_channel::unbounded::<WorkerMsg>();
     let (outbox_tx, outbox_rx) = async_channel::unbounded::<WorkerMsg>();
-    let (done_tx, done_rx) = async_channel::bounded::<Result<WireData, String>>(1);
+    let (done_tx, done_rx) = async_channel::bounded::<Result<WireData, WorkerExit>>(1);
     let (control_tx, control_rx) = async_channel::unbounded::<ControlReq>();
     let (dispatch_tx, dispatch_rx) = async_channel::unbounded::<DispatchReq>();
     // Channel-relay lanes (§6): dumb frame pumps over their own socket — the
@@ -886,13 +894,17 @@ pub fn spawn_worker_process(
                         done_sent = true;
                     }
                     Msg::CallReturnError { message, .. } => {
-                        let _ = done_tx.send_blocking(Err(message));
+                        // The child ran and REPORTED (a unit compile error, the
+                        // body raising) — an ordinary failure, not a death.
+                        let _ = done_tx.send_blocking(Err(WorkerExit::Failed(message)));
                         done_sent = true;
                     }
                     _ => {}
                 }
             }
             if !done_sent {
+                // EOF without a terminal: the child VANISHED — a death
+                // (SUPERVISION.md §2), typed so `join` raises `PeerDiedError`.
                 let status = reader_grip
                     .lock()
                     .expect("child grip")
@@ -900,7 +912,10 @@ pub fn spawn_worker_process(
                     .and_then(|c| c.try_wait().ok().flatten())
                     .map(|s| format!(" ({s})"))
                     .unwrap_or_default();
-                let _ = done_tx.send_blocking(Err(format!("worker process exited{status}")));
+                let _ = done_tx.send_blocking(Err(WorkerExit::Died {
+                    reason: crate::error::PeerDeathReason::Exited,
+                    detail: format!("worker process exited{status}"),
+                }));
             }
             COMPLETED.fetch_add(1, Ordering::Relaxed);
             // Reap; leave None so a late `terminate` is a clean no-op.
@@ -1323,3 +1338,7 @@ pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lan
     // PARENT still holds open; returning would leave this process lingering.
     i32::from(out.is_err())
 }
+
+#[cfg(test)]
+#[path = "worker_spawn_tests.rs"]
+mod tests;

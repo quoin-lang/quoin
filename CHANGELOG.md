@@ -10,6 +10,26 @@ under **Changed**, with the migration.
 
 ### Added
 
+- **`PeerDiedError` — peer deaths are typed** (SUPERVISION.md slice 0). When the
+  isolate hosting a receiver *dies* — its process exits, its connection closes
+  under a call, a thread worker's body panics — the raised error is now the new
+  root class `PeerDiedError`, carrying `reason` (`#exited` / `#panicked`) and
+  `peer` (the hosted class, worker label, or extension name). This covers every
+  seam: an extension crashing mid-call or found dead, a hosted service dying
+  mid-conversation or refusing as a corpse, and `Worker.join` on a vanished or
+  panicked worker (previously untyped strings). Errors a *live* peer reports are
+  unchanged — death is the peer disappearing, never a value it raised.
+  **Breaking**: an extension crash was previously an `IoError` of kind
+  `#closed`; a `catch:{ |e:IoError| … }` around extension calls that meant to
+  catch the crash should catch `PeerDiedError` instead (`IoError` was too
+  user-error-adjacent to share a catch clause with a dead isolate).
+  Death housekeeping rides along: a dead service now releases its parent-held
+  block handles (previously leaked until VM exit), `VM.claims` rows carry an
+  explicit `gone` marker (`died` / `stopped`; `VM.claimsReport` renders it),
+  and a dead link's parked remote channel receivers are purged with their
+  owner-side roots released — a later `send:` reaches a live receiver instead
+  of vanishing into the closed lane.
+
 - **Generic Map keys** — `Map(K V)` annotations now take any key type; the old
   "Map keys are String" resolve-time warning is gone (the runtime has keyed by
   any value since the hash-ladder map store). `V` stays runtime-tag-enforced

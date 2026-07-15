@@ -242,6 +242,29 @@ record/replay run containing a supervised death + restart.
    `PeerDiedError` unification (gap (d)); release parent-side block handles on
    unexpected death (gap (a)); retract dead remote channel waiters on link death
    (gap (b)'s fixable half); explicit dead-peer marker in `VM.claims`.
+   **AS BUILT (2026-07-15).** `QuoinError::PeerDied { peer, reason, message }` →
+   the `PeerDiedError` bootstrap class (`reason`/`peer` accessors); raised at
+   every seam — `extension_dead_error` (off `IoError #closed`, the breaking
+   change), the service mid-call/corpse/`serviceStop`-join paths, and `join`
+   (the done lane's error side became `WorkerExit::{Failed, Died{reason,
+   detail}}`, so body-reported failures stay ordinary errors without string
+   matching; a thread panic is `Died(#panicked)`, pinned by unit test).
+   `note_service_dead` (idempotent, every parent-side detection seam) drains
+   the block handles and stamps `PeerClaims.gone = "died"` — `"stopped"` on the
+   clean path — surfaced as the `gone` key in `VM.claims` rows and a
+   `DIED/STOPPED (post-mortem)` marker in `claimsReport`. Channels went beyond
+   the plan: `ChanLink.shipped` counts per-link endpoint refs at the one ship
+   choke point, so `channel_link_died` both purges the dead link's parked
+   remote RECEIVERS (the silent value-loss bug — a later send now reaches a
+   live receiver, e2e-verified by SIGKILLing the child mid-park) and repays the
+   ship refcounts, unrooting what only the dead peer referenced. Remote
+   SENDERS deliberately survive: their values are already here and deliver
+   like letters posted before death (the Ack drops harmlessly). Known residue:
+   a child that dies *gracefully* mid-call (its serve fiber unwinds before the
+   socket closes) answers with the synthesized "the hosted serve loop exited
+   mid-call" `CallReturnError` — an ordinary error terminal the parent cannot
+   distinguish from user code, so that race stays untyped until a slice-1
+   death event can reclassify it.
 1. **Death events:** reactor child-exit watch for process children (kqueue/pidfd),
    thread done-lane unification, lifecycle event records + per-service `events`
    channel, `VM.services`, replay divergence coverage.

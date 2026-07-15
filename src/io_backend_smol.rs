@@ -652,7 +652,10 @@ impl IoBackend for SmolBackend {
             }),
             IoRequest::WorkerJoin(rx) => Box::pin(async move {
                 IoResult::WorkerDone(rx.recv().await.unwrap_or_else(|_| {
-                    Err("worker vanished without reporting a result".to_string())
+                    Err(crate::worker::WorkerExit::Died {
+                        reason: crate::error::PeerDeathReason::Exited,
+                        detail: "worker vanished without reporting a result".to_string(),
+                    })
                 }))
             }),
             IoRequest::Write { id, bytes } => Box::pin(async move {

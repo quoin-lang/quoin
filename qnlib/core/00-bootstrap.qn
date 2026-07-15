@@ -273,6 +273,29 @@ Error <- TimeoutError <- { |@ms|
     ms -> { @ms }
 }
 
+"* Raised when the isolate hosting the receiver DIED — a worker (thread or
+"* process) or an extension process. Death is the peer *disappearing*: its
+"* process exited, its connection closed under a call, or its thread panicked.
+"* An error a live peer reports raises as an ordinary catchable error and the
+"* peer stays usable — that is never a `PeerDiedError`. A root Error class,
+"* deliberately distinct from `IoError` (whose kinds describe I/O a program
+"* does on purpose). See docs/internal/SUPERVISION.md.
+Error <- PeerDiedError <- { |@reason @peer|
+    "* The death cause as a symbol: #exited (the process ended or its
+    "* connection closed) or #panicked (a thread worker's body panicked).
+    "*
+    "* ```
+    "* var w = Worker.start:{ Async.sleep:60000 } backing:'process';
+    "* w.terminate;
+    "* { w.join }.catch:{ |e:PeerDiedError| e.reason }    "* -> exited
+    "* ```
+    reason -> { @reason }
+
+    "* The peer's name: the hosted class, the worker's label, or the
+    "* extension's package/command.
+    peer -> { @peer }
+}
+
 "* Quoin-side numeric conveniences; the arithmetic itself is native.
 Double <-- {
     .meta <-- {

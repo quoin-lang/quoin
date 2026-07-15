@@ -819,6 +819,15 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                 ];
                 let m = vec![
                     ("peer".to_string(), vm.new_string(mc, p.label.clone())),
+                    // nil while the peer lives; 'died' / 'stopped' once it is
+                    // gone (rows outlive the peer — the post-mortem).
+                    (
+                        "gone".to_string(),
+                        match p.gone {
+                            Some(how) => vm.new_string(mc, how.to_string()),
+                            None => vm.new_nil(mc),
+                        },
+                    ),
                     ("lanes".to_string(), vm.new_map(mc, lanes)),
                     ("objects".to_string(), vm.new_list(mc, objects)),
                     ("edges".to_string(), vm.new_list(mc, edges)),
@@ -880,9 +889,14 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                     "0 waiting now".to_string()
                 };
                 out.push_str(&format!(
-                    "[{}] lanes {}/{} free  {} acquisitions ({} contended, {waiting_now})  \
+                    "[{}]{} lanes {}/{} free  {} acquisitions ({} contended, {waiting_now})  \
                      granted waits {} total / {} max  queue high-water {}  depth max {}{}\n",
                     p.label,
+                    match p.gone {
+                        Some("died") => " DIED (post-mortem)",
+                        Some(_) => " STOPPED (post-mortem)",
+                        None => "",
+                    },
                     free,
                     total,
                     s.acquisitions,

@@ -149,6 +149,12 @@ pub struct PeerClaims {
     /// Tasks parked in `serviceStop` waiting for all lanes to come home.
     drain_waiters: Vec<(usize, u64)>,
     pub stats: ClaimStats,
+    /// Set when the peer is GONE — `"died"` (a detected peer death;
+    /// SUPERVISION.md slice 0) or `"stopped"` (`serviceStop`) — so
+    /// `VM.claims`/`VM.claimsReport` say so explicitly instead of leaving a
+    /// dead peer implicit in its unwinding waiters. The rows themselves stay:
+    /// post-mortem numbers are the point of outliving the peer.
+    pub gone: Option<&'static str>,
 }
 
 impl PeerClaims {
@@ -163,6 +169,7 @@ impl PeerClaims {
             parked_on: HashMap::new(),
             drain_waiters: Vec::new(),
             stats: ClaimStats::default(),
+            gone: None,
         }
     }
 

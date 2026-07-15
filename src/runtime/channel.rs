@@ -569,6 +569,47 @@ impl<'gc> VmState<'gc> {
         Ok(())
     }
 
+    /// The counterpart isolate of `link` died (its relay lane closed): the
+    /// endpoints it held are gone and can never answer or `Release`. Two
+    /// duties on the OWNER side (SUPERVISION.md slice 0):
+    ///
+    /// - Purge its parked REMOTE RECEIVERS from our channels — a later local
+    ///   send would pop one and emit the value into the closed lane, silent
+    ///   value loss. Parked remote SENDERS deliberately stay: their values are
+    ///   already here, and a queued send delivers like a letter posted before
+    ///   death (only its Ack is dropped, harmlessly).
+    /// - Drop the ship refcounts the link's endpoints held (`ChanLink::shipped`),
+    ///   unrooting channels nothing else references — the dead peer's `Release`s
+    ///   will never come.
+    pub(crate) fn channel_link_died(&mut self, mc: &Mutation<'gc>, link: usize) {
+        let shipped: Vec<(u64, usize)> = match self.io.chan_links.get_mut(link) {
+            Some(l) => l.shipped.drain().collect(),
+            None => return,
+        };
+        for (chan, refs) in shipped {
+            let Some(chv) = self.hosted_get(chan) else {
+                continue;
+            };
+            let now_unshipped = chv
+                .with_native_state_mut::<NativeChannelState, _, _>(mc, |ch| {
+                    ch.recv_waiters
+                        .retain(|w| !matches!(w, RecvWaiter::Remote { link: l, .. } if *l == link));
+                    if let Some(s) = &mut ch.ship {
+                        s.refs = s.refs.saturating_sub(refs);
+                        if s.refs == 0 {
+                            ch.ship = None;
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .unwrap_or(false);
+            if now_unshipped {
+                self.hosted_release(chan);
+            }
+        }
+    }
+
     /// Root `channel` for shipping across an isolate boundary (or bump its
     /// endpoint refcount if already shipped) and answer its hosted id
     /// (ACTOR_OBJECTS.md §6).
@@ -734,6 +775,16 @@ impl<'gc> VmState<'gc> {
                 Ok(())
             }
             F::Release { chan } => {
+                // Repay the per-link count first (the link-death accounting,
+                // `channel_link_died`): this endpoint released properly.
+                if let Some(l) = self.io.chan_links.get_mut(link)
+                    && let Some(n) = l.shipped.get_mut(&chan)
+                {
+                    *n = n.saturating_sub(1);
+                    if *n == 0 {
+                        l.shipped.remove(&chan);
+                    }
+                }
                 if let Some(chv) = self.hosted_get(chan) {
                     let now_unshipped = chv
                         .with_native_state_mut::<NativeChannelState, _, _>(mc, |ch| {

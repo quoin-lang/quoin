@@ -465,6 +465,7 @@ impl NativeExtension {
     /// host-side fd + handle reap still happen in `Drop`.
     fn kill_now(&mut self) {
         self.dead = true;
+        self.claims.borrow_mut().gone = Some("died");
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.sock_path);
@@ -477,6 +478,7 @@ impl NativeExtension {
         match self.child.try_wait() {
             Ok(Some(status)) => {
                 self.dead = true;
+                self.claims.borrow_mut().gone = Some("died");
                 Some(match status.code() {
                     Some(code) => format!("exited with status {code}"),
                     None => "terminated by signal".to_string(),
@@ -510,10 +512,16 @@ impl Drop for NativeExtension {
     }
 }
 
-/// The typed error raised when an extension's process has died (during or before a call). Surfaces
-/// to Quoin as an `IoError` of kind `#closed`, so it's catchable like any other I/O failure.
-fn extension_dead_error(detail: &str) -> QuoinError {
-    QuoinError::io_closed(format!("Extension process died ({detail})"))
+/// The typed error raised when an extension's process has died (during or before a call).
+/// Surfaces to Quoin as a `PeerDiedError` (reason `#exited`) — the peer-death root class,
+/// deliberately NOT an `IoError` (SUPERVISION.md §10.4): a dead isolate must not share a
+/// catch clause with the I/O a program does on purpose.
+fn extension_dead_error(peer: &str, detail: &str) -> QuoinError {
+    QuoinError::peer_died(
+        peer,
+        crate::error::PeerDeathReason::Exited,
+        format!("Extension process died ({detail})"),
+    )
 }
 
 /// A process-unique, never-reused extension id (used to tag and bulk-release handles).
@@ -1191,7 +1199,12 @@ fn finish_outcome<'gc>(
                 // globals) so they drop their GC roots instead of leaking until VM exit.
                 Some(detail) => {
                     vm.handle_table.release_for_ext(ext_id);
-                    Err(extension_dead_error(&detail))
+                    let peer = ext_receiver
+                        .with_native_state::<NativeExtension, _, _>(|e| {
+                            e.stats.borrow().peer.clone()
+                        })
+                        .unwrap_or_else(|_| "extension".to_string());
+                    Err(extension_dead_error(&peer, &detail))
                 }
                 None => Err(e),
             }
@@ -1367,7 +1380,8 @@ fn run_extension_method<'gc>(
     let ctx = ext_prelude(vm, mc, receiver, ExtClaimKey::PerCall, &op, &what)?;
     if ctx.dead {
         ext_end_call(vm, mc, receiver, ctx.object_id);
-        return Err(extension_dead_error("already exited"));
+        let peer = ctx.stats.borrow().peer.clone();
+        return Err(extension_dead_error(&peer, "already exited"));
     }
     // Serialize the optional structured-value payload before opening the call (this extension's
     // own live instances are allowed inside). If it fails (e.g. a value with no data
@@ -1467,7 +1481,8 @@ pub fn dispatch_ext_method<'gc>(
     let ctx = ext_prelude(vm, mc, ext, key, &class_name, &what)?;
     if ctx.dead {
         ext_end_call(vm, mc, ext, ctx.object_id);
-        return Err(extension_dead_error("already exited"));
+        let peer = ctx.stats.borrow().peer.clone();
+        return Err(extension_dead_error(&peer, "already exited"));
     }
     // The method arguments are routed by `extension_call` (ext-class mode) into the ordered
     // `method_args` — data, ext-instances, and host blocks each by their kind.

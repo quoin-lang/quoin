@@ -262,6 +262,11 @@ pub struct ChanLink {
     /// Dropped-endpoint channel ids awaiting a `Release` frame (a GC `Drop`
     /// can't send one; flushed by the agent and by relay ops).
     pub reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+    /// OWNER side: hosted channel ids shipped over THIS link → how many remote
+    /// endpoints this link's peer holds. `Release` frames decrement; link death
+    /// drains the map — the dead isolate's endpoints can never Release, so the
+    /// counts are what the owner unroots by (SUPERVISION.md slice 0).
+    pub shipped: std::collections::HashMap<u64, usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -328,11 +333,25 @@ pub struct WorkerReg {
     pub control_tx: async_channel::Sender<ControlReq>,
 }
 
+/// How a worker's done lane resolved when the body did not answer a value.
+/// The distinction matters (`docs/internal/SUPERVISION.md` §2): `Failed` is the
+/// body *reporting* — a unit compile error, a job raising — an ordinary
+/// catchable error; `Died` is the isolate *disappearing* — process gone without
+/// a terminal, thread body panicked — surfaced as the typed `PeerDiedError`.
+#[derive(Debug, Clone)]
+pub enum WorkerExit {
+    Failed(String),
+    Died {
+        reason: crate::error::PeerDeathReason,
+        detail: String,
+    },
+}
+
 /// The parent-side half, held by the `Worker` handle instance.
 pub struct WorkerChannels {
     pub inbox_tx: async_channel::Sender<WorkerMsg>,
     pub outbox_rx: async_channel::Receiver<WorkerMsg>,
-    pub done_rx: async_channel::Receiver<Result<WireData, String>>,
+    pub done_rx: async_channel::Receiver<Result<WireData, WorkerExit>>,
     pub control_tx: async_channel::Sender<ControlReq>,
     /// Hosted-object dispatch (the service proxy's lane); unused by plain
     /// workers, whose serve loop never reads the other end.
@@ -761,7 +780,9 @@ fn dead_letter_channels() -> WorkerChannels {
     let (_chan_inert_tx, chan_rx) = async_channel::unbounded();
     // `try_send` (send_blocking is compiled out on wasm): the lane is a fresh
     // bounded(1), so the one slot is guaranteed free.
-    let _ = done_tx.try_send(Err("workers are not supported on this platform".to_string()));
+    let _ = done_tx.try_send(Err(WorkerExit::Failed(
+        "workers are not supported on this platform".to_string(),
+    )));
     WorkerChannels {
         inbox_tx,
         outbox_rx,
