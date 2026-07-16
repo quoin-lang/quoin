@@ -16,6 +16,19 @@
 "*     readUntil:limit: path) and an oversized body (-> 413 via maxBodyBytes).
 "* Each result is checked against its expected value.
 "*
+"* Then the supervision phases (docs/internal/SUPERVISION.md via [Web]Pool):
+"*   - phase 3, CHAOS: a 3-worker supervised process pool under concurrent
+"*     mixed load while every round fires /boom (VM.abort — a real crash) into
+"*     the round-robin; requests racing a kill must resolve as clean 502/503
+"*     ('blast'), everything else must be exactly right, and after a settle
+"*     the pool must be healed to full strength and serve a perfect wave;
+"*   - phase 4, GIVE-UP: a 2-worker pool on a tiny budget (max:1) hammered
+"*     with /boom until every slot's supervision budget is spent, then the
+"*     503 must be PERMANENT and say so.
+"*
+"* Knobs: QN_SOAK_ROUNDS (default 5) scales phases 1-2, QN_SOAK_CHAOS_ROUNDS
+"* (default 6) scales the kill fire.
+"*
 "* DETECTION (Run mode always exits 0, so check the output, not the exit code):
 "*   success -> a final "OK: N rounds passed" line and no failure line;
 "*   failure -> a "SOAK FAILED: ..." line per mismatch, and a final FAILED line.
@@ -36,7 +49,8 @@ use std:web/*
 }
 
 var check = [Soak]Check.new
-var rounds = 5
+var rounds = ([OS]Env.at:'QN_SOAK_ROUNDS' ifAbsent:{ '5' }).to_integer
+var chaosRounds = ([OS]Env.at:'QN_SOAK_CHAOS_ROUNDS' ifAbsent:{ '6' }).to_integer
 
 "* --- the app under test ----------------------------------------------------
 var app = [Web]App.new
@@ -46,6 +60,10 @@ app.post:'/echo' do:{ |req| [Web]Response.json:(req.json) status:201 }
 app.get:'/stream'
 do:{ [Web]Response.stream:(Generator.from:{ ^>'a'; ^>'bb'; ^>'ccc' }) contentType:'text/plain' }
 app.get:'/teapot' do:{ HttpError.throw:418 }
+"* The chaos trigger: a REAL crash (no teardown, no terminal from the body —
+"* the isolate just vanishes), only ever routed to process-backed pool
+"* workers in phases 3/4.
+app.get:'/boom' do:{ VM.abort }
 
 "* SAME-UNIT MODEL: pool workers re-run this whole file; app construction
 "* above runs in both contexts, everything below only in the main VM (a
@@ -188,8 +206,145 @@ wServer.stop;
 wServer.join;
 wServer.close;
 
+"* --- phase 3: CHAOS — a supervised process pool under kill fire -----------
+"* Process backing (VM.abort in a thread worker would take the whole soak
+"* down); a generous budget so the pool never gives up here. Every request
+"* racing a kill must resolve as a clean 502 (its worker died under it) or
+"* 503 (no live slot that instant) — the 'blast' verdict; a wrong answer,
+"* a hang, or a leaked error is a failure.
+var cServer = app.start:'127.0.0.1:0' workers:3 backing:'process';
+app.poolSupervise:((Supervise.always.backoff:10 cap:80).max:1000 within:60000);
+var cBase = 'http://127.0.0.1:' + cServer.port;
+var blasts = 0;
+
+"* 502/503 = the request raced a kill; anything else is wrong.
+var blastOr = { |status|
+    ((status == 502) || (status == 503))
+        .if:{ 'blast' }
+        else:{ 'BAD status ' + status.s }
+};
+
+var cRound = 1;
+{ cRound <= chaosRounds }.whileDo:{
+    var verdicts = Async.timeout:20000 do:{
+        Async.gather:#(
+            "* -- the killer: /boom aborts whichever worker draws it --------
+            {
+                var st = ([HTTP]Client.get:(cBase + '/boom')).status;
+                ((st == 502) || (st == 503)).if:{ 'blast' }
+                    else:{ 'BAD boom status ' + st.s }
+            }
+            "* -- mixed load racing the kill ---------------------------------
+            {
+                var r = [HTTP]Client.get:(cBase + '/hello');
+                (r.status == 200)
+                    .if:{ ((r.body.text) == 'hi').if:{ 'ok' } else:{ 'BAD hello body' } }
+                    else:{ blastOr.value:(r.status) }
+            }
+            {
+                var r = [HTTP]Client.get:(cBase + '/users/' + cRound);
+                (r.status == 200)
+                    .if:{ ((r.body.json.at:'id') == cRound.s).if:{ 'ok' } else:{ 'BAD param body' } }
+                    else:{ blastOr.value:(r.status) }
+            }
+            {
+                var r = [HTTP]Client.post:(cBase + '/echo') body:#{ 'n': cRound };
+                (r.status == 201)
+                    .if:{ ((r.body.json.at:'n') == cRound).if:{ 'ok' } else:{ 'BAD echo body' } }
+                    else:{ blastOr.value:(r.status) }
+            }
+            "* A worker dying mid-stream TRUNCATES the chunked body (the wire
+            "* has no mid-body error signal) — a strict prefix is a blast.
+            {
+                var r = [HTTP]Client.get:(cBase + '/stream');
+                var t = r.body.text;
+                (r.status == 200)
+                    .if:{ (t == 'abbccc').if:{ 'ok' }
+                        else:{ ('abbccc'.starts?:t).if:{ 'blast' }
+                            else:{ 'BAD stream [' + t + ']' } } }
+                    else:{ blastOr.value:(r.status) }
+            }
+            {
+                var st = ([HTTP]Client.get:(cBase + '/teapot')).status;
+                (st == 418).if:{ 'ok' } else:{ blastOr.value:st }
+            }
+            {
+                var r = [HTTP]Client.get:(cBase + '/hello');
+                (r.status == 200)
+                    .if:{ ((r.body.text) == 'hi').if:{ 'ok' } else:{ 'BAD hello body' } }
+                    else:{ blastOr.value:(r.status) }
+            }
+        )
+    };
+    check.is:(verdicts.at:0) equalTo:'blast' label:'chaos: boom must land as 502/503';
+    var vi = 0;
+    { vi < verdicts.count }.whileDo:{
+        var v = verdicts.at:vi;
+        check.is:((v == 'ok') || (v == 'blast')) equalTo:true label:('chaos: ' + v);
+        (v == 'blast').if:{ blasts = blasts + 1 };
+        vi = vi + 1
+    };
+    cRound = cRound + 1
+};
+
+"* Settle past the deepest backoff (capped at 80ms), then the pool must be
+"* healed to full strength and serve a perfect recovery wave.
+Async.sleep:500;
+check.is:(app.pool.aliveCount) equalTo:3 label:'chaos: pool healed to full strength';
+var wave = Async.timeout:15000 do:{
+    Async.gather:#(
+        { ([HTTP]Client.get:(cBase + '/hello')).body.text }
+        { ([HTTP]Client.get:(cBase + '/users/9')).body.json.at:'id' }
+        { ([HTTP]Client.post:(cBase + '/echo') body:#{ 'n': 9 }).status }
+        { ([HTTP]Client.get:(cBase + '/stream')).body.text }
+        { ([HTTP]Client.get:(cBase + '/teapot')).status }
+    )
+};
+check.is:(wave.at:0) equalTo:'hi' label:'recovery hello';
+check.is:(wave.at:1) equalTo:'9' label:'recovery param';
+check.is:(wave.at:2) equalTo:201 label:'recovery echo';
+check.is:(wave.at:3) equalTo:'abbccc' label:'recovery stream';
+check.is:(wave.at:4) equalTo:418 label:'recovery HttpError';
+var diedRows = 0;
+VM.peers.each:{ |p| ((p.at:'status') == 'died').if:{ diedRows = diedRows + 1 } };
+check.is:(diedRows > 0) equalTo:true label:'chaos: roster recorded the deaths';
+app.poolStop;
+cServer.stop;
+cServer.join;
+cServer.close;
+
+"* --- phase 4: GIVE-UP — spend the budget, the 503 must be permanent -------
+"* max:1 = the second death inside the window gives a slot up. Hammer /boom
+"* (bounded) until both slots are spent, then the pool must answer 503 with
+"* the give-up body forever after.
+var gServer = app.start:'127.0.0.1:0' workers:2 backing:'process';
+app.poolSupervise:((Supervise.always.backoff:5 cap:10).max:1 within:60000);
+var gBase = 'http://127.0.0.1:' + gServer.port;
+var permanent = false;
+var attempts = 0;
+{ (permanent == false) && (attempts < 400) }.whileDo:{
+    var r = [HTTP]Client.get:(gBase + '/boom');
+    ((r.status == 503) && ((r.body.text).contains?:'gave up'))
+        .if:{ permanent = true }
+        else:{ Async.sleep:10 };
+    attempts = attempts + 1
+};
+check.is:permanent equalTo:true label:'give-up: pool reached the permanent 503';
+Async.sleep:300;
+var after = [HTTP]Client.get:(gBase + '/hello');
+check.is:(after.status) equalTo:503 label:'give-up: still 503 after settling';
+check.is:((after.body.text).contains?:'gave up') equalTo:true label:'give-up: body says so';
+check.is:(app.pool.aliveCount) equalTo:0 label:'give-up: no live slots remain';
+app.poolStop;
+gServer.stop;
+gServer.join;
+gServer.close;
+
 (check.failures == 0)
-    .if:{ ('OK: ' + rounds + ' rounds passed (incl. 2-worker pool phase)').print }
+    .if:{
+        ('OK: ' + rounds + ' rounds passed (incl. pool, chaos, give-up phases; '
+            + blasts + ' blasts absorbed cleanly)').print
+    }
      else:{ ('FAILED: ' + check.failures + ' checks failed').print }
 }
 
