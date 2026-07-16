@@ -29,6 +29,10 @@
 "* Knobs: QN_SOAK_ROUNDS (default 5) scales phases 1-2, QN_SOAK_CHAOS_ROUNDS
 "* (default 6) scales the kill fire.
 "*
+"* The pool phases (2-4) also periodically hit the debug status endpoints —
+"* /_qn/ps (topology) and /_qn/peers (lifecycle roster) — and pretty-print
+"* the answers to the console: live observability of the fleet under fire.
+"*
 "* DETECTION (Run mode always exits 0, so check the output, not the exit code):
 "*   success -> a final "OK: N rounds passed" line and no failure line;
 "*   failure -> a "SOAK FAILED: ..." line per mismatch, and a final FAILED line.
@@ -54,6 +58,8 @@ var chaosRounds = ([OS]Env.at:'QN_SOAK_CHAOS_ROUNDS' ifAbsent:{ '6' }).to_intege
 
 "* --- the app under test ----------------------------------------------------
 var app = [Web]App.new
+"* debug: switches on the /_qn/ps and /_qn/peers endpoints the status peeks hit.
+app.debug:true
 app.get:'/hello' do:{ 'hi' }
 app.get:'/users/:id' do:{ |req| #{ 'id':(req.param:'id') } }
 app.post:'/echo' do:{ |req| [Web]Response.json:(req.json) status:201 }
@@ -69,6 +75,20 @@ app.get:'/boom' do:{ VM.abort }
 "* above runs in both contexts, everything below only in the main VM (a
 "* worker heads into the serve call's request loop instead).
 var mainFlow = {
+"* Periodic status peek: hit both debug endpoints over real HTTP and
+"* pretty-print the answers — the topology (/_qn/ps) and the lifecycle
+"* roster (/_qn/peers) are served from the transport VM, so they answer
+"* even while workers are being killed (and peeking doubles as load on
+"* those paths). Observability only; nothing here is asserted.
+var statusPeek = { |base label|
+    var ps = ([HTTP]Client.get:(base + '/_qn/ps')).body.json;
+    var peers = ([HTTP]Client.get:(base + '/_qn/peers')).body.json;
+    ('--- status peek (' + label + '): /_qn/ps ---').print;
+    ps.pp.print;
+    ('--- status peek (' + label + '): /_qn/peers ---').print;
+    peers.pp.print
+};
+
 "* Tight limits so the hostile clients trip them quickly.
 var server = [HTTP]Server.new:{
     var address = '127.0.0.1:0';
@@ -199,6 +219,7 @@ var wRound = 1;
     check.is:((wr.at:2).at:1) equalTo:'abbccc' label:'pool stream body';
     check.is:(wr.at:3) equalTo:418 label:'pool HttpError status';
     check.is:(wr.at:4) equalTo:'hi' label:'pool hello';
+    statusPeek.valueWithArgs:#( wBase ('pool round ' + wRound.s) );
     wRound = wRound + 1
 };
 app.poolStop;
@@ -284,6 +305,7 @@ var cRound = 1;
         (v == 'blast').if:{ blasts = blasts + 1 };
         vi = vi + 1
     };
+    statusPeek.valueWithArgs:#( cBase ('chaos round ' + cRound.s) );
     cRound = cRound + 1
 };
 
@@ -335,6 +357,7 @@ var after = [HTTP]Client.get:(gBase + '/hello');
 check.is:(after.status) equalTo:503 label:'give-up: still 503 after settling';
 check.is:((after.body.text).contains?:'gave up') equalTo:true label:'give-up: body says so';
 check.is:(app.pool.aliveCount) equalTo:0 label:'give-up: no live slots remain';
+statusPeek.valueWithArgs:#( gBase 'give-up aftermath' );
 app.poolStop;
 gServer.stop;
 gServer.join;
