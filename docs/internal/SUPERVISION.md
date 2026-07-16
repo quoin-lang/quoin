@@ -333,6 +333,67 @@ record/replay run containing a supervised death + restart.
    manual trigger first (`service.restart` — supervision with a human in the loop),
    which proves the whole mechanism before any policy automates it — and stays as
    the library extension point (§10.1), not scaffolding.
+   **AS BUILT, services half (2026-07-15; extensions are the slice's second
+   commit).** `ServiceRecipe`, frozen at the original host: the `PortableBlock`
+   (captures froze at first ship — rule 2 for free), path/lanes/backing, the
+   spawn args as their classified `WorkerMsg`s re-sent verbatim — channels
+   excepted, retained as VALUES in the traced `vm.recipe_chans` root and
+   re-shipped against the new link (e2e: the fresh incarnation posts into the
+   same parent channel) — plus the ready manifest, which IS the rule-9 gate
+   (mismatch refuses to rebind with the full story and leaves the service
+   dead-but-retryable; the orphan worker shuts down when its lanes drop).
+   `serviceRestart` (the `serviceStop` naming family) lives only on the root
+   (the recipe holder), refuses on running/stopped (§2), and on success
+   rebinds the root state in place — fresh claims/convs/handles/stop flag,
+   new chan link, new lifecycle sink — and bumps the shared incarnation cell;
+   every proxy carries its mint stamp, checked BEFORE the state snapshot in
+   dispatch, so the dead incarnation's sub-proxies raise `#staleIncarnation`
+   forever. The rule-5 window is a `RestartGate` in the shared state: top-level
+   sends park pre-snapshot (nested calls skip — their conversation belongs to
+   the corpse and fails fast on its own lanes) and are woken all at once,
+   re-snapshotting into the new incarnation or the typed death. Deterministic
+   e2e for the window: the restart task sets the gate synchronously before its
+   first park, so a send after `sleep:1` provably lands inside it.
+   Bookkeeping per incarnation: fresh `PeerClaims` (label suffixed
+   "(incarnation N)"), a fresh `LifeSink` (`VM.peers` rows carry
+   `incarnation`; `serviceEvents` re-asked after a restart answers the new
+   stream — the old one closed at its terminal, by slice-1 law); boundary
+   rows deliberately MERGED across incarnations (§6's merged-row option).
+   One slice-1 revision forced by construction: `note_service_dead` now also
+   emits the death on the sink — the caller is about to CATCH the typed death,
+   so `serviceRestart`/`VM.peers` must already agree it happened; the mailbox
+   reader's own emission can lag on its thread, and first-terminal-wins
+   collapses the double observation. Residues: thread-backed respawn shares
+   every line but the spawn call, yet has no e2e (a thread service only dies
+   by panic, which nothing can script); restart under record/replay sits
+   behind the same external-timing boundary as deaths; the formal permanent
+   `gaveUp` state waits for slice 3's attempt-counting.
+   **AS BUILT, extensions half (2026-07-15).** `ExtRecipe` freezes the spawn
+   inputs (command/args/cwd) plus the FIRST manifest — the rule-9 gate:
+   `Extension.restart` re-runs `spawn_ext_process` (the spawn/connect/
+   handshake front half, factored out of the original spawn) and refuses to
+   rebind — abandoning the fresh child — unless the new manifest matches,
+   class for class, lane for lane. On success the handle rebinds IN PLACE
+   (fresh sockets/claims/sink/ext id, old lane fds reaped, old socket file
+   removed, the dead incarnation's host-value handles released — the idle
+   death path never had a failing call to do it) and the same installed
+   classes keep working. Staleness rides the reap-queue identity — a restart
+   swaps `resource_reap`, so an old instance's `Rc` no longer matches: the
+   class-dispatch receiver path raises `#staleIncarnation` naming the
+   incarnation, and the generic `args:` path refuses through the existing
+   ownership check (message widened to name the dead-incarnation
+   possibility — a typed error there is residue). Hardening forced by
+   construction: a lane transport failure UNDER a call is now typed as the
+   death directly in `finish_outcome` (kill_now + `PeerDiedError`), because
+   the socket EOF races `try_wait` — the child can close its socket
+   milliseconds before its exit is reap-visible, and slice 0's typed
+   conversion silently lost that race (user/callback errors never travel
+   that path, so `Io` there can only be the lane). Residues: extension
+   restart-window sends fail fast typed rather than park (the service gate
+   has no extension twin yet — slice 3 material if the policy wants it);
+   `loadPackage:` extensions restart via the handle only (`init.qn` is NOT
+   re-run — glue is installed classes, state is the process's, and
+   availability-not-state says fresh).
 3. **Policy:** the `Supervise` value + `supervise:` options + `quoin.toml`
    `[extension]` keys + backoff/intensity/give-up automation over slices 1+2.
 4. *(adjacency, not this arc unless pulled)*: `WorkerPool` crash-respawn

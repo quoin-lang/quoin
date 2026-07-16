@@ -282,7 +282,9 @@ Error <- TimeoutError <- { |@ms|
 "* does on purpose). See docs/internal/SUPERVISION.md.
 Error <- PeerDiedError <- { |@reason @peer|
     "* The death cause as a symbol: #exited (the process ended or its
-    "* connection closed) or #panicked (a thread worker's body panicked).
+    "* connection closed), #panicked (a thread worker's body panicked), or
+    "* #staleIncarnation (the receiver belonged to an incarnation that died
+    "* and was replaced by `serviceRestart` — only the root proxy rebinds).
     "*
     "* ```
     "* var w = Worker.start:{ Async.sleep:60000 } backing:'process';

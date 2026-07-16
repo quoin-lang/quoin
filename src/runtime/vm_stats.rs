@@ -743,6 +743,13 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                 };
                 let m = vec![
                     ("peer".to_string(), vm.new_string(mc, sink.label.clone())),
+                    (
+                        "incarnation".to_string(),
+                        vm.new_int(
+                            mc,
+                            sink.incarnation.load(std::sync::atomic::Ordering::Relaxed) as i64,
+                        ),
+                    ),
                     ("kind".to_string(), vm.new_string(mc, sink.kind.to_string())),
                     (
                         "backing".to_string(),
@@ -782,7 +789,8 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
         })
         .doc(
             "The peer roster (SUPERVISION.md): one Map per spawned peer -- hosted worker, \
-             plain worker, extension -- with 'peer', 'kind', 'backing', 'pid', 'status' \
+             plain worker, extension -- with 'peer', 'incarnation', 'kind', 'backing', \
+             'pid', 'status' \
              ('running' / 'stopped' / 'died'), the death 'reason'/'message' when there is \
              one, and 'eventsDropped' (staged lifecycle events lost to an undrained \
              events channel). Rows outlive their peer: this is also the post-mortem \
