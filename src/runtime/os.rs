@@ -36,7 +36,7 @@ fn list_elems<'gc>(value: Value<'gc>, who: &str) -> Result<Vec<Value<'gc>>, Quoi
 fn as_str<'gc>(value: Value<'gc>, who: &str) -> Result<String, QuoinError> {
     match value {
         Value::Object(obj) => match &obj.borrow().payload {
-            crate::value::ObjectPayload::String(s) => Ok((**s).clone()),
+            crate::value::ObjectPayload::String(s) => Ok(s.to_string()),
             _ => Err(QuoinError::TypeError {
                 expected: "String".to_string(),
                 got: value.type_name().to_string(),
@@ -140,7 +140,7 @@ pub fn build_os_path_class() -> NativeClassBuilder {
                 Some(parent) if parent.as_os_str().is_empty() => vm.new_string(mc, ".".to_string()),
                 Some(parent) => path_string(vm, mc, parent),
                 // No parent: a root, or the empty path. Both are their own dirname.
-                None => vm.new_string(mc, (*p).clone()),
+                None => vm.new_string(mc, p.to_string()),
             })
         })
         .returns("String")

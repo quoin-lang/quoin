@@ -4,7 +4,7 @@ use crate::value::{NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 use crate::vm::{StdStream, VmState};
 use crate::{ansi_colorizer, arg};
 
-use gc_arena::{Gc, Mutation};
+use gc_arena::Mutation;
 use std::ffi::OsString;
 use std::fs::{File, Metadata, ReadDir, metadata, read_dir};
 use std::io::{Stderr, Stdin, Stdout, stderr, stdin, stdout};
@@ -136,7 +136,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
 fn new_native_io_folder<'a>(
     vm: &mut VmState<'a>,
     mc: &Mutation<'a>,
-    path: Gc<'a, String>,
+    path: crate::value::Str<'a>,
 ) -> Result<Value<'a>, QuoinError> {
     let state = OpaqueState(NativeIoFolder {
         path: OsString::from(path.as_str()),

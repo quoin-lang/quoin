@@ -43,7 +43,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                 let s = recv!(receiver, String);
                 let to = arg!(args, String, 1);
                 let result = args[0].with_native_state::<NativeRegexState, _, _>(|r| {
-                    r.regex.replace_all(&s, &**to).to_string()
+                    r.regex.replace_all(&s, to.as_str()).to_string()
                 })?;
                 Ok(vm.new_string(mc, result))
             },
@@ -64,7 +64,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                 let s = recv!(receiver, String);
                 let from = arg!(args, String, 0);
                 let to = arg!(args, String, 1);
-                Ok(vm.new_string(mc, s.replace(&**from, &to)))
+                Ok(vm.new_string(mc, s.replace(from.as_str(), &to)))
             },
         )
         .instance_method("==:", |vm, mc, receiver, args| {
@@ -83,13 +83,11 @@ pub fn build_string_class() -> NativeClassBuilder {
         .typed_instance_method("+:", &["String"], |vm, mc, receiver, args| {
             let a = recv!(receiver, String);
             let b = arg!(args, String, 0);
-            // Sized concat, NOT `format!`: this is the hottest string op and
-            // the fmt machinery (Formatter, pad, Write plumbing) was ~20% of
-            // the strings bench's whole profile.
-            let mut out = String::with_capacity(a.len() + b.len());
-            out.push_str(&a);
-            out.push_str(&b);
-            Ok(vm.new_string(mc, out))
+            // Assembled straight into the payload (inline when short, one
+            // sized buffer when long) — NOT `format!`: this is the hottest
+            // string op and the fmt machinery (Formatter, pad, Write
+            // plumbing) was ~20% of the strings bench's whole profile.
+            Ok(vm.new_string_concat(mc, &a, &b))
         })
         .doc(
             "Concatenation (`a + b`). A String argument is appended directly; any other \
@@ -107,15 +105,10 @@ pub fn build_string_class() -> NativeClassBuilder {
             let a = recv!(receiver, String);
             let out = match b_val {
                 Value::Object(o) => match &o.borrow().payload {
-                    ObjectPayload::String(st) => {
-                        let mut out = String::with_capacity(a.len() + st.len());
-                        out.push_str(&a);
-                        out.push_str(st);
-                        out
-                    }
-                    _ => format!("{}{}", *a, b_val),
+                    ObjectPayload::String(st) => return Ok(vm.new_string_concat(mc, &a, st)),
+                    _ => format!("{}{}", a, b_val),
                 },
-                _ => format!("{}{}", *a, b_val),
+                _ => format!("{}{}", a, b_val),
             };
             Ok(vm.new_string(mc, out))
         })
@@ -185,7 +178,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                                 && let crate::value::ObjectPayload::String(s) =
                                     &kobj.borrow().payload
                             {
-                                Some(((**s).clone(), *v))
+                                Some((s.to_string(), *v))
                             } else {
                                 None
                             }
@@ -428,7 +421,7 @@ pub fn build_string_class() -> NativeClassBuilder {
         .instance_method("contains?:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let sub = arg!(args, String, 0);
-            Ok(vm.new_bool(mc, s.contains(&**sub)))
+            Ok(vm.new_bool(mc, s.contains(sub.as_str())))
         })
         .doc(
             "Whether the String argument occurs anywhere in the receiver.\n\n\
@@ -439,7 +432,7 @@ pub fn build_string_class() -> NativeClassBuilder {
         .instance_method("ends?:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let sub = arg!(args, String, 0);
-            Ok(vm.new_bool(mc, s.ends_with(&**sub)))
+            Ok(vm.new_bool(mc, s.ends_with(sub.as_str())))
         })
         .doc(
             "Whether the receiver ends with the String argument.\n\n\
@@ -450,7 +443,7 @@ pub fn build_string_class() -> NativeClassBuilder {
         .instance_method("starts?:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let sub = arg!(args, String, 0);
-            Ok(vm.new_bool(mc, s.starts_with(&**sub)))
+            Ok(vm.new_bool(mc, s.starts_with(sub.as_str())))
         })
         .doc(
             "Whether the receiver starts with the String argument.\n\n\
@@ -461,7 +454,7 @@ pub fn build_string_class() -> NativeClassBuilder {
         .instance_method("index:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let sub = arg!(args, String, 0);
-            if let Some(byte_idx) = s.find(&**sub) {
+            if let Some(byte_idx) = s.find(sub.as_str()) {
                 // Byte->char conversion: an all-ASCII prefix (the common
                 // case) needs no second decode pass.
                 let prefix = &s.as_bytes()[..byte_idx];
@@ -572,10 +565,10 @@ pub fn build_string_class() -> NativeClassBuilder {
             // `split`'s iterator is not ExactSize, so a bare collect of
             // Values regrows repeatedly; collect the cheap slices first and
             // size the Value Vec exactly.
-            let slices: Vec<&str> = s.split(&**pat).collect();
+            let slices: Vec<&str> = s.split(pat.as_str()).collect();
             let mut parts: Vec<Value> = Vec::with_capacity(slices.len());
             for part in slices {
-                parts.push(vm.new_string(mc, part.to_string()));
+                parts.push(vm.new_string_from_str(mc, part));
             }
             let res = vm.new_list(mc, parts);
             Ok(res)

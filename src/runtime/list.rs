@@ -315,7 +315,7 @@ pub fn build_list_class() -> NativeClassBuilder {
         // "not overridden" — otherwise every element pays the full dispatch
         // the mixin would.
         .typed_instance_method("join:", &["String"], |vm, mc, receiver, args| {
-            let sep: String = (*arg!(args, String, 0)).clone();
+            let sep: String = arg!(args, String, 0).to_string();
             let pristine_s = matches!(
                 vm.lookup_method(mc, args[0], Symbol::intern("s"), &[]),
                 Ok(Some(Callable::Native(_)))

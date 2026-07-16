@@ -238,10 +238,130 @@ pub enum Value<'gc> {
     ClassMeta(Gc<'gc, RefLock<Class<'gc>>>) = 6,
 }
 
+/// Bytes a string payload can hold inline in the Object itself. 14 makes
+/// `Str` exactly 16 bytes (1 enum tag + 1 len + 14) — and rustc niches the
+/// `ObjectPayload` discriminant into `Str`'s spare tag values, so the payload
+/// enum stays 16 bytes and Objects DON'T grow at all (the inline-fields
+/// cancellation effect measured on btrees at cap 22 / payload 24: +1.7-2.2%).
+pub const INLINE_STR_CAP: usize = 14;
+
+/// The String payload representation. A small string lives INLINE in the
+/// Object — ONE GC allocation total, no inner buffer, no pointer chase. A
+/// long string (and every shared literal buffer) stays behind a
+/// `Gc<'gc, String>` exactly as before.
+///
+/// `Str` is `Copy` (24 bytes), which is what preserves the `recv!`/`arg!`
+/// discipline: natives still lift a cheap self-contained handle out of the
+/// `RefLock` borrow — the bytes themselves or a rooted `Gc` pointer — and
+/// `Deref<Target = str>` makes both read as `&str` with no guard held and
+/// no per-access buffer clone.
+#[derive(Clone, Copy)]
+pub enum Str<'gc> {
+    Inline { len: u8, buf: [u8; INLINE_STR_CAP] },
+    Heap(Gc<'gc, String>),
+}
+
+impl<'gc> Str<'gc> {
+    /// Inline the bytes of `s`. Caller guarantees `s.len() <= INLINE_STR_CAP`.
+    #[inline]
+    pub fn inline(s: &str) -> Self {
+        debug_assert!(s.len() <= INLINE_STR_CAP);
+        let mut buf = [0u8; INLINE_STR_CAP];
+        buf[..s.len()].copy_from_slice(s.as_bytes());
+        Str::Inline {
+            len: s.len() as u8,
+            buf,
+        }
+    }
+
+    /// From an owned String: inline if it fits (dropping the buffer), else
+    /// move the String into a fresh Gc node — no byte copy either way.
+    #[inline]
+    pub fn from_string(mc: &Mutation<'gc>, s: String) -> Self {
+        if s.len() <= INLINE_STR_CAP {
+            Str::inline(&s)
+        } else {
+            Str::Heap(Gc::new(mc, s))
+        }
+    }
+
+    /// From a borrowed str: inline when it fits — NO allocation at all —
+    /// else copy into a fresh Gc buffer. The right constructor whenever the
+    /// source is a slice (split pieces, path components), where going
+    /// through an owned `String` first would malloc+copy+free for nothing.
+    #[inline]
+    pub fn new(mc: &Mutation<'gc>, s: &str) -> Self {
+        if s.len() <= INLINE_STR_CAP {
+            Str::inline(s)
+        } else {
+            Str::Heap(Gc::new(mc, s.to_string()))
+        }
+    }
+
+    /// `a` + `b` assembled straight into an inline payload. Caller
+    /// guarantees `a.len() + b.len() <= INLINE_STR_CAP`.
+    #[inline]
+    pub fn inline2(a: &str, b: &str) -> Self {
+        let total = a.len() + b.len();
+        debug_assert!(total <= INLINE_STR_CAP);
+        let mut buf = [0u8; INLINE_STR_CAP];
+        buf[..a.len()].copy_from_slice(a.as_bytes());
+        buf[a.len()..total].copy_from_slice(b.as_bytes());
+        Str::Inline {
+            len: total as u8,
+            buf,
+        }
+    }
+
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        match self {
+            // SAFETY: `buf[..len]` is always a whole `&str` copied in by
+            // `inline` — never a split byte sequence.
+            Str::Inline { len, buf } => unsafe {
+                std::str::from_utf8_unchecked(&buf[..*len as usize])
+            },
+            Str::Heap(g) => g.as_str(),
+        }
+    }
+}
+
+impl<'gc> std::ops::Deref for Str<'gc> {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<'gc> Debug for Str<'gc> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl<'gc> fmt::Display for Str<'gc> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// Hand-written (not derived) so the Inline arm is a traced-nothing leaf.
+unsafe impl<'gc> Collect<'gc> for Str<'gc> {
+    const NEEDS_TRACE: bool = true;
+
+    fn trace<T: Trace<'gc>>(&self, cc: &mut T) {
+        if let Str::Heap(g) = self {
+            g.trace(cc);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Collect, Debug)]
 #[collect(no_drop)]
 pub enum ObjectPayload<'gc> {
-    String(Gc<'gc, String>),
+    String(Str<'gc>),
     /// An interned symbol (`#foo`). The inner string is shared across all
     /// occurrences of the same name, so symbols compare by pointer identity.
     Symbol(Gc<'gc, String>),
@@ -672,7 +792,7 @@ impl<'gc> fmt::Display for Value<'gc> {
 
                 let o_borrow = o.borrow();
                 match &o_borrow.payload {
-                    ObjectPayload::String(s) => write!(f, "{}", **s),
+                    ObjectPayload::String(s) => write!(f, "{}", s),
                     ObjectPayload::Symbol(s) => write!(f, "#{}", **s),
                     ObjectPayload::Bytes(b) => {
                         // Length + a short hex preview; never dump raw bytes to a terminal.

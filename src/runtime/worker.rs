@@ -1697,7 +1697,7 @@ impl<'gc> AsStringArg for Value<'gc> {
     fn as_string(&self) -> Option<String> {
         match self {
             Value::Object(obj) => match &obj.borrow().payload {
-                crate::value::ObjectPayload::String(s) => Some((**s).clone()),
+                crate::value::ObjectPayload::String(s) => Some(s.to_string()),
                 _ => None,
             },
             _ => None,

@@ -413,7 +413,7 @@ impl PrettyPrint for NativeMapState {
                 if let Value::Object(obj) = k
                     && let ObjectPayload::String(s) = &obj.borrow().payload
                 {
-                    ((**s).clone(), true, *v)
+                    (s.to_string(), true, *v)
                 } else {
                     (
                         crate::runtime::pretty::render(*k, usize::MAX, false),

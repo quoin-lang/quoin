@@ -4,6 +4,8 @@
 
 use super::*;
 
+use crate::value::Str;
+
 impl<'gc> VmState<'gc> {
     pub fn new_object(
         &self,
@@ -159,7 +161,9 @@ impl<'gc> VmState<'gc> {
         Value::Double(f)
     }
 
-    pub fn new_string(&self, mc: &Mutation<'gc>, s: String) -> Value<'gc> {
+    /// The one string-object assembler: every string VALUE is an Object whose
+    /// payload is a `Str` (inline bytes or a `Gc<String>` buffer — see `Str`).
+    fn string_object(&self, mc: &Mutation<'gc>, s: Str<'gc>) -> Value<'gc> {
         let class = self.builtin_cache.borrow().string_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "String"));
         Value::Object(gcl!(
@@ -167,24 +171,48 @@ impl<'gc> VmState<'gc> {
             Object {
                 class,
                 fields: Fields::default(),
-                payload: ObjectPayload::String(gc!(mc, s)),
+                payload: ObjectPayload::String(s),
             }
         ))
     }
 
+    pub fn new_string(&self, mc: &Mutation<'gc>, s: String) -> Value<'gc> {
+        self.string_object(mc, Str::from_string(mc, s))
+    }
+
+    /// A fresh SHORT string straight from a `&str`: the bytes go inline in
+    /// the Object payload — one GC alloc, no inner buffer, no `String`.
+    /// Caller guarantees `s.len() <= INLINE_STR_CAP`.
+    pub fn new_string_inline(&self, mc: &Mutation<'gc>, s: &str) -> Value<'gc> {
+        self.string_object(mc, Str::inline(s))
+    }
+
+    /// A fresh string from a borrowed str: inline when short (no allocation
+    /// beyond the Object), heap copy when long. Use this instead of
+    /// `new_string(mc, s.to_string())` wherever the source is a slice.
+    pub fn new_string_from_str(&self, mc: &Mutation<'gc>, s: &str) -> Value<'gc> {
+        self.string_object(mc, Str::new(mc, s))
+    }
+
+    /// Concatenation constructor: `a` + `b` assembled straight into the
+    /// payload — inline with NO allocation when the result fits, else one
+    /// exactly-sized heap buffer (never `format!` — see the `+:` native).
+    pub fn new_string_concat(&self, mc: &Mutation<'gc>, a: &str, b: &str) -> Value<'gc> {
+        if a.len() + b.len() <= crate::value::INLINE_STR_CAP {
+            self.string_object(mc, Str::inline2(a, b))
+        } else {
+            let mut out = String::with_capacity(a.len() + b.len());
+            out.push_str(a);
+            out.push_str(b);
+            self.string_object(mc, Str::Heap(gc!(mc, out)))
+        }
+    }
+
     /// A fresh string VALUE over an already-GC'd shared buffer — the
-    /// literal-materialization fast path (see `string_literal_buffers`).
+    /// long-literal materialization fast path (see `string_literal_buffers`;
+    /// short literals inline instead).
     pub fn new_string_shared(&self, mc: &Mutation<'gc>, buf: Gc<'gc, String>) -> Value<'gc> {
-        let class = self.builtin_cache.borrow().string_class;
-        let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "String"));
-        Value::Object(gcl!(
-            mc,
-            Object {
-                class,
-                fields: Fields::default(),
-                payload: ObjectPayload::String(buf),
-            }
-        ))
+        self.string_object(mc, Str::Heap(buf))
     }
 
     /// The shared buffer for literal content `s`, minting it on first use.

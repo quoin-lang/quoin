@@ -41,7 +41,7 @@ pub fn build_object_class() -> NativeClassBuilder {
         .instance_method("perform:args:", |vm, mc, receiver, args| {
             let sel = match args[0] {
                 Value::Object(obj) => match &obj.borrow().payload {
-                    crate::value::ObjectPayload::String(s) => (**s).clone(),
+                    crate::value::ObjectPayload::String(s) => s.to_string(),
                     _ => {
                         return Err(QuoinError::Other(
                             "perform:args: expects a String selector".into(),
@@ -195,7 +195,8 @@ pub fn build_object_class() -> NativeClassBuilder {
             } else {
                 let name = match cap {
                     Value::Object(obj) => match &obj.borrow().payload {
-                        ObjectPayload::Symbol(s) | ObjectPayload::String(s) => Some((**s).clone()),
+                        ObjectPayload::Symbol(s) => Some((**s).clone()),
+                        ObjectPayload::String(s) => Some(s.to_string()),
                         _ => None,
                     },
                     _ => None,
@@ -256,7 +257,8 @@ pub fn build_object_class() -> NativeClassBuilder {
         .instance_method("docFor:", |vm, mc, receiver, args| {
             let name = match args[0] {
                 Value::Object(obj) => match &obj.borrow().payload {
-                    ObjectPayload::Symbol(s) | ObjectPayload::String(s) => Some((**s).clone()),
+                    ObjectPayload::Symbol(s) => Some((**s).clone()),
+                    ObjectPayload::String(s) => Some(s.to_string()),
                     _ => None,
                 },
                 _ => None,

@@ -337,7 +337,7 @@ fn object_doc<'gc>(
     let payload = {
         let b = o.borrow();
         match &b.payload {
-            ObjectPayload::String(s) => Payload::Str((**s).clone()),
+            ObjectPayload::String(s) => Payload::Str(s.to_string()),
             ObjectPayload::Symbol(s) => Payload::Sym((**s).clone()),
             ObjectPayload::Bytes(by) => {
                 Payload::Bytes(by.iter().take(16).copied().collect(), by.len())

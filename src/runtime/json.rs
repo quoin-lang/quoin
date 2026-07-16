@@ -65,7 +65,7 @@ fn value_to_json_at<'gc>(
             let blocked: Option<String> = {
                 let borrowed = obj.borrow();
                 match &borrowed.payload {
-                    ObjectPayload::String(s) => return Ok(Json::String((**s).clone())),
+                    ObjectPayload::String(s) => return Ok(Json::String(s.to_string())),
                     ObjectPayload::Bytes(_) => Some("Bytes".to_string()),
                     ObjectPayload::Symbol(_) => Some("Symbol".to_string()),
                     ObjectPayload::Block(_) => Some("Block".to_string()),
@@ -106,7 +106,7 @@ fn value_to_json_at<'gc>(
                             "JSON: Map keys must be Strings".to_string(),
                         ));
                     };
-                    obj_map.insert((**ks).clone(), value_to_json_at(vm, mc, val, depth + 1)?);
+                    obj_map.insert(ks.to_string(), value_to_json_at(vm, mc, val, depth + 1)?);
                 }
                 return Ok(Json::Object(obj_map));
             }
