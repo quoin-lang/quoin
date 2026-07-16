@@ -316,11 +316,16 @@ impl<'gc> Str<'gc> {
     #[inline]
     pub fn as_str(&self) -> &str {
         match self {
-            // SAFETY: `buf[..len]` is always a whole `&str` copied in by
-            // `inline` — never a split byte sequence.
-            Str::Inline { len, buf } => unsafe {
-                std::str::from_utf8_unchecked(&buf[..*len as usize])
-            },
+            Str::Inline { len, buf } => {
+                // The `.min` is a no-op (constructors guarantee
+                // `len <= INLINE_STR_CAP`) but lets LLVM prove the slice
+                // in-bounds — without it every access pays a bounds-check
+                // branch, which map lookups feel (~4 `as_str` per probe).
+                let len = (*len as usize).min(INLINE_STR_CAP);
+                // SAFETY: `buf[..len]` is always a whole `&str` copied in by
+                // `inline` — never a split byte sequence.
+                unsafe { std::str::from_utf8_unchecked(&buf[..len]) }
+            }
             Str::Heap(g) => g.as_str(),
         }
     }
