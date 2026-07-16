@@ -377,6 +377,9 @@ minimizes how often hot paths cross it.
 6. **The collector revisit.** Deferred exactly as FUTURE_ARCH says: only
    when native execution makes allocation dominate. v1's spill rule is
    designed so the collector question stays orthogonal.
+
+   > **Tracked as #73** — Collector revisit: generational GC gated on native execution.
+
 7. **VM statistics surface (wanted eventually, wider than AOT).** Expose
    the engine's own behavior as *fast* always-on counters — plain `u64`s
    bumped on the relevant paths, near-zero cost, no sampling: GC
@@ -394,6 +397,9 @@ minimizes how often hot paths cross it.
    collect the counters per run.
    AOT landed its counters early rather than retrofitting;
    the full surface is its own small design pass.
+
+   > **Tracked as #70** — Extend VM.stats with GC, dispatch, and compile-time counter sections.
+
 8. **Block templates.** Blocks passed to combinators are never candidates:
    `value:` enforces nothing, so their typed params are beliefs, not the
    dispatch-backed guarantees `AotParam` builds on. Two future mechanisms,

@@ -111,6 +111,8 @@ Interleaved A/B vs main (7 runs): **fib_untyped −17.4%, strings
 arithmetic to unbox) pay entry/outcall overhead without a win; a
 promotion-profitability heuristic is the known refinement.
 
+> **Tracked as #67** — AOT tuning refinements: promotion-profitability heuristic + fuel coarsening.
+
 Promotion swept every unannotated qnlib method into compilation and
 found SIX latent seam bugs, each now pinned in `40-aot-parity.qn`
 (AotParitySpeculation + AotParitySpecSeams):
@@ -268,6 +270,8 @@ Three lessons the A/B taught, the hard way (first measure: sieve
   (alloc/GC first) stands. Artifacts: `profiling/cold-arm-nlr/`.
 
 ### S4 (deferred) — interpreter quickening
+
+> **Tracked as #75** — Interpreter quickening: patch hot generic Sends from IC feedback (S4).
 
 Patching hot generic Sends into the existing typed instructions from IC
 feedback would help `QN_AOT=0` and cold code, but bytecode is shared

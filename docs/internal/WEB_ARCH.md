@@ -383,12 +383,25 @@ globals-borrowing fallbacks.
   (rustls `ServerConfig`, cert/key loading) mirroring the client's `TlsWrap`; a
   test-only acceptor already exists in `io_backend.rs` tests. Until then: terminate
   TLS in a fronting proxy.
+
+  > **Tracked as #87** — Add server-side TLS (TlsAccept + TlsAcceptor).
+
 - **WebSockets** — `Upgrade` handshake is easy (`Base64` + SHA-1 — SHA-1 would need
   a native or pure-Quoin digest); frame codec over `ByteStream`.
+
+  > **Tracked as #89** — Add WebSocket support (client and server).
+
 - **Response compression** — `encodeGz` already exists; negotiate via
   `Accept-Encoding`, skip for small/streamed bodies.
+
+  > **Tracked as #84** — Add response compression via Accept-Encoding negotiation.
+
 - **Cookies/sessions, multipart, static files, HTTP/2** — post-v1, in roughly that
   order.
+
+  > **Tracked as #79** — Add cookies and sessions to the web framework.
+  > **Tracked as #83** — Add multipart/form-data request parsing.
+  > **Tracked as #88** — Add static file serving.
 
 ## Workers: multi-core serving (docs/internal/CONCURRENCY_ARCH.md §13)
 
@@ -433,6 +446,9 @@ For anything beyond a trailing serve call, guard main-only code:
   backpressure is credit-less v1: chunk frames buffer in the per-request
   channel (64) and then in the lane; a credit scheme is the recorded
   follow-up.
+
+  > **Tracked as #80** — Add credit-based backpressure for streamed bodies through worker lanes.
+
 - Requests within one worker overlap: each runs as its own Task, so
   I/O-bound handlers (backend calls, `Plan` fan-outs) interleave exactly
   as connection tasks do in single-VM mode.

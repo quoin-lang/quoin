@@ -172,6 +172,8 @@ root — see the 2026-07-13 status note. Registry/fetch remain deferred.)
 
 **Deferred for v1**, captured here as a placeholder for the eventual design.
 
+> **Tracked as #102** — Design a folder-based package documentation format.
+
 A `README.md` in the package covers human docs for now. The intended direction is a real **documentation
 format that lives in a folder inside the package** (e.g. `doc/`), **not** embedded in the manifest —
 the manifest stays a thin launch/identity descriptor. A structured doc format (and how it surfaces —
@@ -183,17 +185,32 @@ up separately.
 
 - **Distribution:** a registry, fetch/download, version resolution, lockfiles. (`docs/internal/USE_ARCH.md`
   notes these slot in behind the resolver later, no syntax change.)
+
+  > **Tracked as #98** — Add distribution — package registry, fetch, versions, lockfiles.
+
 - **Per-platform prebuilt binaries** in the launch spec — only meaningful once packages are
   distributed, not hand-placed.
+
+  > **Tracked as #104** — Support per-platform prebuilt binaries in the launch spec.
+
 - **Publishing the SDK crates** (`quoin-ext` + `quoin-ext-proto`) to crates.io, so a third-party
   author writes `quoin-ext = "0.1"` rather than git-depending this repo — the prerequisite for
   building extensions out-of-tree (§13; Tier 0.5 in `docs/internal/FUTURE_EXT_ARCH.md` §9).
 - **Version / protocol-compat enforcement** — the manifest may carry a version; the host doesn't gate
   on it yet.
+
+  > **Tracked as #96** — Enforce package version / protocol-compat at load.
+
 - **Auto-respawn / circuit breaker** for a crashed package extension (§7) — SHIPPED, see above.
 - **Signatures / supply-chain trust** (§10) — the scheme depends on how distribution works.
+
+  > **Tracked as #100** — Add signatures / supply-chain trust for packages.
+
 - **`qn pkg` tooling** — `new` (scaffold), `build` (package the binary, emit glue), `install`, `list`,
   `info`. The manifest is kept rich enough that these are trivial later.
+
+  > **Tracked as #95** — Add remaining qn pkg verbs — new, build, info, uninstall.
+
 - **Shipped `init.qn` instead of synthesized glue (the followup).** A real, tool-generated `init.qn`
   as the `use` entry is more inspectable and the long-term preference, but it hits the **"where am I
   on disk?"** problem: a loaded unit runs as bare source with no `__file__`/`__dir__`, so relative
@@ -202,6 +219,9 @@ up separately.
   resolver to surface a unit's directory) or an implicit "currently-loading package" the loader tracks
   (it already keeps an in-progress load stack for cycle detection). There are further subtle
   complexities here to work through before adopting it.
+
+  > **Tracked as #97** — Replace synthesized glue with a shipped init.qn (+ __dir__ binding).
+
 - **`use` aliasing** — not supported in the language (skipped); consumers use `Vec <- [Vectors]Vector`.
 
 ## 10. Trust

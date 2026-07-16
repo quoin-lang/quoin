@@ -332,6 +332,9 @@ JetBrains/nvim-dap integration rides on the existing language server + VSCode pl
   (`active_exception`, or `quoinerror_to_value` for a structured error); stash it on `DebugState`
   for the duration of the throw pause (alongside `at_throw`, cleared on resume) and resolve
   `$ex`/`ex` in `print_expr` / the eval-in-frame path (as a binding, like the frame's locals).
+
+> **Tracked as #121** — Colorize debugger output and expose $ex at break-on-throw pauses.
+
 - ✅ **Break on *uncaught* exception** — `qn debug --break-on-uncaught=Type[,…]` pauses only when a
   matching exception will escape uncaught. Implemented with a `VmState.handler_stack` — each active
   `catch:`'s *declared* handler types, pushed/popped by the catch natives — that `debug_check_throw`
@@ -349,8 +352,14 @@ JetBrains/nvim-dap integration rides on the existing language server + VSCode pl
   guards don't.
 - **Per-task / per-fiber debugging** — v1 pauses the world; debugging one task while others run
   is a later model (needs a per-task stop and a "threads" view).
+
+> **Tracked as #119** — Add per-task / per-fiber debugging to the debugger.
+
 - **Data breakpoints / watchpoints** (break when a variable changes) — needs write interception,
   not just PC checks.
 - **Conditional & hit-count breakpoints** — fall out of `eval:bindings:` once it lands.
+
+> **Tracked as #120** — Add watchpoints and conditional/hit-count breakpoints.
+
 - **Time-travel / reverse debugging** — out of scope.
 - **`Break`-opcode COW** — only if the side-table hook ever shows up in a profile.

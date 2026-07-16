@@ -179,6 +179,9 @@ user code on the death path.
    documented non-goal for now). For a crash-looping package extension this *is* the
    circuit breaker `EXT_PACKAGING.md` deferred: spawn storms are bounded by backoff,
    ended by give-up.
+
+   > **Tracked as #39** — Consider half-open circuit retry after supervision give-up.
+
 8. **Mailbox/claims across restart:** the claims registry rows persist (post-mortem
    property, unchanged); the new incarnation starts with empty mailboxes and a fresh
    lane pool. The waiter cascade needs no new machinery — rule 4 is exactly today's
@@ -229,6 +232,9 @@ user code on the death path.
   one-terminal-per-sink law; the roster carries the state meanwhile (`VM.peers`
   status `gaveUp`, incarnation numbers). The supervisor parks on a dedicated
   per-sink watcher lane, so the user's events channel stays single-consumer.*
+
+  > **Tracked as #24** — Add restarting and gaveUp supervision lifecycle event kinds.
+
 - **`VM.peers`** (renamed from the draft's `VM.services` in review — Damon,
   2026-07-15: "services" was stale vocabulary once WorkerService was removed, and
   the roster covers plain workers and extensions too; "peers" matches
@@ -248,6 +254,8 @@ data — so given the log, restart decisions replay deterministically. What does
 replay is what never replayed: real spawn timing, pids, socket accept order — the
 documented arc-4 injection boundary. The divergence test must cover a
 record/replay run containing a supervised death + restart.
+
+> **Tracked as #26** — Cover supervised death and restart under deterministic replay.
 
 ## 8. Slicing (proposed)
 
@@ -278,6 +286,9 @@ record/replay run containing a supervised death + restart.
    mid-call" `CallReturnError` — an ordinary error terminal the parent cannot
    distinguish from user code, so that race stays untyped until a slice-1
    death event can reclassify it.
+
+   > **Tracked as #31** — Type the graceful mid-call peer death terminal.
+
 1. **Death events:** reactor child-exit watch for process children (kqueue/pidfd),
    thread done-lane unification, lifecycle event records + per-service `events`
    channel, `VM.peers`, replay divergence coverage.
@@ -347,6 +358,9 @@ record/replay run containing a supervised death + restart.
    path the arc added. Fix shape when it matters: cap or compact terminal
    rows per peer (e.g. keep the first death, the last N incarnations, and a
    summarized count), never the current incarnation's row.*
+
+   > **Tracked as #25** — Bound supervision roster growth under restart churn.
+
 2. **Respawn mechanics:** retained recipes (worker block+args are already held;
    extensions retain their spawn recipe), rebind-in-place with incarnation stamps,
    park-during-restart, give-up state, manifest-equality gate. Surface: `restart`
@@ -388,6 +402,9 @@ record/replay run containing a supervised death + restart.
    by panic, which nothing can script); restart under record/replay sits
    behind the same external-timing boundary as deaths; the formal permanent
    `gaveUp` state waits for slice 3's attempt-counting.
+
+   > **Tracked as #23** — Add end-to-end coverage for thread-backed service respawn.
+
    **AS BUILT, extensions half (2026-07-15).** `ExtRecipe` freezes the spawn
    inputs (command/args/cwd) plus the FIRST manifest — the rule-9 gate:
    `Extension.restart` re-runs `spawn_ext_process` (the spawn/connect/
@@ -413,7 +430,11 @@ record/replay run containing a supervised death + restart.
    has no extension twin yet — slice 3 material if the policy wants it);
    `loadPackage:` extensions restart via the handle only (`init.qn` is NOT
    re-run — glue is installed classes, state is the process's, and
-   availability-not-state says fresh). *Post-arc resolution (2026-07-16):
+   availability-not-state says fresh).
+
+   > **Tracked as #28** — Park and type extension restart-window sends.
+
+   *Post-arc resolution (2026-07-16):
    init.qn stays once-per-VM BY DESIGN — it is define-once glue (numpy's
    defines three classes; re-eval would throw `Cannot redefine class`), and
    the design review concluded the ambient-state logic doesn't belong in the
@@ -476,7 +497,11 @@ record/replay run containing a supervised death + restart.
    on the reader thread close the gate when the supervisor wakes (a
    microsecond-scale gap); extension restart-window sends keep the slice-2
    fail-fast residue. Manual `serviceRestart`/`e.restart` refuse on a
-   supervised peer — the policy owns the budget. Deviation from the draft,
+   supervised peer — the policy owns the budget.
+
+   > **Tracked as #30** — Support detaching a supervision policy after attach.
+
+   Deviation from the draft,
    decided in construction: no `supervise:` spawn keyword (§3's matrix
    rationale); `#spawnFailed` remains unminted (attempt failures feed the
    counter and the give-up message; nothing user-catchable carries it).
@@ -544,6 +569,9 @@ never resurrects sub-proxies, handles, or channels.
    `quoin.toml` policy at `use` time (no call site exists)? Project-level
    `quoin.toml` override table? **DECIDED (Damon, 2026-07-15): defer;
    package-declared only in v1.**
+
+   > **Tracked as #27** — Let consumers override package extension supervision policy.
+
 6. **Thread workers in v1?** The mechanism is shared (recipe re-run; detection is
    the done-lane) and threads are the *easier* backing.
    **DECIDED (Damon, 2026-07-15): yes, both backings from slice 2.**

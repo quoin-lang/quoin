@@ -9,6 +9,8 @@ measured net-negative, so it is **off unless `QN_DIRECT_WARM` is set** (see also
 `src/codegen/mod.rs` (`lane_plan`, `BakedW0`) with `tests/direct_calls.rs`. Successor arc:
 `docs/internal/WINDOW_ARENA_ARCH.md`. Written 2026-07-06 at `2197545` as a plan; read it as one.*
 
+> **Tracked as #76** — Make compiled→compiled direct calls pay (default-off tier + window arena W1).
+
 ## 1. Problem statement, with numbers
 
 After D2 (the per-site AOT IC), a warm compiled→compiled call still

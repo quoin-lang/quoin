@@ -266,6 +266,8 @@ format-agnostic transport.** It's the small stable contract — not the whole Ar
 not Arrow Flight as the transport — that buys zero-copy columnar interop for free. Offer it as
 a payload codec where array/tabular data flows.
 
+> **Tracked as #101** — Adopt Arrow C Data Interface for columnar extension payloads.
+
 ### "Zero-copy" means "no serialize/deserialize step", not "into a Value"
 
 The Cap'n Proto / FlatBuffers / Arrow / rkyv sense: the in-memory layout *is* the wire
@@ -283,6 +285,9 @@ layout, so "access a field" replaces "parse a message". Precisions that bound th
   socket (`SCM_RIGHTS` + `mmap`) without touching the control protocol. Not in the baseline —
   profiling already showed shared memory buys nothing for messaging (§3), and the in-place bulk
   case is itself unmeasured.
+
+  > **Tracked as #99** — Add SCM_RIGHTS fd-passing for in-place bulk buffer sharing.
+
 - rkyv is **out** — Rust-only, defeats polyglot.
 
 ---
@@ -348,6 +353,9 @@ thrash. If an extension needs frequent re-entry, it belongs in-process (the stat
   Polyglot, trusted, crash-isolated, native-speed. The flagship third-party story.
 - **Deferred — WASM** for untrusted drop-in plugins, only if that need ever materializes.
   Separate product; not a competitor to the above.
+
+  > **Tracked as #103** — Explore a WASM tier for untrusted drop-in plugins.
+
 
 ### Core vs. extension boundary
 

@@ -112,6 +112,8 @@ Tests: `qnlib/tests/68-civil-time.qn` (clamping, leap years, wrap-around, fieldw
 the DST-gap resolution). Deferred from this phase: strftime-style formatting, week-of-year /
 quarter accessors, `Date` range iteration (`d1..d2`) — recorded in QUOIN_TODO.
 
+> **Tracked as #114** — Round out stdlib Time: formatting, accessors, ranges, scaling. (Also covers the `Duration#iso8601` and `Duration *:` Double-scalar notes under Decisions below.)
+
 ---
 
 ## Decisions

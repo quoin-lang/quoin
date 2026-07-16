@@ -267,6 +267,8 @@ Compile block literals as registry entries under their existing
    path independent of this arc (a B0-adjacent interpreter win; measure
    after B0).
 
+   > **Tracked as #71** — Give valueWithSelfOrArg: the value: flat-loop fast path (interpreter).
+
 ## 7. 2026-07-10: the speculation follow-on (recorded here, designed in SPECULATIVE_AOT_ARCH §7)
 
 Two of this arc's seams moved again on `perf/block-scalar-spec`: block

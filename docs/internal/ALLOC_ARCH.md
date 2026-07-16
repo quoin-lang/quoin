@@ -97,6 +97,8 @@ Acceptance: strings ≥1.5× (0.195s → ≤0.13s whole-process, interleaved
    `Gc<RefLock<Box<dyn>>>` triple hop for builtins if the Collect
    plumbing allows.
 
+> **Tracked as #77** — Single-allocation String payload and collection triple-hop collapse.
+
 Acceptance: btrees ≥1.15×; strings/maps/json further improvement;
 nothing regresses beyond noise.
 
@@ -118,6 +120,9 @@ REMAINING A3 levers, both own-design arcs:
   unlock shared by makeTree, qnlib's `whileDo:`/`any?:`, and S5c
   template-`^^`. Until then, recursive/per-iteration materialization
   correctly refuses.
+
+  > **Tracked as #68** — Cheap cold-arm/trampoline materialization for whileDo:/any?: shapes.
+
 - **Escape-analysis stack environments** (PERF_ROADMAP Tier 3a):
   attacks the per-call EnvFrame + the interpreted-dispatch share
   directly.

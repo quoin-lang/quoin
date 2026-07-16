@@ -194,6 +194,9 @@ AST/parser change was needed.
   registration + run-once loads each file exactly once.
 
 ## Open / deferred
+
+> **Tracked as #108** — Extend use: recursive ** glob, loadedUnits, precompiled units.
+
 - Recursive glob `**`.
 - Real package management for `<name>:` (manifest, fetch, versions, lockfiles) — slots in *behind*
   resolution without touching syntax.

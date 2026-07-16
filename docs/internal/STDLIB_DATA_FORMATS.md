@@ -118,6 +118,9 @@ helper methods; Phase 1 (base64/hex + JSON) first.
 
 **My call unless you object (small):**
 - base64 uses the **standard** alphabet + padding for v1 (a `Base64Url` variant can come later).
+
+  > **Tracked as #111** — Add a Base64Url codec variant.
+
 - `hex` is lower-case on encode, case-insensitive on decode.
 - `generate` of a value containing a non-serializable type (a `Block`, `DateTime`, socket, …) →
   a clear `TypeError` naming the offending type.

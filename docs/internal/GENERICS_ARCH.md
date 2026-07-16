@@ -155,6 +155,8 @@ parse and exist in the checker's lattice, but are not runtime-enforceable
 in v1** — the resolver warns and the runtime tag degrades to the base
 (`List`); no false guarantee is ever recorded (§8, "guarantee honesty").
 
+> **Tracked as #51** — Enforce nested generic element tags at runtime.
+
 `Map(K V)`: the settled syntax takes two parameters. v1 pinned keys to
 String (the store was `IndexMap<String, _>` then) and rejected any other
 key type at resolve time; the any-value-key rebuild (the hash-ladder map
@@ -167,6 +169,8 @@ keys, `keys` answers `List(K)`, and nothing is ever tag-enforced. Runtime
 key tags (and a key-side `Map.of:` surface) remain a separately-motivated
 later pass. `Set(T)` works like `List(T)` (its `==:`-based membership
 walk is untouched).
+
+> **Tracked as #46** — Add runtime Map key tags and a key-side Map.of:.
 
 ## 4. Syntax and construction
 
@@ -250,6 +254,8 @@ grammar. The selector forms above cover construction without inventing
 parameterized class values. (Revisit only if generic *classes* — not just
 collections — ever land.)
 
+> **Tracked as #66** — Support expression-position reified type values (Class(args)).
+
 ### 4.3 What stays untagged
 
 Every native decoder that builds collections directly — `JSON.parse:`,
@@ -300,6 +306,8 @@ rather than an Iterate special case:
   on the tagged native collections the class parameter is runtime-backed
   (the value's tag); on user classes it is checker-only until user-level
   tags exist. Same feature, two documented strengths.
+
+  > **Tracked as #62** — Add user-level runtime tags for generic user classes.
 - **Dispatch**: a variable-typed parameter scores as unconstrained
   (`Object`) in multimethod selection. Variables never dispatch; only
   concrete annotations (`List(Integer)`) are tag-exact.
@@ -329,6 +337,8 @@ protocol — which stays a *value* method, used by the value types too):
   tag-dispatched param, a checked return), the one general bridge is
   `ensure:`. A fused single-pass form of `.collect:{}.ensure:X` is a
   possible later optimization, not new surface syntax.
+
+  > **Tracked as #56** — Fuse collect: and ensure: into a single tagged pass.
 
 ## 5. Dispatch
 
@@ -497,6 +507,8 @@ positives" tripwire as always.
    native): tag-to-tag fast path — an optimization, not a semantic.
 6. **Method-level variable declarations**: deferred refinement if
    class-header declaration ever feels cluttered.
+
+   > **Tracked as #63** — Allow method-level type-variable declarations.
 7. **Expression-position type values** (v2, with nested enforcement):
    verify `ident(…)` is grammatically free in expression position; if
    so, reified type values are the path — see §4.2's alignment note.
@@ -634,6 +646,8 @@ untyped (its elements are Integers OR Doubles — a concrete tag would
 be a false belief). Corpus-zero-warnings remains the gate.
 
 ## 12. Future arc: runtime block enforcement (recorded, not scheduled)
+
+> **Tracked as #64** — Enforce block arg types at value: (runtime block enforcement).
 
 Would checking block args at `value:` unlock anything? Analyzed
 2026-07; the answer shapes when — and whether — to build it.

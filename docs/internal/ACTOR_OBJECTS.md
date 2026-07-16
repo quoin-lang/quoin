@@ -146,19 +146,29 @@ As built:
    replaces the sidecar for that backing).
 2. **Blocks nested inside data-structure arguments** still refuse (the wire walkers
    own that taxonomy — same rule as plain lane messages).
+
+   > **Tracked as #38** — Close remaining portable-block-argument transport gaps.
+
 3. **Block RETURNS** from hosted methods currently fall into the non-portable-object
    path and come back as sub-proxies (semantics untested — `value:` on such a proxy
    dispatches remotely); the symmetric ship-back needs a reply-side sidecar.
+
+   > **Tracked as #42** — Ship portable block returns from hosted methods by value.
+
 4. **`Worker.host:{...}` block form** still waits — remote evaluation, not just
    transport.
 5. **Sends to arbitrary parent OBJECTS** (the `CallMethodOnHandle` analogue) — the
    frame shape already supports it (`Call` on a handle); minting object handles and
    deciding their lifetime does not exist yet.
 
+   > **Tracked as #34** — Add object handles for sends to arbitrary parent objects.
+
 **b. Structured stacks.** Quoin-to-Quoin errors need not be opaque: the `remote_stack`
 blob carries the worker's real rendered trace initially (day one, free via PR #11's
 field), with a structured-trace upgrade (frames as data, uniformly steppable) as a
 later, purely additive field.
+
+> **Tracked as #35** — Add structured, steppable Quoin-to-Quoin stack frames.
 
 **c. Cross-isolate channels.** See §6.
 
@@ -474,6 +484,8 @@ hangs undetected (each VM's driver sees a live relay future; channel waits are
 not claims) — park labels ("relay channel send/receive") make the shape visible
 in `VM.ps`; real cross-VM wait-graph stitching is arc-4 adjacency.
 
+> **Tracked as #41** — Detect cross-isolate wait-graph cycles through channels.
+
 **7b AS BUILT (2026-07-14): process links.** `ChanFrame` gained ONE wire form —
 `Msg::Chan { kind, chan, corr, value, message }` (tag 22, worker-only) — and each
 process worker one more socket, pumped by dumb frame relays both sides: the
@@ -504,6 +516,8 @@ threads through `snapshot_block`/`rebuild_portable_value`; and `Worker.start:`
 needs `spawn_worker_with` split so the `ChanLink` exists before the snapshot
 ships captures. Also still open: a `VM.channels` live view (the `VM.claims`
 mirror).
+
+> **Tracked as #32** — Add a VM.channels live view mirroring VM.claims.
 
 **7c RESOLUTION AS BUILT (2026-07-15, Damon's design): spawn-time `args:` — blocks
 take parameters, not captures.** `with:`/`host:with:`/`start:` gained `args:`
@@ -627,6 +641,8 @@ channels, plain file reads, schedule races) replay end-to-end today; programs wi
 timing-dependent externals (extensions, sockets, subprocesses) need the arc-4
 injection wrapper, which feeds recorded results instead of re-performing.
 
+> **Tracked as #37** — Build the arc-4 deterministic replayer.
+
 ## 9. Slicing (proposed)
 
 1. **Replay hooks + divergence test** (small, first — everything after must stay
@@ -703,6 +719,9 @@ Each slice lands green on its own; supervision (arc 3) starts once 4 is stable, 
   rendering of hosted objects. **`==` DONE (2026-07-14):** hosted-object identity —
   same worker (reap Rc) + same table id, with `hosted_insert` deduping by identity
   so re-returned objects compare equal. Rendering polish still open.
+
+  > **Tracked as #29** — Polish ps and introspection rendering of hosted objects.
+
 - **The lock-ordering discipline** for (object claim, lane claim) under nested
   re-entrancy (§5's care point) — flagged as the scariest part of the design; must be
   written down and deadlock-tested before slice 5, not discovered during it.
