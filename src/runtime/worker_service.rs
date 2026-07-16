@@ -141,6 +141,11 @@ pub struct NativeServiceState {
     /// The respawn recipe — ROOT PROXY ONLY (sub-proxies are incarnation
     /// state; they die with it and cannot restart anything).
     recipe: Option<Rc<ServiceRecipe>>,
+    /// The supervision policy (SUPERVISION.md slice 3), attached post-spawn
+    /// via `serviceSupervise:`. Worker-wide: `note_service_dead` consults it
+    /// for the zero-gap gate close, and its presence hands restarts to the
+    /// supervisor task (manual `serviceRestart` refuses).
+    policy: Rc<RefCell<Option<crate::runtime::supervise::SupervisePolicy>>>,
 }
 
 /// The channels of the conversation a task currently has open on a worker:
@@ -191,13 +196,25 @@ enum RecipeArg {
     Channel(usize),
 }
 
-/// The rule-5 restart window: while a restart attempt is in flight, top-level
+/// The rule-5 restart window: while a restart cycle is in flight, top-level
 /// sends park here instead of dispatching into the corpse; completion wakes
 /// them all — into the new incarnation on success, into the typed death on
-/// failure.
+/// failure. `GaveUp` (slice 3) is the permanent terminal: the policy's budget
+/// is spent, and every sender — parked or future — gets the typed `#gaveUp`.
+#[derive(Debug, Default)]
+enum GatePhase {
+    #[default]
+    Open,
+    Restarting,
+    GaveUp {
+        attempts: u32,
+        last: String,
+    },
+}
+
 #[derive(Debug, Default)]
 struct RestartGate {
-    active: bool,
+    phase: GatePhase,
     /// `(task, park epoch)` — epoch identity filters cancelled waiters.
     waiters: Vec<(usize, u64)>,
 }
@@ -242,6 +259,7 @@ struct CallCtx {
     incarnation: Rc<Cell<u64>>,
     minted: u64,
     restart: Rc<RefCell<RestartGate>>,
+    policy: Rc<RefCell<Option<crate::runtime::supervise::SupervisePolicy>>>,
 }
 
 fn snapshot(s: &NativeServiceState) -> CallCtx {
@@ -263,6 +281,7 @@ fn snapshot(s: &NativeServiceState) -> CallCtx {
         incarnation: s.incarnation.clone(),
         minted: s.minted,
         restart: s.restart.clone(),
+        policy: s.policy.clone(),
     }
 }
 
@@ -363,6 +382,7 @@ pub(crate) fn installed_service_class<'gc>(
             ("serviceStop", service_stop),
             ("serviceEvents", service_events),
             ("serviceRestart", service_restart),
+            ("serviceSupervise:", service_supervise),
             ("==:", service_eq),
         ],
     );
@@ -710,6 +730,18 @@ fn note_service_dead(vm: &mut VmState<'_>, ctx: &CallCtx, reason: PeerDeathReaso
         vm.hosted_release(id);
     }
     ctx.claims.borrow_mut().gone = Some("died");
+    // Zero-gap parking (slice 3, §10.1's deliberate built-in edge): a
+    // SUPERVISED service closes the restart gate at the moment of detection,
+    // so the caller who catches this death and everyone after them parks
+    // through the supervisor's cycle instead of failing in the gap. (Idle
+    // deaths detected on the reader thread close it when the supervisor
+    // wakes — a microsecond-scale gap, recorded in the doc.)
+    if ctx.policy.borrow().is_some() {
+        let mut g = ctx.restart.borrow_mut();
+        if matches!(g.phase, GatePhase::Open) {
+            g.phase = GatePhase::Restarting;
+        }
+    }
     if let Some(sink) = vm.io.lives.borrow().get(ctx.life_idx) {
         sink.emit_died(reason, detail);
     }
@@ -1031,6 +1063,7 @@ fn sub_proxy<'gc>(
             minted: ctx.minted,
             restart: ctx.restart.clone(),
             recipe: None,
+            policy: ctx.policy.clone(),
         },
     )
 }
@@ -1339,6 +1372,7 @@ fn finish_host<'gc>(
             minted: 1,
             restart: Rc::new(RefCell::new(RestartGate::default())),
             recipe: Some(recipe),
+            policy: Rc::new(RefCell::new(None)),
         },
     );
     vm.service_classes.push(crate::vm::ServiceClassEntry {
@@ -1356,6 +1390,7 @@ fn finish_host<'gc>(
             ("serviceStop", service_stop),
             ("serviceEvents", service_events),
             ("serviceRestart", service_restart),
+            ("serviceSupervise:", service_supervise),
             ("==:", service_eq),
         ],
     );
@@ -1508,10 +1543,23 @@ fn await_restart_window<'gc>(
         let epoch = vm.current_park_epoch();
         {
             let mut g = restart.borrow_mut();
-            if !g.active {
-                return Ok(());
+            match &g.phase {
+                GatePhase::Open => return Ok(()),
+                GatePhase::Restarting => g.waiters.push((me.0, epoch)),
+                // The permanent terminal (slice 3): the policy's budget is
+                // spent — every sender gets the typed #gaveUp, forever.
+                GatePhase::GaveUp { attempts, last } => {
+                    return Err(QuoinError::peer_died(
+                        class_name.clone(),
+                        PeerDeathReason::GaveUp,
+                        format!(
+                            "service call '{}': `{class_name}` gave up after {attempts} \
+                             death(s) — its supervision budget is spent (last: {last})",
+                            selector.as_str()
+                        ),
+                    ));
+                }
             }
-            g.waiters.push((me.0, epoch));
         }
         if let Some(t) = vm.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
             t.parked_on_channel = true;
@@ -1583,6 +1631,17 @@ pub(crate) fn service_restart<'gc>(
             format!("serviceRestart: this root belongs to dead incarnation {minted}"),
         ));
     }
+    // A supervised service's restarts belong to its policy (slice 3): the
+    // supervisor owns the gate and the budget; a racing manual restart would
+    // corrupt both.
+    if receiver
+        .with_native_state::<NativeServiceState, _, _>(|s| s.policy.borrow().is_some())
+        .unwrap_or(false)
+    {
+        return Err(QuoinError::Other(format!(
+            "serviceRestart: `{class_name}` is supervised — the policy owns its restarts"
+        )));
+    }
     // Rule 1: only death restarts. A stop was an instruction (§2).
     let status = vm.io.lives.borrow().get(life_idx).map(|l| l.status());
     match status {
@@ -1601,19 +1660,27 @@ pub(crate) fn service_restart<'gc>(
     }
     {
         let mut g = restart.borrow_mut();
-        if g.active {
-            return Err(QuoinError::Other(
-                "serviceRestart: a restart is already in flight".into(),
-            ));
+        match g.phase {
+            GatePhase::Open => g.phase = GatePhase::Restarting,
+            GatePhase::Restarting => {
+                return Err(QuoinError::Other(
+                    "serviceRestart: a restart is already in flight".into(),
+                ));
+            }
+            GatePhase::GaveUp { .. } => {
+                return Err(QuoinError::Other(format!(
+                    "serviceRestart: `{class_name}` gave up — permanently dead this process"
+                )));
+            }
         }
-        g.active = true;
     }
     let outcome = restart_attempt(vm, mc, receiver, &recipe, cur);
     // Release the gate and wake every parked sender EITHER WAY: into the new
-    // incarnation, or into the typed death (the rule-5/give-up wake).
+    // incarnation, or into the typed death (the rule-5 wake). A failed MANUAL
+    // restart re-opens the gate — dead but retryable.
     let waiters = {
         let mut g = restart.borrow_mut();
-        g.active = false;
+        g.phase = GatePhase::Open;
         std::mem::take(&mut g.waiters)
     };
     for (task, epoch) in waiters {
@@ -1743,6 +1810,177 @@ fn restart_attempt<'gc>(
         })
         .map_err(QuoinError::Other)?;
     Ok(())
+}
+
+/// The proxy-owned `serviceSupervise:` (SUPERVISION.md slice 3): attach a
+/// `Supervise` policy post-spawn — the runtime interprets the data directly,
+/// and a per-service supervisor task (the `SuperviseBoot` pattern) owns the
+/// restart cycle from then on. Root only (the recipe holder); attach once
+/// (v1 has no detach); `Supervise.never` is a no-op when nothing is attached.
+pub(crate) fn service_supervise<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let arg = *args
+        .first()
+        .ok_or_else(|| QuoinError::Other("serviceSupervise: expects a Supervise policy".into()))?;
+    let (has_recipe, policy_cell, class_name) = receiver
+        .with_native_state::<NativeServiceState, _, _>(|st| {
+            (
+                st.recipe.is_some(),
+                st.policy.clone(),
+                st.class_name.clone(),
+            )
+        })
+        .map_err(QuoinError::Other)?;
+    if !has_recipe {
+        return Err(QuoinError::Other(
+            "serviceSupervise: only the root proxy holds the respawn recipe".into(),
+        ));
+    }
+    let parsed = crate::runtime::supervise::parse_policy(vm, mc, arg, "serviceSupervise:")?;
+    let Some(policy) = parsed else {
+        // #never: fail-fast is the default; refusing a detach keeps the
+        // supervisor task's lifecycle simple in v1.
+        if policy_cell.borrow().is_some() {
+            return Err(QuoinError::Other(format!(
+                "serviceSupervise: `{class_name}` is already supervised — detaching is \
+                 not supported (v1)"
+            )));
+        }
+        return Ok(vm.new_nil(mc));
+    };
+    {
+        let mut cell = policy_cell.borrow_mut();
+        if cell.is_some() {
+            return Err(QuoinError::Other(format!(
+                "serviceSupervise: `{class_name}` is already supervised"
+            )));
+        }
+        *cell = Some(policy);
+    }
+    // The supervisor task (native loop through a qnlib boot block — a task
+    // always runs a Quoin block). Capturing the proxy roots it: a supervised
+    // service is program-lifetime by nature. An already-dead peer is fine:
+    // the loop's first watch() delivers the terminal immediately.
+    let boot = crate::runtime::extension::resolve_global(vm, "SuperviseBoot").ok_or_else(|| {
+        QuoinError::Other("serviceSupervise: SuperviseBoot is not installed (qnlib)".into())
+    })?;
+    vm.call_method(mc, boot, "service:", vec![receiver])?;
+    Ok(vm.new_nil(mc))
+}
+
+/// The per-service supervisor (SUPERVISION.md §4 rule 7), running on its own
+/// task: park on the sink's terminal watch; on a death, run the restart cycle
+/// — exponential backoff between attempts, every death (including failed
+/// attempts, §2) counted against the policy's window — and either re-open the
+/// gate into the new incarnation or GIVE UP: the gate goes permanently
+/// `GaveUp`, parked and future senders get the typed `#gaveUp`, and the last
+/// incarnation's roster row says so. A clean stop ends the supervisor (§2:
+/// stop means stop). The window bookkeeping reads wall time — a documented
+/// replay divergence point (§7): intensity is inherently wall-clock.
+pub(crate) fn supervise_service_loop<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    svc: Value<'gc>,
+) -> Result<Value<'gc>, QuoinError> {
+    let mut deaths: Vec<Instant> = Vec::new();
+    loop {
+        let (life_idx, policy, gate, recipe) = svc
+            .with_native_state::<NativeServiceState, _, _>(|st| {
+                (
+                    st.life_idx,
+                    *st.policy.borrow(),
+                    st.restart.clone(),
+                    st.recipe.clone(),
+                )
+            })
+            .map_err(QuoinError::Other)?;
+        let (Some(policy), Some(recipe)) = (policy, recipe) else {
+            return Ok(vm.new_nil(mc));
+        };
+        let Some(sink) = vm.io.lives.borrow().get(life_idx).cloned() else {
+            return Ok(vm.new_nil(mc));
+        };
+        let watch_rx = sink.watch();
+        match vm.await_io(IoRequest::WorkerRecv(watch_rx))? {
+            IoResult::WorkerMsg(_) => {}
+            other => {
+                return Err(QuoinError::Other(format!(
+                    "supervisor: unexpected result {other:?}"
+                )));
+            }
+        }
+        match sink.status() {
+            // Clean stop, or a spurious wake on a live peer: not the
+            // supervisor's business (§2).
+            crate::runtime::lifecycle::LifeStatus::Stopped(_) => return Ok(vm.new_nil(mc)),
+            crate::runtime::lifecycle::LifeStatus::Running => continue,
+            crate::runtime::lifecycle::LifeStatus::Died { .. } => {}
+        }
+        // Idle deaths (reader-thread detected) close the gate here; parent-
+        // detected ones already closed it in `note_service_dead`.
+        {
+            let mut g = gate.borrow_mut();
+            if matches!(g.phase, GatePhase::Open) {
+                g.phase = GatePhase::Restarting;
+            }
+        }
+        deaths.push(Instant::now());
+        let mut attempt: u32 = 0;
+        let window = std::time::Duration::from_millis(policy.window_ms);
+        let outcome: Result<(), String> = loop {
+            deaths.retain(|t| t.elapsed() <= window);
+            if deaths.len() as u32 > policy.max_restarts {
+                break Err(format!(
+                    "{} death(s) inside {}ms exceeded the budget of {}",
+                    deaths.len(),
+                    policy.window_ms,
+                    policy.max_restarts
+                ));
+            }
+            attempt += 1;
+            let delay = policy.delay_ms(attempt);
+            if delay > 0 {
+                vm.await_io(IoRequest::Sleep { ms: delay })?;
+            }
+            let cur = svc
+                .with_native_state::<NativeServiceState, _, _>(|st| st.incarnation.get())
+                .map_err(QuoinError::Other)?;
+            match restart_attempt(vm, mc, svc, &recipe, cur) {
+                Ok(()) => break Ok(()),
+                // A failed attempt is a death of the new incarnation (§2):
+                // it feeds the window and the backoff keeps doubling.
+                Err(_) => deaths.push(Instant::now()),
+            }
+        };
+        let gave_up = outcome.is_err();
+        let waiters = {
+            let mut g = gate.borrow_mut();
+            g.phase = match outcome {
+                Ok(()) => GatePhase::Open,
+                Err(last) => GatePhase::GaveUp {
+                    attempts: attempt,
+                    last,
+                },
+            };
+            std::mem::take(&mut g.waiters)
+        };
+        for (task, epoch) in waiters {
+            if vm.channel_waiter_live(TaskId(task), epoch) {
+                vm.wake_channel_task(TaskId(task), Wake::ServiceClaim { lane: None });
+            }
+        }
+        if gave_up {
+            sink.gave_up
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Ok(vm.new_nil(mc));
+        }
+        // Success: loop — the next iteration re-reads the rebound state and
+        // watches the NEW incarnation's sink.
+    }
 }
 
 /// The proxy-owned `serviceEvents` (installed on every service class beside

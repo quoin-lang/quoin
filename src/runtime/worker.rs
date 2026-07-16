@@ -23,9 +23,10 @@ use gc_arena::Collect;
 use gc_arena::collect::Trace;
 use quoin_ext_proto::DataValue as WireData;
 
-use crate::error::QuoinError;
+use crate::error::{PeerDeathReason, QuoinError};
 use crate::io_backend::{IoRequest, IoResult};
 use crate::runtime::extension::{value_to_wire, wire_to_value};
+use crate::runtime::lifecycle::LifeStatus;
 use crate::value::ObjectPayload;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::worker::{
@@ -1101,9 +1102,9 @@ pub fn build_worker_class() -> NativeClassBuilder {
              ```",
         )
         .instance_method("send:", |vm, mc, receiver, args| {
-            let (tx, backing, chan_link) = receiver
+            let (tx, backing, chan_link, life_idx) = receiver
                 .with_native_state::<NativeWorkerHandle, _, _>(|h| {
-                    (h.inbox_tx.clone(), h.backing, h.chan_link)
+                    (h.inbox_tx.clone(), h.backing, h.chan_link, h.life_idx)
                 })
                 .map_err(QuoinError::Other)?;
             let dv = if crate::runtime::channel_relay::is_channel_value(args[0]) {
@@ -1114,15 +1115,37 @@ pub fn build_worker_class() -> NativeClassBuilder {
             } else {
                 to_message(args[0], backing == "thread")?
             };
-            tx.try_send(dv)
-                .map_err(|_| QuoinError::Other("Worker.send: the worker has exited".into()))?;
+            if tx.try_send(dv).is_err() {
+                // The inbox only closes when the worker's loop is gone: the
+                // typed unavailability error (SUPERVISION.md §2), with the
+                // sink's actual terminal when it has landed — the pump can
+                // lag the lane close by a hair, so Running falls back to the
+                // generic exit.
+                let status = vm
+                    .io
+                    .lives
+                    .borrow()
+                    .get(life_idx)
+                    .map(|sink| (sink.label.clone(), sink.status()));
+                return Err(match status {
+                    Some((label, LifeStatus::Died { reason, detail })) => {
+                        QuoinError::peer_died(label, reason, detail)
+                    }
+                    Some((label, _)) => QuoinError::peer_died(
+                        label,
+                        PeerDeathReason::Exited,
+                        "Worker.send: the worker has exited",
+                    ),
+                    None => QuoinError::Other("Worker.send: the worker has exited".into()),
+                });
+            }
             Ok(vm.new_nil(mc))
         })
         .doc(
             "Send a value into the worker's inbox (deep-copied; a thread-backed worker also \
              accepts a portable block, and a Channel crosses as a live endpoint -- the \
-             worker's sends and receives on it relay back to this side). Raises if the \
-             worker has exited. Answers nil.",
+             worker's sends and receives on it relay back to this side). An exited worker \
+             raises the typed PeerDiedError (SUPERVISION.md). Answers nil.",
         )
         .instance_method("receive", |vm, mc, receiver, _args| {
             let (rx, chan_link) = receiver
@@ -1329,6 +1352,29 @@ pub fn build_worker_class() -> NativeClassBuilder {
             "Internal (SUPERVISION.md slice 1): park until peer N's child process exits \
              (kqueue/pidfd -- observation, never a reap) and record the death. Armed once \
              per extension by the first `events` ask; not a user-facing surface.",
+        )
+        .class_method("superviseService:", |vm, mc, _receiver, args| {
+            let svc = *args.first().ok_or_else(|| {
+                QuoinError::Other("Worker.superviseService: expects a service proxy".into())
+            })?;
+            crate::runtime::worker_service::supervise_service_loop(vm, mc, svc)
+        })
+        .doc(
+            "Internal (SUPERVISION.md slice 3): the per-service supervisor loop -- parks on \
+             the peer's terminal, runs the policy's restart cycle, gives up when the budget \
+             is spent. Spawned once per `serviceSupervise:` by the `SuperviseBoot` helper; \
+             not a user-facing surface.",
+        )
+        .class_method("superviseExtension:", |vm, mc, _receiver, args| {
+            let ext = *args.first().ok_or_else(|| {
+                QuoinError::Other("Worker.superviseExtension: expects an Extension".into())
+            })?;
+            crate::runtime::extension::supervise_extension_loop(vm, mc, ext)
+        })
+        .doc(
+            "Internal (SUPERVISION.md slice 3): the per-extension supervisor loop -- the \
+             `superviseService:` twin over `Extension.restart`'s machinery, re-arming the \
+             exit watch for each new incarnation. Not a user-facing surface.",
         )
         // ---- worker side (class-side lanes, live only inside a worker) ----
         .class_method("receive", |vm, mc, _receiver, _args| {

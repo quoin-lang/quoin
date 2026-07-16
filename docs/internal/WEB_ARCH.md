@@ -439,6 +439,18 @@ For anything beyond a trailing serve call, guard main-only code:
 - Dispatch is round-robin over live workers; a worker death fails only
   ITS in-flight requests (502) and the pool routes around it; all dead
   -> 503. `app.poolStop` is drain-not-graceful.
+- **The pool self-heals (docs/internal/SUPERVISION.md §10.1 as a library
+  strategy)**: one router/supervisor task per slot reads the worker's
+  lifecycle terminal (`w.events`) — a STOP ends the slot, a DEATH respawns
+  it from the pool's recipe under `app.poolSupervise:`'s `Supervise` value
+  (default `Supervise.always`: 100ms backoff doubling to 10s, give up past
+  5 deaths in 60s). Requests during a slot's respawn window route to live
+  siblings — a pool has siblings, so it load-balances where a singleton
+  service parks. A slot past its budget gives up permanently; all slots
+  given up = a permanent 503 whose body says the budget is spent.
+  `Supervise.never` restores fail-fast decay. A send racing a just-died
+  worker raises the typed `PeerDiedError`; the pool catches it, marks the
+  slot, and retries the next — never a leaked 500.
 - `workers:0` (or plain `serve:`) is the single-VM path, unchanged.
 - `backing:'process'` buys real multicore past the same-process
   scheduling ceiling for CPU-heavy handlers (~7us extra per hop —
@@ -448,7 +460,11 @@ For anything beyond a trailing serve call, guard main-only code:
 **Observability**: with `app.debug:true`, `GET /_qn/ps` answers
 `VM.psTree` as JSON FROM THE TRANSPORT VM — the whole topology in one
 request: connection tasks, pool workers (labeled `web:0`...), their
-inbox depths and per-worker task states, recursively.
+inbox depths and per-worker task states, recursively. `GET /_qn/peers`
+answers the lifecycle roster (`VM.peers`): per-peer status, incarnation,
+and death reason/message — dead pool incarnations stay visible next to
+their respawned successors, so "how many times has this pool been shot"
+is one request too.
 
 **Handler-side fan-out**: a handler is ordinary code in a Task, so the
 concurrency library composes inside it — the official aggregation idiom:

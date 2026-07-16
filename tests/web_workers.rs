@@ -57,14 +57,18 @@ impl Drop for App {
 }
 
 fn start_app(name: &str, backing: &str) -> App {
-    let dir = std::env::temp_dir().join(format!("qn_webworkers_{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("app.qn");
     let (backing, n) = match backing.split_once(':') {
         Some((b, n)) => (b, n),
         None => (backing, "2"),
     };
-    std::fs::write(&path, APP.replace("@BACKING@", backing).replace("@N@", n)).unwrap();
+    boot_app(name, &APP.replace("@BACKING@", backing).replace("@N@", n))
+}
+
+fn boot_app(name: &str, source: &str) -> App {
+    let dir = std::env::temp_dir().join(format!("qn_webworkers_{name}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("app.qn");
+    std::fs::write(&path, source).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_qn"))
         .arg(&path)
         .stdout(Stdio::piped())
@@ -244,4 +248,108 @@ fn process_pool_serves_and_shards() {
     let app = start_app("process", "process");
     exercise(&app, "process");
     exercise_streaming(&app);
+}
+
+// ---- supervision (docs/internal/SUPERVISION.md §10.1, the [Web]Pool
+// library strategy): a process pool under real SIGABRT-grade deaths.
+
+const SUPERVISED_APP: &str = r#"
+use std:net/http;
+use std:net/http_server;
+use std:web/*;
+
+var app = [Web]App.new;
+app.debug:true;
+app.get:'/hello' do:{ 'hi' };
+app.get:'/die' do:{ VM.abort };
+
+(Worker.worker?).if:{ app.serve:'127.0.0.1:0' workers:2 backing:'process' }
+else:{
+    var server = app.start:'127.0.0.1:0' workers:2 backing:'process';
+    app.poolSupervise:((Supervise.always.backoff:@BACKOFF@ cap:@CAP@).max:@MAX@ within:60000);
+    ('PORT=' + server.port.s).print;
+    server.join
+}
+"#;
+
+fn start_supervised(name: &str, backoff: u32, cap: u32, max: u32) -> App {
+    boot_app(
+        name,
+        &SUPERVISED_APP
+            .replace("@BACKOFF@", &backoff.to_string())
+            .replace("@CAP@", &cap.to_string())
+            .replace("@MAX@", &max.to_string()),
+    )
+}
+
+fn count_of(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
+}
+
+#[test]
+fn supervised_pool_respawns_after_hard_death() {
+    let app = start_supervised("respawn", 20, 100, 1000);
+    assert!(get(app.port, "/hello").starts_with("HTTP/1.1 200"));
+
+    // Two kill cycles: the killed request fails as a clean 502, the sibling
+    // absorbs the very next request (route-around, no parking), and the
+    // slot respawns under the policy.
+    for round in 0..2 {
+        let die = get(app.port, "/die");
+        assert!(die.starts_with("HTTP/1.1 502"), "round {round} die:\n{die}");
+        assert!(body_of(&die).contains("worker exited"), "die body:\n{die}");
+        let hello = get(app.port, "/hello");
+        assert!(
+            hello.starts_with("HTTP/1.1 200"),
+            "round {round}: sibling did not absorb during the respawn window:\n{hello}"
+        );
+        std::thread::sleep(Duration::from_millis(400));
+    }
+
+    // Healed: a wave of requests all succeed, and the lifecycle roster
+    // (VM.peers via the debug route) shows the deaths recorded AND two
+    // running slots again.
+    for _ in 0..6 {
+        assert!(get(app.port, "/hello").starts_with("HTTP/1.1 200"));
+    }
+    let peers = get(app.port, "/_qn/peers");
+    let peers = body_of(&peers);
+    assert!(
+        count_of(peers, "\"status\":\"died\"") >= 2,
+        "deaths missing from the roster:\n{peers}"
+    );
+    assert!(
+        count_of(peers, "\"status\":\"running\"") >= 2,
+        "pool not back to strength:\n{peers}"
+    );
+}
+
+#[test]
+fn supervised_pool_gives_up_permanently() {
+    // max:1 — the second death of a slot inside the window spends its
+    // budget. Hammer /die until the pool's permanent 503 appears.
+    let app = start_supervised("giveup", 5, 10, 1);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let resp = get(app.port, "/die");
+        if resp.starts_with("HTTP/1.1 503") && body_of(&resp).contains("gave up") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pool never reached the permanent 503; last:\n{resp}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Permanent: still the give-up 503 after settling, on any route.
+    std::thread::sleep(Duration::from_millis(300));
+    let after = get(app.port, "/hello");
+    assert!(
+        after.starts_with("HTTP/1.1 503"),
+        "gave-up pool served again:\n{after}"
+    );
+    assert!(
+        body_of(&after).contains("gave up"),
+        "wrong give-up body:\n{after}"
+    );
 }

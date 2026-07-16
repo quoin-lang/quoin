@@ -49,6 +49,7 @@ pub mod sockets;
 pub mod span;
 pub mod streams;
 pub mod string;
+pub mod supervise;
 pub mod symbol;
 pub mod task;
 pub mod term;

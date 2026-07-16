@@ -116,19 +116,25 @@ lines around `join` (which already reports the death, including a thread panic).
 A user-level actor built on `spawn:` + `receive` loops can be supervised in user code
 once lifecycle events exist (§7); the runtime does not guess which spawns are servers.
 
-Surface (bikeshed open, §10): a `supervise:` option beside `lanes:`/`backing:` on the
-hosting forms, and on `Extension spawn:`:
+Surface — **REVISED in construction (2026-07-15, slice 3): attach POST-SPAWN,
+not a spawn keyword.** The draft's `supervise:` option beside `lanes:`/`backing:`
+would have doubled an already 16-wide explicitly-enumerated hosting selector
+matrix (`host:with:` × `args:` × `lanes:` × `backing:`); the attach shape costs
+zero matrix growth, is uniform across services and extensions, and is exactly
+the attach point a library strategy uses (§10.1 made flesh):
 
 ```quoin
-var conn = Worker.host:{ |url| Db.connect:url }
-           args:#( dbUrl ) backing:'process'
-           supervise:(Supervise.always.backoff:100 cap:10000 max:5 within:60000);
+var conn = Worker.host:{ |url| Db.connect:url } args:#( dbUrl ) backing:'process';
+conn.serviceSupervise:((Supervise.always.backoff:100 cap:10000).max:5 within:60000);
 ```
 
-Package extensions have no call site — `use pkg:*` spawns implicitly — so their policy
-lives in `quoin.toml` under `[extension]` (`restart = "always"`, `backoff-ms`,
-`max-restarts`, `window-ms`), read at `loadPackage:`. Default everywhere: `never` —
-today's behavior, unchanged unless asked for.
+(`serviceSupervise:` on proxies — the `serviceStop` naming family — and
+`e.supervise:` on extension handles. The death-before-attach gap is negligible:
+attach on the next line.) Package extensions have no call site — `use pkg:*`
+spawns implicitly — so their policy lives in `quoin.toml` under `[extension]`
+(`restart = "always"`, `backoff-ms`, `cap-ms`, `max-restarts`, `window-ms`),
+read at `loadPackage:`. Default everywhere: `never` — today's behavior,
+unchanged unless asked for.
 
 The policy itself is **plain data** (a small immutable qnlib value, `Supervise.never`
 / `.always` with modifiers): it crosses as wire data, so the recipe + policy pair is
@@ -218,7 +224,11 @@ user code on the death path.
   the record stream. One consumer per channel (channel semantics); a fan-out
   supervisor-of-supervisors is user code. This is deliberately the *entire* tree
   story for v1: Erlang-style trees are a loop over these events, in qnlib or user
-  code, later.
+  code, later. *Slice-3 note: the `restarting`/`gaveUp` event KINDS are deferred —
+  they want a cross-incarnation supervisor stream, which collides with slice 1's
+  one-terminal-per-sink law; the roster carries the state meanwhile (`VM.peers`
+  status `gaveUp`, incarnation numbers). The supervisor parks on a dedicated
+  per-sink watcher lane, so the user's events channel stays single-consumer.*
 - **`VM.peers`** (renamed from the draft's `VM.services` in review — Damon,
   2026-07-15: "services" was stale vocabulary once WorkerService was removed, and
   the roster covers plain workers and extensions too; "peers" matches
@@ -396,8 +406,60 @@ record/replay run containing a supervised death + restart.
    availability-not-state says fresh).
 3. **Policy:** the `Supervise` value + `supervise:` options + `quoin.toml`
    `[extension]` keys + backoff/intensity/give-up automation over slices 1+2.
+   **AS BUILT (2026-07-15).** `Supervise` is an immutable qnlib value
+   (`always` defaults: backoff 100ms doubling to a 10s cap, give up past 5
+   deaths in 60s; `backoff:cap:` / `max:within:` copy-modifiers; `never`
+   exists for symmetry) parsed once at attach through ordinary sends
+   (`runtime/supervise.rs`) — never on the death path. Attach is POST-SPAWN
+   (§3's revision): `serviceSupervise:` (root-only, once; `#never` on an
+   unsupervised peer is a no-op, detach is v1-unsupported), `e.supervise:`
+   (which also arms the exit watch — "supervised children get watches", §5
+   literally), and the `quoin.toml [extension]` keys, attached by
+   `loadPackage:` with strict validation (tuning keys without the
+   `restart = "always"` opt-in are an error, not a silent no-op). The
+   supervisor is a per-peer task (`SuperviseBoot`, the boot-block pattern)
+   parked on a NEW per-sink watcher lane (`LifeSink::watch()` — single-shot
+   terminal notification, enrolled under the watchers lock so the
+   terminal cannot slip between check and enroll; immediate delivery when
+   attaching to a corpse), riding the logged `WorkerRecv` path. The cycle:
+   every death — including failed restart attempts (§2) — feeds a rolling
+   wall-clock window (an explicit §7 replay-divergence point: intensity is
+   inherently wall-time); exceed the budget and the gate goes permanently
+   `GaveUp` — parked and future senders raise the typed `#gaveUp`, the last
+   incarnation's roster row reads `gaveUp`, and for extensions the dead
+   flag's fail-fast sites do the same (the package circuit breaker,
+   EXT_PACKAGING's deferral closed). Zero-gap parking (§10.1's built-in
+   edge): `note_service_dead` closes the gate at detection when a policy is
+   attached, so the caller that CATCHES the death and everyone behind them
+   park through the whole backoff/respawn cycle — rule 4 untouched (the
+   in-flight call still errors; nothing is replayed). Idle deaths detected
+   on the reader thread close the gate when the supervisor wakes (a
+   microsecond-scale gap); extension restart-window sends keep the slice-2
+   fail-fast residue. Manual `serviceRestart`/`e.restart` refuse on a
+   supervised peer — the policy owns the budget. Deviation from the draft,
+   decided in construction: no `supervise:` spawn keyword (§3's matrix
+   rationale); `#spawnFailed` remains unminted (attempt failures feed the
+   counter and the give-up message; nothing user-catchable carries it).
 4. *(adjacency, not this arc unless pulled)*: `WorkerPool` crash-respawn
    (`CONCURRENCY_ARCH.md` L1) becomes sugar over the same events + recipes.
+   **SHIPPED AS LIBRARY (2026-07-15), in `[Web]Pool`** — deliberately NOT the
+   built-in policy machinery, because a throughput pool wants different
+   semantics than a singleton service: a death fails only that slot's
+   in-flight requests (502) and the pool ROUTES AROUND the respawn window
+   (siblings absorb the load) where a service parks its senders. The pool is
+   the §10.1 library-strategy contract exercised end-to-end: it consumes
+   `w.events` for the stop/death verdict, respawns from its own recipe
+   (same unit, same backing, sentinel re-buffered), keeps per-slot
+   death-timestamp windows against a user-set `Supervise` value
+   (`app.poolSupervise:`; default `Supervise.always`), backs off doubling
+   to the cap, gives up per-slot past the budget (all given up = permanent
+   503, distinct body), and catches the typed `PeerDiedError` on the send
+   seam to mark-and-retry a just-died slot. Found in construction by the
+   web soak: plain `Worker.send:` to an exited worker threw an UNTYPED
+   string, not the typed death — fixed at the seam (`worker.rs send:` now
+   mints `PeerDiedError` from the sink's terminal, reason `#exited` when
+   the pump lags), which is exactly the §10.1 "library strategies need the
+   typed error everywhere" clause earning its keep.
 
 Each slice lands green alone; slice 0 is worth shipping even if the arc pauses.
 

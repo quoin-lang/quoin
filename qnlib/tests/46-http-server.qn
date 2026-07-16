@@ -24,6 +24,19 @@ use std:net/http_server
     };
 
     .test:
+    initConvertsStringBody -> {
+        "* The construction form honors the same String convenience as the
+        "* body: setter — the writer frames nil | Bytes | Generator only, and
+        "* a raw String here used to kill the connection headless (found by
+        "* the web soak: the pool's 503 bodies never reached the client).
+        var resp = [HTTP]ServerResponse.new:{ var status = 503; var body = 'gave up' };
+        .isTrue:{ Bytes ~ (resp.body) };
+        .is:{ resp.body.asString } equalTo:'gave up';
+        .isTrue:{ ([HTTP]Server.wireBytesFor:resp connection:'close').asStringLossy
+            .ends?:'\r\n\r\ngave up' };
+    };
+
+    .test:
     wireBytesFramesByContentLength -> {
         var resp = ([HTTP]ServerResponse.new:{ var status = 200 }).body:'hi';
         var out = ([HTTP]Server.wireBytesFor:resp connection:'close').asStringLossy;

@@ -20,3 +20,15 @@ LifecycleBoot <- {
         watch: -> { |i:Integer| Task.spawn:{ Worker.lifeWatch:i }; nil }
     }
 }
+
+"* Supervisor boot (docs/internal/SUPERVISION.md slice 3, internal): the
+"* per-peer supervisor is a native loop that must run on its own task, and a
+"* task always runs a Quoin block — these are those blocks. `serviceSupervise:`
+"* and `Extension#supervise:` (or the package loader) call them once per
+"* attach. Not a user-facing surface.
+SuperviseBoot <- {
+    .meta <-- {
+        service: -> { |svc| Task.spawn:{ Worker.superviseService:svc }; nil }
+        extension: -> { |e| Task.spawn:{ Worker.superviseExtension:e }; nil }
+    }
+}
