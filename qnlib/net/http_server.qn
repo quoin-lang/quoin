@@ -74,11 +74,13 @@ Error <- [HTTP]HeadTooLarge <- {}
 "* The setters return self so calls can be threaded. The [Web] layer aliases and
 "* reopens this class with its builder conveniences.
 [HTTP]ServerResponse <- { | @status @headers @body |
-    "* Internal: defaults — status 200, empty headers, nil body.
+    "* Internal: defaults — status 200, empty headers, nil body. A String body
+    "* converts to its UTF-8 Bytes here too, so both construction forms honor
+    "* the class contract (the writer frames nil | Bytes | Generator only).
     init: -> { |status headers body|
         @status = status.defined?.if:{ status } else:{ 200 }
         @headers = headers.defined?.if:{ headers } else:{ #() }
-        @body = body
+        @body = (String ~ body).if:{ body.asBytes } else:{ body }
     };
 
     .meta <-- {

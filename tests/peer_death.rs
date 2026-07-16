@@ -135,6 +135,31 @@ var tag = { w.join; 'no-error' }.catch:{ |e:PeerDiedError|
 }
 
 #[test]
+fn dead_worker_send_raises_peer_died() {
+    // A send meeting an exited worker's closed inbox is the typed
+    // unavailability error, not a bare string throw — the seam the web
+    // pool's `catch:{ |e:PeerDiedError| }` route-around depends on (found
+    // by the web soak: the untyped throw leaked through the pool to the
+    // transport as a 500). The inbox close can lag `terminate` by a hair,
+    // so sends retry until one is refused.
+    let script = r#"
+var w = Worker.start:{ Async.sleep:60000 } backing:'process';
+w.terminate;
+var tag = nil;
+var tries = 0;
+{ (tag == nil) && (tries < 500) }.whileDo:{
+    tag = { w.send:'x'; Async.sleep:10; nil }
+        .catch:{ |e:PeerDiedError|
+            ((e.reason == #exited) && (e.peer != nil)).if:{ 'typed' } else:{ 'bad-fields' } }
+        catch:{ |e| 'untyped [' + e.s + ']' };
+    tries = tries + 1
+};
+(tag == 'typed').if:{ 'PASS'.print } else:{ ('FAIL ' + tag.s).print };
+"#;
+    assert_passes("send", script, &[], false);
+}
+
+#[test]
 fn service_hard_death_types_every_seam_and_marks_claims() {
     // SIGKILL the service's child while a call is parked mid-conversation:
     // the in-flight call raises the typed death; the next call fails fast with
