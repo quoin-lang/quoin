@@ -16,8 +16,10 @@ under **Changed**, with the migration.
   root class `PeerDiedError`, carrying `reason` (`#exited` / `#panicked`) and
   `peer` (the hosted class, worker label, or extension name). This covers every
   seam: an extension crashing mid-call or found dead, a hosted service dying
-  mid-conversation or refusing as a corpse, and `Worker.join` on a vanished or
-  panicked worker (previously untyped strings). Errors a *live* peer reports are
+  mid-conversation or refusing as a corpse, `Worker.join` on a vanished or
+  panicked worker, and `w.send:` meeting an exited worker's closed inbox
+  (all previously untyped strings — the send seam was found by the web soak
+  leaking through the pool's typed catch as a 500). Errors a *live* peer reports are
   unchanged — death is the peer disappearing, never a value it raised.
   **Breaking**: an extension crash was previously an `IoError` of kind
   `#closed`; a `catch:{ |e:IoError| … }` around extension calls that meant to
@@ -47,6 +49,29 @@ under **Changed**, with the migration.
   supervised extensions get the exit watch armed automatically, so idle
   crashes restart too. Manual `serviceRestart`/`restart` refuse on a
   supervised peer — the policy owns the budget.
+
+- **The web worker pool self-heals** (WEB_ARCH.md workers — supervision's
+  first consumer, built as a *library* strategy over the lifecycle events).
+  A pool worker's death fails only its own in-flight requests (a clean 502)
+  while the pool routes around the respawn window — siblings absorb the
+  load, nothing parks — and the slot respawns from the pool's recipe under
+  `app.poolSupervise:`'s `Supervise` value (default `Supervise.always`;
+  `Supervise.never` restores fail-fast decay). A slot past its budget gives
+  up permanently; when every slot has, the pool answers a permanent 503
+  that says the supervision budget is spent. With `app.debug:true`, `GET
+  /_qn/peers` answers the `VM.peers` roster as JSON — dead incarnations,
+  reasons, and respawned successors in one request. `qn
+  qnlib/stress/web_soak.qn` grew two supervision phases: a chaos phase
+  (mixed concurrent load while `/boom` kills workers every round, verdicts
+  checked, healed-pool recovery wave asserted) and a give-up phase
+  (budget spent, 503 permanence asserted), with `QN_SOAK_ROUNDS` /
+  `QN_SOAK_CHAOS_ROUNDS` knobs.
+
+- **`VM.abort`** — kill the current VM's process immediately
+  (`std::process::abort`): no teardown, no lifecycle terminal, no exit code
+  ceremony — a real crash, for testing supervision and death handling.
+  (`Runtime.exit:` in a worker is a *stop* — the done terminal crosses
+  first — so it never triggers a restart; `VM.abort` is the death.)
 
 - **`serviceRestart` — manual restart of a dead hosted worker** (SUPERVISION.md
   slice 2, the respawn mechanics; policy automation is the next slice). A hosted
@@ -148,6 +173,16 @@ under **Changed**, with the migration.
   printer shows the blob fenced (`--- in extension ---`) at the failing call, and Quoin
   code reads it as `ex.remoteStack` (nil on ordinary errors). Old SDKs interoperate
   unchanged (message-only errors).
+
+### Fixed
+
+- **`[HTTP]ServerResponse.new:{ … var body = 'text' }` killed the connection.**
+  The class contract says a String body converts to Bytes for convenience, but
+  only the `body:` setter honored it — the construction form assigned the raw
+  String, the wire serializer failed on it, and the transport's write guard
+  (which conflates a write error with "peer gone") closed the connection with
+  no response at all. Found by the web soak: the pool's 503 bodies never
+  reached any client. `init:` now converts, matching the setter.
 
 ### Changed
 

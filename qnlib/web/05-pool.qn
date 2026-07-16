@@ -16,13 +16,23 @@
 "* before the worker boots), so the worker-side loop can VERIFY it was
 "* spawned by a pool rather than guessing from context.
 "*
-"* One reply-router task per worker demultiplexes correlation ids into
-"* per-request channels; dispatch is round-robin, skipping dead workers. A
-"* worker death fails ITS in-flight requests with 502 (per-worker pending
-"* maps — a crash never spuriously fails a sibling's requests).
+"* One router task per worker SLOT demultiplexes correlation ids into
+"* per-request channels — and supervises the slot (SUPERVISION.md §10.1's
+"* library-strategy contract, made flesh): when the worker's lane closes,
+"* the lifecycle terminal says whether it STOPPED (an instruction — the
+"* router ends) or DIED, and a death fails ITS in-flight requests with 502
+"* (per-worker pending maps — a crash never spuriously fails a sibling's
+"* requests) and then RESPAWNS the slot under the pool's Supervise policy:
+"* exponential backoff, and more than `max` deaths inside `window` ms gives
+"* the slot up permanently — the circuit breaker. The default policy is
+"* Supervise.always (a web pool self-heals); `supervise:Supervise.never`
+"* restores fail-fast decay. Dispatch is round-robin, skipping dead slots;
+"* requests during a slot's respawn window route to live siblings (a pool
+"* has siblings — the load-balancer answer, where a singleton service
+"* parks). All slots down -> 503, permanent once every slot gave up.
 "* Streaming (Generator) response bodies MATERIALIZE in pool mode (chunked
 "* streaming over the lanes is a recorded follow-up).
-[Web]Pool <- { | @workers @alive @pendings @routers @next @counter |
+[Web]Pool <- { | @workers @alive @pendings @routers @next @counter @unit @backing @policy @gaveUp @deaths @stopping |
     .meta <-- {
         "* Spawn a pool of `n` workers, each re-running `unit` under a 'thread'
         "* or 'process' backing, and return it ready to handle:.
@@ -104,43 +114,60 @@
         }
     };
 
-    "* Internal: empty registries — workers, liveness, per-worker pendings, routers.
+    "* Internal: empty registries — workers, liveness, per-worker pendings,
+    "* routers, and the supervision bookkeeping (per-slot give-up flags and
+    "* death timestamps for the policy window). The default policy is
+    "* Supervise.always: a web pool self-heals unless told otherwise.
     init -> {
         @workers = #();
         @alive = #();
         @pendings = #();
         @routers = #();
         @next = 0;
-        @counter = 0
+        @counter = 0;
+        @policy = Supervise.always;
+        @gaveUp = #();
+        @deaths = #();
+        @stopping = false
     };
 
+    "* Replace the pool's supervision policy (a `Supervise` value — see
+    "* docs/internal/SUPERVISION.md). Applies from the NEXT death onward;
+    "* `Supervise.never` restores fail-fast decay (a dead slot stays dead).
+    supervise: -> { |p| @policy = p; self };
+
     "* Internal: spawn the `n` workers (pool sentinel pre-buffered) and one
-    "* reply-router task per worker; returns self.
+    "* router/supervisor task per slot; returns self.
     startWorkers:unit:backing: -> { |n unit backing|
+        @unit = unit;
+        @backing = backing;
         var me = self;
         (0..n).each:{ |i|
-            var w = (backing == 'process')
-                .if:{ Worker.spawn:unit backing:'process' }
-                 else:{ Worker.spawn:unit };
-            w.label:('web:' + i.s);
-            "* Pre-buffered before the worker even boots: the lanes exist at
-            "* spawn, so the worker-side loop's first receive is guaranteed
-            "* to see this sentinel (its proof it belongs to a pool).
-            w.send:'webpool-init';
-            @workers.add:w;
-            @alive.add:true;
+            @workers.add:nil;
+            @alive.add:false;
+            @gaveUp.add:false;
+            @deaths.add:#();
             var pending = #{};
             @pendings.add:pending;
-            "* The reply router: demultiplex this worker's outbox into the
-            "* per-request channels. On worker exit (nil), fail ITS pending
-            "* requests with 502 and mark the slot dead.
+            .spawnSlot:i;
+            "* The router/supervisor: demultiplex this slot's outbox into the
+            "* per-request channels; on lane close, read the worker's typed
+            "* lifecycle terminal — a STOP ends the router, a DEATH fails the
+            "* slot's pendings with 502 and runs the policy's respawn cycle,
+            "* after which this same task routes for the new incarnation.
             @routers.add:(Task.spawn:{
+                var w = me.workerAt:i;
                 var running = true;
                 { running }.whileDo:{
                     var m = w.receive;
                     (m == nil).if:{
-                        running = false;
-                        me.markDead:i
+                        var kind = me.terminalKindOf:w;
+                        me.markDead:i;
+                        (kind == 'died').if:{
+                            var w2 = me.respawnSlot:i;
+                            (w2 == nil).if:{ running = false } else:{ w = w2 }
+                        }
+                        else:{ running = false }
                     }
                     else:{
                         var ch = pending.at:((m.at:'id').s);
@@ -161,7 +188,71 @@
         self
     };
 
-    "* Internal: mark worker `i` dead and fail its in-flight requests with a 502.
+    "* Internal: the slot's current worker handle.
+    workerAt: -> { |i| ^@workers.at:i };
+
+    "* Internal: (re)spawn slot `i`'s worker from the pool's recipe — same
+    "* unit, same backing, same label, sentinel pre-buffered — and mark the
+    "* slot live. Returns the new handle.
+    spawnSlot: -> { |i|
+        var w = (@backing == 'process')
+            .if:{ Worker.spawn:@unit backing:'process' }
+             else:{ Worker.spawn:@unit };
+        w.label:('web:' + i.s);
+        "* Pre-buffered before the worker even boots: the lanes exist at
+        "* spawn, so the worker-side loop's first receive is guaranteed
+        "* to see this sentinel (its proof it belongs to a pool).
+        w.send:'webpool-init';
+        @workers.at:i put:w;
+        @alive.at:i put:true;
+        ^w
+    };
+
+    "* Internal: the worker's lifecycle terminal kind — 'stopped' (an
+    "* instruction: webpool-stop, or a clean unit exit) or 'died' (the
+    "* isolate vanished). Parks briefly if the lane closed a hair before the
+    "* terminal was recorded; history is kept, so a late ask still answers.
+    terminalKindOf: -> { |w|
+        var ev = w.events;
+        var kind = nil;
+        var going = true;
+        { going }.whileDo:{
+            var r = ev.receive;
+            (r == nil).if:{ going = false }
+            else:{ kind = r.at:'kind' }
+        };
+        ^kind
+    };
+
+    "* Internal: the policy's respawn cycle for slot `i` (SUPERVISION.md §4
+    "* rule 7, library-side — the §10.1 strategy contract in use). Every
+    "* death feeds the rolling window; past the budget the slot GIVES UP
+    "* permanently. Backoff doubles per death in the window, capped. Answers
+    "* the new worker, or nil (no restart: policy #never, pool stopping, or
+    "* gave up).
+    respawnSlot: -> { |i|
+        ((@policy.restart) == #always).else:{ ^^nil };
+        @stopping.if:{ ^^nil };
+        var deaths = @deaths.at:i;
+        deaths.add:(Instant.now);
+        var window = @policy.window;
+        var kept = #();
+        deaths.each:{ |t| ((t.elapsed.asMilliseconds) <= window).if:{ kept.add:t } };
+        @deaths.at:i put:kept;
+        (kept.count > (@policy.max)).if:{
+            @gaveUp.at:i put:true;
+            ^^nil
+        };
+        var delay = @policy.backoff;
+        var k = 1;
+        { k < (kept.count) }.whileDo:{ delay = delay * 2; k = k + 1 };
+        (delay > (@policy.cap)).if:{ delay = @policy.cap };
+        (delay > 0).if:{ Async.sleep:delay };
+        @stopping.if:{ ^^nil };
+        ^(.spawnSlot:i)
+    };
+
+    "* Internal: mark slot `i` dead and fail its in-flight requests with a 502.
     markDead: -> { |i|
         @alive.at:i put:false;
         var pending = @pendings.at:i;
@@ -172,7 +263,7 @@
         }
     };
 
-    "* How many pool workers are still alive.
+    "* How many pool slots are currently live.
     aliveCount -> {
         var n = 0;
         @alive.each:{ |a| a.if:{ n = n + 1 } };
@@ -180,8 +271,11 @@
     };
 
     "* Ship one request, park the calling (connection) task on its reply
-    "* channel, rebuild the response. Round-robin over live workers; a send
-    "* to a just-died worker marks it and retries the next; all dead -> 503.
+    "* channel, rebuild the response. Round-robin over live slots — a slot
+    "* mid-respawn is simply skipped (its siblings absorb the load); a send
+    "* meeting a just-died worker (the typed PeerDiedError) marks it and
+    "* retries the next; nothing live -> 503, permanent once every slot's
+    "* supervision budget is spent.
     handle: -> { |req|
         var n = @workers.count;
         var tries = 0;
@@ -198,9 +292,8 @@
                 "* credit-based backpressure is the recorded follow-up.
                 var ch = Channel.buffered:64;
                 (@pendings.at:i).at:(id.s) put:ch;
-                var sent = { (@workers.at:i).send:([Web]Pool.requestToData:req id:id); true }.catch:{ |e|
-                    false
-                };
+                var sent = { (@workers.at:i).send:([Web]Pool.requestToData:req id:id); true }
+                    .catch:{ |e:PeerDiedError| false };
                 sent.if:{
                     var m = ch.receive;
                     ((m.at:'stream') == true).if:{
@@ -233,16 +326,23 @@
                 }
             }
         };
+        var allGaveUp = @gaveUp.count > 0;
+        @gaveUp.each:{ |g| g.else:{ allGaveUp = false } };
+        var why = allGaveUp
+            .if:{ 'pool gave up (supervision budget spent)' }
+            else:{ 'no live pool workers' };
         ^[HTTP]ServerResponse.new:{
             var status = 503;
             var headers = #();
-            var body = 'no live pool workers'
+            var body = why
         }
     };
 
     "* Drain-not-graceful: stop every worker's loop and join it; in-flight
-    "* handler tasks in that worker end with it.
+    "* handler tasks in that worker end with it. Stops the supervision too
+    "* (a slot mid-backoff aborts its respawn).
     stop -> {
+        @stopping = true;
         var n = @workers.count;
         (0..n).each:{ |i|
             (@alive.at:i).if:{

@@ -442,6 +442,24 @@ record/replay run containing a supervised death + restart.
    counter and the give-up message; nothing user-catchable carries it).
 4. *(adjacency, not this arc unless pulled)*: `WorkerPool` crash-respawn
    (`CONCURRENCY_ARCH.md` L1) becomes sugar over the same events + recipes.
+   **SHIPPED AS LIBRARY (2026-07-15), in `[Web]Pool`** — deliberately NOT the
+   built-in policy machinery, because a throughput pool wants different
+   semantics than a singleton service: a death fails only that slot's
+   in-flight requests (502) and the pool ROUTES AROUND the respawn window
+   (siblings absorb the load) where a service parks its senders. The pool is
+   the §10.1 library-strategy contract exercised end-to-end: it consumes
+   `w.events` for the stop/death verdict, respawns from its own recipe
+   (same unit, same backing, sentinel re-buffered), keeps per-slot
+   death-timestamp windows against a user-set `Supervise` value
+   (`app.poolSupervise:`; default `Supervise.always`), backs off doubling
+   to the cap, gives up per-slot past the budget (all given up = permanent
+   503, distinct body), and catches the typed `PeerDiedError` on the send
+   seam to mark-and-retry a just-died slot. Found in construction by the
+   web soak: plain `Worker.send:` to an exited worker threw an UNTYPED
+   string, not the typed death — fixed at the seam (`worker.rs send:` now
+   mints `PeerDiedError` from the sink's terminal, reason `#exited` when
+   the pump lags), which is exactly the §10.1 "library strategies need the
+   typed error everywhere" clause earning its keep.
 
 Each slice lands green alone; slice 0 is worth shipping even if the arc pauses.
 

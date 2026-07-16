@@ -252,6 +252,14 @@
     pool -> { @pool };
     "* Stop the worker pool, if any; returns self.
     poolStop -> { @pool.defined?.if:{ @pool.stop }; self };
+    "* Replace the pool's supervision policy (a `Supervise` value; pool mode
+    "* only — call after start:workers:). The default is Supervise.always:
+    "* a dead pool worker respawns with backoff until its budget is spent.
+    poolSupervise: -> { |p|
+        @pool.defined?.else:{ 'poolSupervise: no pool is running'.throw };
+        @pool.supervise:p;
+        self
+    };
 
     "* The transport-side hop: debug observability is answered HERE (the main
     "* VM — its psTree sees the whole topology: connection tasks, pool
@@ -262,6 +270,21 @@
     dispatch:pool: -> { |req pool|
         (@debug && ((req.path) == '/_qn/ps')).if:{
             ^^([Web]Response.json:(VM.psTree))
+        };
+        (@debug && ((req.path) == '/_qn/peers')).if:{
+            "* The lifecycle roster (SUPERVISION.md): per-peer status,
+            "* incarnation, death reason — the pool's slots included. The
+            "* reason symbol renders as its name for JSON.
+            var rows = #();
+            VM.peers.each:{ |p|
+                var row = #{};
+                p.keys.each:{ |k|
+                    var v = p.at:k;
+                    row.at:k put:((k == 'reason').if:{ v.s } else:{ v })
+                };
+                rows.add:row
+            };
+            ^^([Web]Response.json:rows)
         };
         (@logRequests == false).if:{
             (pool == nil).if:{ ^^(.handle:req) };

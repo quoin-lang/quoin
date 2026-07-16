@@ -724,6 +724,22 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
              flagged: batch the API or move the object (the cost gradient is placement- \
              controlled, CONCURRENCY_MODEL.md guarantee 5).",
         )
+        // `VM.abort` -> hard process death, for TESTING crash machinery.
+        .class_method("abort", |_vm, _mc, _receiver, _args| {
+            // No teardown, no exit flush, no done terminal: the process dies
+            // the way a crash dies. This exists so crash-handling machinery —
+            // supervision, pool respawn, the soaks — can be exercised from
+            // Quoin itself (`Runtime.exit:` is a clean STOP: the worker done
+            // terminal still crosses, so supervision correctly refuses to
+            // restart it). Never program control flow.
+            std::process::abort();
+        })
+        .doc(
+            "Hard-kill the current process (abort(3)): no teardown, no exit flush -- the \
+             process dies the way a crash dies. FOR TESTING crash-handling machinery \
+             (supervision, pool respawn, soak harnesses) from Quoin; for ordinary program \
+             exit use `Runtime.exit:`, which is a clean stop.",
+        )
         // `VM.peers` -> the lifecycle roster (SUPERVISION.md slice 1): one row
         // per spawned peer — hosted worker, plain worker, extension — with its
         // current status. Rows outlive their peer (the post-mortem roster);
