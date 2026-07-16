@@ -4,6 +4,12 @@
 
 use super::*;
 
+/// The hosted-object table's pin owner (`vm.pins`): one table per VM.
+const HOSTED_OWNER: crate::pin_table::PinOwner = crate::pin_table::PinOwner {
+    kind: "hosted",
+    id: 0,
+};
+
 impl<'gc> VmState<'gc> {
     pub fn start_method_call(
         &mut self,
@@ -26,44 +32,27 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    /// Insert a value into the worker-side hosted-object table (`hosted`),
-    /// answering its id: index + 1, so 0 is never issued (`Call.recv: 0` stays
-    /// free to mean "class-side" when hosted manifests arrive).
+    /// Insert a value into the worker-side hosted-object table, answering its
+    /// wire id: pin-slot index + 1, so 0 is never issued (`Call.recv: 0`
+    /// stays free to mean "class-side" when hosted manifests arrive). Backed
+    /// by `vm.pins` (owner kind "hosted"): identity dedupe — hosting the same
+    /// object twice answers the same id (proxy `==` and release refcounts
+    /// depend on it) — comes from `pin_or_find`, and the wire ids stay
+    /// release-disciplined exactly as before (no generation tags; ids are
+    /// sparse across the shared slab, which the wire never cared about).
     pub fn hosted_insert(&mut self, v: Value<'gc>) -> u64 {
-        // Dedupe by identity: hosting the same object twice must answer the
-        // same id (proxy `==` and release refcounts both depend on it).
-        if let Value::Object(obj) = v {
-            for (i, slot) in self.hosted.iter().enumerate() {
-                if let Some(Value::Object(existing)) = slot
-                    && Gc::ptr_eq(*existing, obj)
-                {
-                    return (i + 1) as u64;
-                }
-            }
-        }
-        for (i, slot) in self.hosted.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(v);
-                return (i + 1) as u64;
-            }
-        }
-        self.hosted.push(Some(v));
-        self.hosted.len() as u64
+        let pin = self.pins.pin_or_find(HOSTED_OWNER, v);
+        (crate::pin_table::PinTable::index(pin) + 1) as u64
     }
 
     pub fn hosted_get(&self, id: u64) -> Option<Value<'gc>> {
-        self.hosted
-            .get((id as usize).checked_sub(1)?)
-            .copied()
-            .flatten()
+        self.pins
+            .get_at((id as usize).checked_sub(1)?, HOSTED_OWNER.kind)
     }
 
     pub fn hosted_release(&mut self, id: u64) {
-        if let Some(slot) = (id as usize)
-            .checked_sub(1)
-            .and_then(|i| self.hosted.get_mut(i))
-        {
-            *slot = None;
+        if let Some(i) = (id as usize).checked_sub(1) {
+            self.pins.unpin_at(i, HOSTED_OWNER.kind);
         }
     }
 

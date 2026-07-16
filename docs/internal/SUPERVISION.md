@@ -413,7 +413,37 @@ record/replay run containing a supervised death + restart.
    has no extension twin yet — slice 3 material if the policy wants it);
    `loadPackage:` extensions restart via the handle only (`init.qn` is NOT
    re-run — glue is installed classes, state is the process's, and
-   availability-not-state says fresh).
+   availability-not-state says fresh). *Post-arc resolution (2026-07-16):
+   init.qn stays once-per-VM BY DESIGN — it is define-once glue (numpy's
+   defines three classes; re-eval would throw `Cannot redefine class`), and
+   the design review concluded the ambient-state logic doesn't belong in the
+   package anyway (Damon): it belongs to whatever USES the package. The gap —
+   handle-less child-side state silently resetting on respawn — is closed by
+   the user-code **restart hooks** instead: `svc.serviceOnRestart:{ |s| … }` /
+   `e.onRestart:{ |x| … }`, run as each restart attempt's TAIL — after the
+   rebind (the transport is live; for services the hook's own sends pass the
+   closed gate via a task exemption) and before the gate reopens, so parked
+   senders resume only against a hooked-up incarnation. A hook failure fails
+   the attempt: the fresh peer is stopped/killed, the supervisor counts it
+   against the budget (a poison hook spends to `#gaveUp`), a manual restart
+   relays it typed. One hook per peer, replace on re-set, nil clears; it
+   survives incarnations. This amends the §0 "no callback into user code on
+   the death path" law precisely: the DECISION stays data-only; the hook runs
+   in the recipe-replay phase, like an Erlang child init. The hook block
+   roots through `vm.pins` — the NEW generic traced pin table
+   (`src/pin_table.rs`) that consolidated `recipe_chans` + `life_channels` +
+   the worker-side hosted-object table (owner kind "hosted", identity-deduped
+   via `pin_or_find`, wire id = slot + 1 through owner-checked index
+   accessors) and stops the one-GC-root-per-feature pattern. The two
+   registries that deliberately STAY outside it, scoped in review: the
+   extension `handle_table` (a wire protocol, not a pin — generation-tagged
+   handles cross the socket, call-epoch local scoping on the hot path) and
+   `service_classes` (a program-lifetime keyed registry, class-table-shaped).
+   `VM.stats`' `pins` section is the ONE leak-accounting dashboard: live
+   pins per owner kind plus `extHandles` and `serviceClasses` rows. Construction found a VM gotcha: a native that
+   SWALLOWS a Quoin-thrown error must clear `vm.exceptions.active`, or the
+   stale value is handed to the next `catch:` anywhere in the VM in place of
+   its real error (bit the poison-hook e2e; both hook seams clear it).*
 3. **Policy:** the `Supervise` value + `supervise:` options + `quoin.toml`
    `[extension]` keys + backoff/intensity/give-up automation over slices 1+2.
    **AS BUILT (2026-07-15).** `Supervise` is an immutable qnlib value

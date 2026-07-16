@@ -66,7 +66,7 @@ use quoin_ext_proto::{
 };
 
 use crate::arg;
-use crate::error::QuoinError;
+use crate::error::{PeerDeathReason, QuoinError};
 use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::array::{self, ArrayDType};
 use crate::runtime::big_decimal::NativeBigDecimal;
@@ -437,6 +437,10 @@ pub struct NativeExtension {
     /// The policy's budget is spent: permanently dead this process — the
     /// circuit breaker. Calls fail with the typed `#gaveUp`.
     gave_up: bool,
+    /// The user's restart hook (`onRestart:`) as a `vm.pins` ticket — runs
+    /// inside every restart attempt, after the rebind; it outlives
+    /// incarnations (rebind never touches it).
+    hook: std::cell::Cell<Option<crate::pin_table::PinId>>,
 }
 
 /// An extension's frozen respawn recipe (SUPERVISION.md slice 2, rule 2):
@@ -1920,6 +1924,7 @@ fn finish_ext_spawn<'gc>(
             incarnation: 1,
             policy: None,
             gave_up: false,
+            hook: std::cell::Cell::new(None),
         },
     );
     Ok((ext_val, manifest))
@@ -2240,6 +2245,7 @@ fn extension_restart_attempt<'gc>(
         "process",
         Some(spawned.child.id()),
     );
+    let life_for_hook = life.clone();
     life.incarnation
         .store(next, std::sync::atomic::Ordering::Relaxed);
     let new_life_idx = {
@@ -2271,6 +2277,34 @@ fn extension_restart_attempt<'gc>(
             e.incarnation = next;
         })
         .map_err(QuoinError::Other)?;
+    // The user's restart hook (`onRestart:`), the attempt's tail: the
+    // transport is live, so the hook reconfigures the fresh child through
+    // the installed classes. A failure fails the ATTEMPT — the fresh child
+    // is killed (it must not serve half-set-up), the death lands on its
+    // sink, and the caller (supervisor or manual restart) counts/relays it.
+    let hook = receiver
+        .with_native_state::<NativeExtension, _, _>(|e| e.hook.get())
+        .map_err(QuoinError::Other)?;
+    if let Some(block) = hook.and_then(|pin| vm.pins.get(pin))
+        && let Err(e) = vm.call_method(mc, block, "value:", vec![receiver])
+    {
+        // Swallowing the hook's throw natively: clear the in-flight exception
+        // VALUE too, or a later `catch:` anywhere would be handed the residue.
+        vm.exceptions.active = None;
+        receiver
+            .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| {
+                ext.kill_now();
+                ext.dead = true;
+            })
+            .map_err(QuoinError::Other)?;
+        life_for_hook.emit_died(
+            PeerDeathReason::Exited,
+            &format!("restart hook failed: {e}"),
+        );
+        return Err(QuoinError::Other(format!(
+            "`{peer}` restart hook (incarnation {next}): {e}"
+        )));
+    }
     Ok(())
 }
 
@@ -2572,6 +2606,44 @@ pub fn build_extension_class() -> NativeClassBuilder {
              permanently (the circuit breaker) and calls raise `PeerDiedError` with reason \
              `#gaveUp`. Stops are instructions, never restarted. Attach once; package \
              extensions attach via `quoin.toml [extension]` keys instead.",
+        )
+        .instance_method("onRestart:", |vm, mc, receiver, args| {
+            let arg = *args.first().ok_or_else(|| {
+                QuoinError::Other("Extension.onRestart: expects a Block (or nil to clear)".into())
+            })?;
+            let (old, life_idx) = receiver
+                .with_native_state::<NativeExtension, _, _>(|e| (e.hook.get(), e.life_idx))
+                .map_err(QuoinError::Other)?;
+            let new = if matches!(arg, Value::Nil) {
+                None
+            } else if crate::runtime::worker::block_parts(arg).is_some() {
+                Some(vm.pins.pin(
+                    crate::pin_table::PinOwner {
+                        kind: "restart-hook",
+                        id: life_idx as u64,
+                    },
+                    arg,
+                ))
+            } else {
+                return Err(QuoinError::Other(
+                    "Extension.onRestart: expects a Block (or nil to clear)".into(),
+                ));
+            };
+            if let Some(pin) = old {
+                vm.pins.unpin(pin);
+            }
+            receiver
+                .with_native_state::<NativeExtension, _, _>(|e| e.hook.set(new))
+                .map_err(QuoinError::Other)?;
+            Ok(vm.new_nil(mc))
+        })
+        .doc(
+            "Install the restart hook: a one-argument Block (it receives this handle) run \
+             inside every restart attempt -- supervised or manual -- after the fresh child \
+             is up, so user code can re-establish ambient child-side state (configuration, \
+             registrations) the death threw away. The hook must be re-runnable; a hook \
+             error fails the attempt (the fresh child is killed, a supervisor counts it \
+             against the budget). Re-installing replaces the hook; nil clears it.",
         )
         // `Extension loadPackage: '<dir>'` -> load an extension *package* (a folder with an
         // `quoin.toml` launch/identity spec + an optional `init.qn` of Quoin-side glue;

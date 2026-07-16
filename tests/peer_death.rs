@@ -576,3 +576,100 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
     assert_passes("pkgtoml", script, &[("quoin.toml", &toml)], false);
 }
+
+#[test]
+fn service_restart_hook_runs_before_parked_senders_resume() {
+    // The restart hook (serviceOnRestart:) runs inside the attempt: after the
+    // rebind — its own send (`s.ping`) passes the closed gate through the
+    // exemption — and before the gate reopens, so the parked sender provably
+    // resumes against a hooked-up incarnation (the phasefile orders the two).
+    let script = r#"
+var svc = Worker.host:'@kaboom.qn@' with:{ Kaboom.new } backing:'process';
+svc.serviceSupervise:(Supervise.always.backoff:10 cap:50);
+svc.serviceOnRestart:{ |s|
+    (s.ping == 'pong').if:{ [IO]File.append:'hook-ran\n' to:'@phasefile@' }
+     else:{ [IO]File.append:'hook-bad\n' to:'@phasefile@' } };
+var ok = true;
+var t1 = { svc.boom }.catch:{ |e:PeerDiedError| 'died-typed' };
+(t1 == 'died-typed').else:{ ok = false; 'e1'.print };
+var r = svc.ping;
+[IO]File.append:'sender-resumed\n' to:'@phasefile@';
+(r == 'pong').else:{ ok = false; 'e2'.print };
+(([IO]File.read:'@phasefile@') == 'hook-ran\nsender-resumed\n')
+    .else:{ ok = false; ('e3 [' + ([IO]File.read:'@phasefile@') + ']').print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let kaboom = r#"
+Kaboom <- {
+    ping -> { 'pong' }
+    boom -> { VM.abort }
+}
+"#;
+    assert_passes("svchook", script, &[("kaboom.qn", kaboom)], false);
+}
+
+#[test]
+fn extension_restart_hook_reapplies_child_state() {
+    // The hook's whole purpose: ambient child-side state (no handle, so no
+    // #staleIncarnation to catch) silently resets on respawn — the hook
+    // re-establishes it before anyone notices. Ext restart-window sends fail
+    // fast typed (the recorded slice-2 residue), so the probe retries.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
+    let script = format!(
+        r#"
+var e = Extension.spawn:'{ext_bin}';
+var ok = true;
+e.call:'set' with:'configured';
+((e.call:'get' with:'') == 'configured').else:{{ ok = false; 'e1'.print }};
+e.supervise:(Supervise.always.backoff:10 cap:50);
+e.onRestart:{{ |x| x.call:'set' with:'reconfigured' }};
+var c1 = {{ e.call:'crash' with:'' }}.catch:{{ |x:PeerDiedError| 'died' }};
+(c1 == 'died').else:{{ ok = false; 'e2'.print }};
+var got = nil;
+var tries = 0;
+{{ (got == nil) && (tries < 300) }}.whileDo:{{
+    got = {{ e.call:'get' with:'' }}.catch:{{ |x:PeerDiedError| Async.sleep:10; nil }};
+    tries = tries + 1 }};
+(got == 'reconfigured').else:{{ ok = false; ('e3 [' + got.s + ']').print }};
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_passes("exthook", &script, &[], false);
+}
+
+#[test]
+fn restart_hook_manual_replace_clear_and_poison() {
+    // One script, three laws: a MANUAL serviceRestart runs the hook too (it
+    // is part of restart, not of the policy); re-set replaces and nil clears;
+    // and a poison hook fails every supervised attempt, spending the budget
+    // to the typed #gaveUp instead of serving a half-set-up incarnation.
+    let script = r#"
+var ok = true;
+var svc = Worker.host:'@kaboom.qn@' with:{ Kaboom.new } backing:'process';
+svc.serviceOnRestart:{ |s| [IO]File.append:'A' to:'@phasefile@' };
+svc.serviceOnRestart:{ |s| [IO]File.append:'B' to:'@phasefile@' };
+{ svc.boom }.catch:{ |e:PeerDiedError| nil };
+svc.serviceRestart;
+(svc.ping == 'pong').else:{ ok = false; 'e1'.print };
+(([IO]File.read:'@phasefile@') == 'B').else:{ ok = false; 'e2'.print };
+svc.serviceOnRestart:nil;
+{ svc.boom }.catch:{ |e:PeerDiedError| nil };
+svc.serviceRestart;
+(svc.ping == 'pong').else:{ ok = false; 'e3'.print };
+(([IO]File.read:'@phasefile@') == 'B').else:{ ok = false; 'e4'.print };
+var svc2 = Worker.host:'@kaboom.qn@' with:{ Kaboom.new } backing:'process';
+svc2.serviceSupervise:((Supervise.always.backoff:5 cap:10).max:1 within:60000);
+svc2.serviceOnRestart:{ |s| 'poison'.throw };
+{ svc2.boom }.catch:{ |e:PeerDiedError| nil };
+var g = { svc2.ping }.catch:{ |e:PeerDiedError| e.reason };
+(g == #gaveUp).else:{ ok = false; ('e5 [' + g.s + ']').print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let kaboom = r#"
+Kaboom <- {
+    ping -> { 'pong' }
+    boom -> { VM.abort }
+}
+"#;
+    assert_passes("hookmisc", script, &[("kaboom.qn", kaboom)], false);
+}

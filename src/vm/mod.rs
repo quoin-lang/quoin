@@ -761,13 +761,6 @@ pub struct VmState<'gc> {
     /// `src/handle_table.rs` / `docs/internal/FUTURE_EXT_ARCH.md` §2.
     pub handle_table: crate::handle_table::HandleTable<'gc>,
 
-    /// WORKER-side hosted-object table (`ACTOR_OBJECTS.md` §2): the objects this
-    /// worker hosts for its parent, keyed by the id in `Call.recv` /
-    /// `CallReturnResource.resource` (index + 1; 0 is never issued). A GC root set,
-    /// like `handle_table` — a hosted object lives until the parent's proxy drop
-    /// releases it (`Call.releases`) or the serve loop ends. Always empty outside
-    /// `Worker.hostServe:`.
-    pub hosted: Vec<Option<Value<'gc>>>,
     /// Installed hosted-service classes (ACTOR_OBJECTS.md §2 manifests), keyed
     /// by (worker link, class name) — deliberately unbound as globals; this
     /// registry is their GC root (and, through their method nodes, the
@@ -783,16 +776,20 @@ pub struct VmState<'gc> {
     /// later returns of the same class carry only the name.
     #[collect(require_static)]
     pub hosted_announced: std::collections::HashSet<String>,
-    /// The per-peer lifecycle events Channels, indexed like `vm.io.lives`
-    /// (SUPERVISION.md slice 1): the GC root and the ask-twice cache — a
-    /// second `events` ask answers the SAME channel (one consumer stream per
-    /// peer). `None` until asked.
-    pub life_channels: Vec<Option<Value<'gc>>>,
-    /// Channel values retained by service respawn recipes (SUPERVISION.md
-    /// slice 2): everything else in a recipe is plain data, but a channel arg
-    /// must be re-shipped as a VALUE at restart — this is its GC root. One
-    /// slot per recipe that has channel args, indexed by `ServiceRecipe`.
-    pub recipe_chans: Vec<Option<Vec<Value<'gc>>>>,
+    /// The generic traced side table for native features that must retain a
+    /// `Value` long-term (`src/pin_table.rs`): untraced native state stores a
+    /// plain `PinId` instead of growing its own `VmState` root field. Holds
+    /// the per-peer lifecycle events Channels (SUPERVISION.md slice 1, cached
+    /// via `life_channel_pins`), service-recipe channel args (slice 2),
+    /// restart hooks, and the WORKER-side hosted-object table
+    /// (ACTOR_OBJECTS.md §2 — owner kind "hosted", wire id = slot + 1; see
+    /// `hosted_insert` in `vm/call.rs`).
+    pub pins: crate::pin_table::PinTable<'gc>,
+    /// The ask-twice cache over `pins` for lifecycle events Channels, keyed
+    /// by `vm.io.lives` index: a second `events` ask answers the SAME channel
+    /// (one consumer stream per peer).
+    #[collect(require_static)]
+    pub life_channel_pins: rustc_hash::FxHashMap<usize, crate::pin_table::PinId>,
 }
 
 pub enum VmStatus<'gc> {
@@ -949,9 +946,8 @@ impl<'gc> VmState<'gc> {
             },
             options,
             handle_table: crate::handle_table::HandleTable::new(),
-            hosted: Vec::new(),
-            life_channels: Vec::new(),
-            recipe_chans: Vec::new(),
+            pins: crate::pin_table::PinTable::default(),
+            life_channel_pins: rustc_hash::FxHashMap::default(),
             service_classes: Vec::new(),
             pending_host_block: None,
             hosted_announced: std::collections::HashSet::new(),
