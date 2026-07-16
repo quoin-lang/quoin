@@ -1330,6 +1330,29 @@ pub fn build_worker_class() -> NativeClassBuilder {
              (kqueue/pidfd -- observation, never a reap) and record the death. Armed once \
              per extension by the first `events` ask; not a user-facing surface.",
         )
+        .class_method("superviseService:", |vm, mc, _receiver, args| {
+            let svc = *args.first().ok_or_else(|| {
+                QuoinError::Other("Worker.superviseService: expects a service proxy".into())
+            })?;
+            crate::runtime::worker_service::supervise_service_loop(vm, mc, svc)
+        })
+        .doc(
+            "Internal (SUPERVISION.md slice 3): the per-service supervisor loop -- parks on \
+             the peer's terminal, runs the policy's restart cycle, gives up when the budget \
+             is spent. Spawned once per `serviceSupervise:` by the `SuperviseBoot` helper; \
+             not a user-facing surface.",
+        )
+        .class_method("superviseExtension:", |vm, mc, _receiver, args| {
+            let ext = *args.first().ok_or_else(|| {
+                QuoinError::Other("Worker.superviseExtension: expects an Extension".into())
+            })?;
+            crate::runtime::extension::supervise_extension_loop(vm, mc, ext)
+        })
+        .doc(
+            "Internal (SUPERVISION.md slice 3): the per-extension supervisor loop -- the \
+             `superviseService:` twin over `Extension.restart`'s machinery, re-arming the \
+             exit watch for each new incarnation. Not a user-facing surface.",
+        )
         // ---- worker side (class-side lanes, live only inside a worker) ----
         .class_method("receive", |vm, mc, _receiver, _args| {
             let Some(link) = vm.worker_link.as_ref() else {

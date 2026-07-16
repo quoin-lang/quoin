@@ -36,6 +36,7 @@ fn assert_passes(name: &str, script: &str, units: &[(&str, &str)], kill_via_pidf
         script = script.replace("@pidfile@", pidfile.to_str().unwrap());
         let phasefile = dir.join("phase.txt");
         script = script.replace("@phasefile@", phasefile.to_str().unwrap());
+        script = script.replace("@dir@", dir.to_str().unwrap());
         let main_path = dir.join("main.qn");
         std::fs::write(&main_path, &script).unwrap();
 
@@ -458,4 +459,95 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_passes("extstale", &script, &[], true);
+}
+
+#[test]
+fn supervised_service_restarts_itself() {
+    // Slice 3: with a policy attached, a hard death needs NO manual restart —
+    // the in-flight call errors typed (rule 4: never replayed), the very next
+    // send parks through the supervisor's backoff+respawn (rule 5) and lands
+    // on the new incarnation. Manual serviceRestart refuses: the policy owns
+    // the cycle.
+    let script = r#"
+var svc = Worker.host:'@kaboom.qn@' with:{ Kaboom.new } backing:'process';
+svc.serviceSupervise:(Supervise.always.backoff:10 cap:50);
+var ok = true;
+var early = { svc.serviceRestart; 'no' }.catch:{ |e| 'policy-owns' };
+(early == 'policy-owns').else:{ ok = false; 'e1'.print };
+var pid = ((VM.ps.at:'workers').at:0).at:'pid';
+[IO]File.write:pid.s to:'@pidfile@.tmp';
+[IO]File.rename:'@pidfile@.tmp' to:'@pidfile@';
+var t1 = { svc.sleepLong }.catch:{ |e:PeerDiedError| 'died-typed' };
+(t1 == 'died-typed').else:{ ok = false; 'e2'.print };
+(svc.ping == 'pong').else:{ ok = false; 'e3'.print };
+var two = nil;
+VM.peers.each:{ |p| (((p.at:'kind') == 'hosted') && ((p.at:'incarnation') == 2)).if:{
+    two = p.at:'status' } };
+(two == 'running').else:{ ok = false; 'e4'.print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let kaboom = r#"
+Kaboom <- {
+    sleepLong -> { Async.sleep:60000; 'unreachable' }
+    ping -> { 'pong' }
+}
+"#;
+    assert_passes("supervised", script, &[("kaboom.qn", kaboom)], true);
+}
+
+#[test]
+fn supervised_extension_gives_up_at_the_budget() {
+    // Rule 7, fully deterministic (each `crash` call is a death, no harness
+    // kill needed): two deaths restart inside the budget of max 2; the third
+    // exceeds it — the supervisor GIVES UP, later calls raise the typed
+    // #gaveUp, and the roster's last incarnation says 'gaveUp'.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
+    let script = format!(
+        r#"
+var e = Extension.spawn:'{ext_bin}';
+e.supervise:((Supervise.always.backoff:5 cap:10).max:2 within:60000);
+var ok = true;
+var c1 = {{ e.call:'crash' with:'' }}.catch:{{ |x:PeerDiedError| 'died' }};
+(c1 == 'died').else:{{ ok = false; 'e1'.print }};
+Async.sleep:100;
+((e.call:'ping' with:'') == 'pong').else:{{ ok = false; 'e2'.print }};
+var c2 = {{ e.call:'crash' with:'' }}.catch:{{ |x:PeerDiedError| 'died' }};
+(c2 == 'died').else:{{ ok = false; 'e3'.print }};
+Async.sleep:100;
+((e.call:'ping' with:'') == 'pong').else:{{ ok = false; 'e4'.print }};
+var c3 = {{ e.call:'crash' with:'' }}.catch:{{ |x:PeerDiedError| 'died' }};
+(c3 == 'died').else:{{ ok = false; 'e5'.print }};
+Async.sleep:200;
+var after = {{ e.call:'ping' with:'' }}.catch:{{ |x:PeerDiedError|
+    (x.reason == #gaveUp).if:{{ 'gave-up' }} else:{{ 'wrong-reason' }} }};
+(after == 'gave-up').else:{{ ok = false; ('e6 ' + after).print }};
+var st = nil;
+VM.peers.each:{{ |p| ((p.at:'status') == 'gaveUp').if:{{ st = p.at:'incarnation' }} }};
+(st == 3).else:{{ ok = false; 'e7'.print }};
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_passes("giveup", &script, &[], false);
+}
+
+#[test]
+fn package_toml_supervision_keys_attach() {
+    // §10.5: package extensions declare their policy in quoin.toml — the
+    // loader attaches it (watch armed, supervisor spawned) with no call site
+    // anywhere. A crash respawns without user code.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
+    let toml = format!(
+        "[package]\nname = \"crashpkg\"\n\n[extension]\ncommand = \"{ext_bin}\"\n\
+         restart = \"always\"\nbackoff-ms = 5\ncap-ms = 10\n"
+    );
+    let script = r#"
+var e = Extension.loadPackage:'@dir@';
+var ok = true;
+var c1 = { e.call:'crash' with:'' }.catch:{ |x:PeerDiedError| 'died' };
+(c1 == 'died').else:{ ok = false; 'e1'.print };
+Async.sleep:100;
+((e.call:'ping' with:'') == 'pong').else:{ ok = false; 'e2'.print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_passes("pkgtoml", script, &[("quoin.toml", &toml)], false);
 }

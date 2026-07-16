@@ -30,6 +30,24 @@ under **Changed**, with the migration.
   owner-side roots released — a later `send:` reaches a live receiver instead
   of vanishing into the closed lane.
 
+- **Supervision policies — automatic restart with a circuit breaker**
+  (SUPERVISION.md slice 3, closing arc 3's runtime surface). Attach a policy
+  post-spawn — `svc.serviceSupervise:(Supervise.always)` on a hosted worker,
+  `e.supervise:` on an extension, or `quoin.toml [extension]` keys
+  (`restart = "always"`, `backoff-ms`, `cap-ms`, `max-restarts`, `window-ms`)
+  for package extensions — and every *death* (never an error, never a stop)
+  triggers an automatic respawn from the frozen recipe, with delays doubling
+  from `backoff` to `cap`. Sends arriving during the cycle park and land on
+  the new incarnation (the in-flight call at death time still errors typed:
+  nothing is ever replayed). More than `max` deaths inside `window` ms and the
+  peer **gives up permanently** — the circuit breaker: calls raise
+  `PeerDiedError` with the new reason `#gaveUp`, and `VM.peers` shows the
+  final incarnation as `gaveUp`. `Supervise` is plain immutable data
+  (`Supervise.always`, refined via `backoff:cap:` and `max:within:`);
+  supervised extensions get the exit watch armed automatically, so idle
+  crashes restart too. Manual `serviceRestart`/`restart` refuse on a
+  supervised peer — the policy owns the budget.
+
 - **`serviceRestart` — manual restart of a dead hosted worker** (SUPERVISION.md
   slice 2, the respawn mechanics; policy automation is the next slice). A hosted
   worker's spawn is a frozen recipe — the portable block's captures froze when

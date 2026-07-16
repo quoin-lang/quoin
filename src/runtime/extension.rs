@@ -431,6 +431,12 @@ pub struct NativeExtension {
     /// The current incarnation (bumped by a successful `restart`); stale
     /// resources name it in their error.
     incarnation: u64,
+    /// The supervision policy (SUPERVISION.md slice 3), attached post-spawn
+    /// via `supervise:` or the package's `quoin.toml [extension]` keys.
+    policy: Option<crate::runtime::supervise::SupervisePolicy>,
+    /// The policy's budget is spent: permanently dead this process — the
+    /// circuit breaker. Calls fail with the typed `#gaveUp`.
+    gave_up: bool,
 }
 
 /// An extension's frozen respawn recipe (SUPERVISION.md slice 2, rule 2):
@@ -1279,6 +1285,9 @@ struct ExtCall {
     object_id: u64,
     ext_id: u64,
     dead: bool,
+    /// The supervision budget is spent (slice 3): the dead check raises the
+    /// typed `#gaveUp` instead of `#exited`.
+    gave_up: bool,
     /// Shared reap queue — to flush dropped-resource releases and to clone into a returned resource.
     resource_reap: Rc<RefCell<Vec<u64>>>,
     /// The dropped-resource ids drained from the reap queue, flushed to the extension as this
@@ -1379,6 +1388,7 @@ fn ext_prelude<'gc>(
                 object_id,
                 ext_id: e.ext_id,
                 dead: e.dead,
+                gave_up: e.gave_up,
                 resource_reap: e.resource_reap.clone(),
                 releases: e.resource_reap.borrow_mut().drain(..).collect(),
                 stats: e.stats.clone(),
@@ -1440,6 +1450,13 @@ fn run_extension_method<'gc>(
     if ctx.dead {
         ext_end_call(vm, mc, receiver, ctx.object_id);
         let peer = ctx.stats.borrow().peer.clone();
+        if ctx.gave_up {
+            return Err(QuoinError::peer_died(
+                peer.clone(),
+                crate::error::PeerDeathReason::GaveUp,
+                format!("`{peer}` gave up — its supervision budget is spent"),
+            ));
+        }
         return Err(extension_dead_error(&peer, "already exited"));
     }
     // Serialize the optional structured-value payload before opening the call (this extension's
@@ -1565,6 +1582,13 @@ pub fn dispatch_ext_method<'gc>(
     if ctx.dead {
         ext_end_call(vm, mc, ext, ctx.object_id);
         let peer = ctx.stats.borrow().peer.clone();
+        if ctx.gave_up {
+            return Err(QuoinError::peer_died(
+                peer.clone(),
+                crate::error::PeerDeathReason::GaveUp,
+                format!("`{peer}` gave up — its supervision budget is spent"),
+            ));
+        }
         return Err(extension_dead_error(&peer, "already exited"));
     }
     // The method arguments are routed by `extension_call` (ext-class mode) into the ordered
@@ -1894,6 +1918,8 @@ fn finish_ext_spawn<'gc>(
                 lanes,
             }),
             incarnation: 1,
+            policy: None,
+            gave_up: false,
         },
     );
     Ok((ext_val, manifest))
@@ -1934,6 +1960,10 @@ struct PackageSpec {
     /// `[extension].namespace`, or PascalCase of the directory name — the namespace every provided
     /// class is installed under (§4).
     namespace: String,
+    /// The `[extension]` supervision keys (SUPERVISION.md slice 3): `restart =
+    /// "always"` opts in; `backoff-ms` / `cap-ms` / `max-restarts` /
+    /// `window-ms` refine the defaults. Package-declared only in v1 (§10.5).
+    supervise: Option<crate::runtime::supervise::SupervisePolicy>,
 }
 
 /// Read and parse `<dir>/quoin.toml` into a [`PackageSpec`] (v1: `[package].name` + the
@@ -1992,11 +2022,67 @@ fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
         .map(String::from)
         .unwrap_or_else(|| pascal_case(dir_name));
 
+    // The supervision keys (slice 3): opt-in via `restart = "always"`;
+    // anything else (or absence) is fail-fast. Refinements apply only when
+    // opted in — a stray `backoff-ms` under `restart = "never"` is an error,
+    // not a silent no-op.
+    let restart_mode = ext.get("restart").and_then(|v| v.as_str());
+    let tuning_key = ["backoff-ms", "cap-ms", "max-restarts", "window-ms"]
+        .iter()
+        .find(|k| ext.get(**k).is_some());
+    let supervise = match restart_mode {
+        Some("always") => {
+            let mut p = crate::runtime::supervise::SupervisePolicy::default();
+            let read = |key: &str, min: i64| -> Result<Option<u64>, QuoinError> {
+                match ext.get(key) {
+                    None => Ok(None),
+                    Some(v) => match v.as_integer() {
+                        Some(n) if n >= min => Ok(Some(n as u64)),
+                        _ => Err(QuoinError::Other(format!(
+                            "Extension loadPackage: [extension] {key} must be an integer >= {min}"
+                        ))),
+                    },
+                }
+            };
+            if let Some(n) = read("backoff-ms", 0)? {
+                p.backoff_ms = n;
+            }
+            if let Some(n) = read("cap-ms", 1)? {
+                p.cap_ms = n;
+            }
+            if let Some(n) = read("max-restarts", 1)? {
+                p.max_restarts = n as u32;
+            }
+            if let Some(n) = read("window-ms", 1)? {
+                p.window_ms = n;
+            }
+            Some(p)
+        }
+        Some("never") | None => {
+            if restart_mode.is_none()
+                && let Some(k) = tuning_key
+            {
+                return Err(QuoinError::Other(format!(
+                    "Extension loadPackage: [extension] {k} without `restart = \"always\"` \
+                     does nothing — add the opt-in or drop the key"
+                )));
+            }
+            None
+        }
+        Some(other) => {
+            return Err(QuoinError::Other(format!(
+                "Extension loadPackage: [extension] restart = \"{other}\" is not a mode \
+                 (always|never)"
+            )));
+        }
+    };
+
     Ok(PackageSpec {
         name,
         command,
         args,
         namespace,
+        supervise,
     })
 }
 
@@ -2107,7 +2193,220 @@ fn load_package<'gc>(
 
     let ext_val = vm.pop()?;
     vm.modules.packages.borrow_mut(mc).insert(key, ext_val);
+    // The `[extension]` supervision keys (slice 3): package-declared policy
+    // attaches exactly like `e.supervise:` would — watch armed, supervisor
+    // spawned. The package cache above keeps `ext_val` rooted for its life.
+    if let Some(policy) = spec.supervise {
+        attach_extension_policy(vm, mc, ext_val, policy, "Extension loadPackage")?;
+    }
     Ok(ext_val)
+}
+
+/// The respawn body shared by the manual `restart` and the supervisor
+/// (SUPERVISION.md slices 2–3): spawn from the frozen recipe, gate the
+/// manifest (rule 9 — the installed classes must stay truthful, selector for
+/// selector, lane for lane; a mismatch abandons the fresh child), clean the
+/// dead incarnation's residue, and rebind the handle IN PLACE.
+fn extension_restart_attempt<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    recipe: &Rc<ExtRecipe>,
+    old_ext_id: u64,
+    inc: u64,
+    peer: &str,
+) -> Result<(), QuoinError> {
+    let spawned = spawn_ext_process(vm, &recipe.command, &recipe.args, recipe.cwd.as_deref())?;
+    if spawned.manifest != recipe.manifest || spawned.lanes != recipe.lanes {
+        spawned.abandon(vm);
+        return Err(QuoinError::Other(format!(
+            "Extension.restart: the new incarnation's manifest does not match the \
+             installed classes of `{peer}` — the extension changed underfoot; \
+             refusing to rebind (SUPERVISION.md §4 rule 9)"
+        )));
+    }
+    // The dead incarnation's residue: release its host-value handles
+    // (an idle death had no failing call to do it).
+    vm.handle_table.release_for_ext(old_ext_id);
+    // Per-incarnation rows: fresh claims and a fresh lifecycle sink
+    // (`e.events` re-asked answers the new incarnation's stream).
+    let next = inc + 1;
+    let label = format!("{peer} (incarnation {next})");
+    let claims = Rc::new(RefCell::new(PeerClaims::new(label, recipe.lanes)));
+    vm.io.claim_peers.borrow_mut().push(claims.clone());
+    let life = crate::runtime::lifecycle::LifeSink::new(
+        peer.to_string(),
+        "extension",
+        "process",
+        Some(spawned.child.id()),
+    );
+    life.incarnation
+        .store(next, std::sync::atomic::Ordering::Relaxed);
+    let new_life_idx = {
+        let lives = vm.io.lives.clone();
+        let mut lives = lives.borrow_mut();
+        lives.push(life.clone());
+        lives.len() - 1
+    };
+    // Rebind IN PLACE: same value, same installed classes, fresh
+    // transport. The old reap queue is the dead incarnation's
+    // identity — its resources go #staleIncarnation by pointer
+    // mismatch; the old lane fds reap; the old socket file goes.
+    receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+            let old_socks = std::mem::replace(&mut e.socks, spawned.socks.clone());
+            e.reap.borrow_mut().extend(old_socks);
+            let _ = std::fs::remove_file(&e.sock_path);
+            e.free_socks = spawned.socks;
+            e.convs.clear();
+            e.claims = claims;
+            e.next_pseudo = 0;
+            e.ext_id = unique_ext_id();
+            e.child = spawned.child;
+            e.sock_path = spawned.sock_path;
+            e.dead = false;
+            e.resource_reap = Rc::new(RefCell::new(Vec::new()));
+            e.life = life;
+            e.life_idx = new_life_idx;
+            e.incarnation = next;
+        })
+        .map_err(QuoinError::Other)?;
+    Ok(())
+}
+
+/// Attach a supervision policy to a live extension (SUPERVISION.md slice 3):
+/// store it, arm the exit watch — supervised children get watches, §5 — and
+/// spawn the supervisor task. Shared by `e.supervise:` and the package
+/// loader's `quoin.toml [extension]` keys.
+pub(crate) fn attach_extension_policy<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    policy: crate::runtime::supervise::SupervisePolicy,
+    what: &str,
+) -> Result<(), QuoinError> {
+    let (already, life_idx, peer) = receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+            let already = e.policy.is_some();
+            if !already {
+                e.policy = Some(policy);
+            }
+            (already, e.life_idx, e.stats.borrow().peer.clone())
+        })
+        .map_err(QuoinError::Other)?;
+    if already {
+        return Err(QuoinError::Other(format!(
+            "{what}: `{peer}` is already supervised"
+        )));
+    }
+    arm_exit_watch(vm, mc, life_idx)?;
+    let boot = resolve_global(vm, "SuperviseBoot").ok_or_else(|| {
+        QuoinError::Other(format!("{what}: SuperviseBoot is not installed (qnlib)"))
+    })?;
+    vm.call_method(mc, boot, "extension:", vec![receiver])?;
+    Ok(())
+}
+
+/// Arm the pid exit watch for the peer at `life_idx` (idempotent per sink):
+/// idle deaths must wake the events pump and the supervisor alike.
+fn arm_exit_watch<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    life_idx: usize,
+) -> Result<(), QuoinError> {
+    let sink = vm.io.lives.borrow().get(life_idx).cloned();
+    if let Some(sink) = sink
+        && sink.pid.is_some()
+        && !sink.is_terminal()
+        && !sink
+            .watch_armed
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        let boot = resolve_global(vm, "LifecycleBoot").ok_or_else(|| {
+            QuoinError::Other("exit watch: LifecycleBoot is not installed (qnlib)".into())
+        })?;
+        let idx_val = vm.new_int(mc, life_idx as i64);
+        vm.call_method(mc, boot, "watch:", vec![idx_val])?;
+    }
+    Ok(())
+}
+
+/// The per-extension supervisor (the `supervise_service_loop` twin): park on
+/// the sink's terminal, run the restart cycle with backoff, re-arm the exit
+/// watch for each new incarnation, and set the give-up state when the budget
+/// is spent — the package circuit breaker. Extensions have no restart gate:
+/// sends in the window fail fast typed (the recorded slice-2 residue).
+pub(crate) fn supervise_extension_loop<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    ext: Value<'gc>,
+) -> Result<Value<'gc>, QuoinError> {
+    let mut deaths: Vec<Instant> = Vec::new();
+    loop {
+        let (life_idx, policy, recipe, ext_id, inc, peer) = ext
+            .with_native_state::<NativeExtension, _, _>(|e| {
+                (
+                    e.life_idx,
+                    e.policy,
+                    e.recipe.clone(),
+                    e.ext_id,
+                    e.incarnation,
+                    e.stats.borrow().peer.clone(),
+                )
+            })
+            .map_err(QuoinError::Other)?;
+        let Some(policy) = policy else {
+            return Ok(vm.new_nil(mc));
+        };
+        let Some(sink) = vm.io.lives.borrow().get(life_idx).cloned() else {
+            return Ok(vm.new_nil(mc));
+        };
+        let watch_rx = sink.watch();
+        match vm.await_io(IoRequest::WorkerRecv(watch_rx))? {
+            IoResult::WorkerMsg(_) => {}
+            other => {
+                return Err(QuoinError::Other(format!(
+                    "supervisor: unexpected result {other:?}"
+                )));
+            }
+        }
+        match sink.status() {
+            crate::runtime::lifecycle::LifeStatus::Stopped(_) => return Ok(vm.new_nil(mc)),
+            crate::runtime::lifecycle::LifeStatus::Running => continue,
+            crate::runtime::lifecycle::LifeStatus::Died { .. } => {}
+        }
+        deaths.push(Instant::now());
+        let mut attempt: u32 = 0;
+        let window = std::time::Duration::from_millis(policy.window_ms);
+        let gave_up = loop {
+            deaths.retain(|t| t.elapsed() <= window);
+            if deaths.len() as u32 > policy.max_restarts {
+                break true;
+            }
+            attempt += 1;
+            let delay = policy.delay_ms(attempt);
+            if delay > 0 {
+                vm.await_io(IoRequest::Sleep { ms: delay })?;
+            }
+            match extension_restart_attempt(vm, mc, ext, &recipe, ext_id, inc, &peer) {
+                Ok(()) => break false,
+                Err(_) => deaths.push(Instant::now()),
+            }
+        };
+        if gave_up {
+            let _ = ext.with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+                e.gave_up = true;
+            });
+            sink.gave_up
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Ok(vm.new_nil(mc));
+        }
+        // Success: the new incarnation needs its own exit watch.
+        let new_idx = ext
+            .with_native_state::<NativeExtension, _, _>(|e| e.life_idx)
+            .map_err(QuoinError::Other)?;
+        arm_exit_watch(vm, mc, new_idx)?;
+    }
 }
 
 pub fn build_extension_class() -> NativeClassBuilder {
@@ -2217,65 +2516,20 @@ pub fn build_extension_class() -> NativeClassBuilder {
                     )));
                 }
             }
-            // Respawn from the frozen recipe; gate the manifest (rule 9) —
-            // the installed classes must stay truthful, selector for
-            // selector, lane for lane.
-            let spawned =
-                spawn_ext_process(vm, &recipe.command, &recipe.args, recipe.cwd.as_deref())?;
-            if spawned.manifest != recipe.manifest || spawned.lanes != recipe.lanes {
-                spawned.abandon(vm);
+            let supervised = receiver
+                .with_native_state::<NativeExtension, _, _>(|e| (e.policy.is_some(), e.gave_up))
+                .map_err(QuoinError::Other)?;
+            if supervised.1 {
                 return Err(QuoinError::Other(format!(
-                    "Extension.restart: the new incarnation's manifest does not match the \
-                     installed classes of `{peer}` — the extension changed underfoot; \
-                     refusing to rebind (SUPERVISION.md §4 rule 9)"
+                    "Extension.restart: `{peer}` gave up — permanently dead this process"
                 )));
             }
-            // The dead incarnation's residue: release its host-value handles
-            // (an idle death had no failing call to do it).
-            vm.handle_table.release_for_ext(old_ext_id);
-            // Per-incarnation rows: fresh claims and a fresh lifecycle sink
-            // (`e.events` re-asked answers the new incarnation's stream).
-            let next = inc + 1;
-            let label = format!("{peer} (incarnation {next})");
-            let claims = Rc::new(RefCell::new(PeerClaims::new(label, recipe.lanes)));
-            vm.io.claim_peers.borrow_mut().push(claims.clone());
-            let life = crate::runtime::lifecycle::LifeSink::new(
-                peer,
-                "extension",
-                "process",
-                Some(spawned.child.id()),
-            );
-            life.incarnation
-                .store(next, std::sync::atomic::Ordering::Relaxed);
-            let new_life_idx = {
-                let lives = vm.io.lives.clone();
-                let mut lives = lives.borrow_mut();
-                lives.push(life.clone());
-                lives.len() - 1
-            };
-            // Rebind IN PLACE: same value, same installed classes, fresh
-            // transport. The old reap queue is the dead incarnation's
-            // identity — its resources go #staleIncarnation by pointer
-            // mismatch; the old lane fds reap; the old socket file goes.
-            receiver
-                .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
-                    let old_socks = std::mem::replace(&mut e.socks, spawned.socks.clone());
-                    e.reap.borrow_mut().extend(old_socks);
-                    let _ = std::fs::remove_file(&e.sock_path);
-                    e.free_socks = spawned.socks;
-                    e.convs.clear();
-                    e.claims = claims;
-                    e.next_pseudo = 0;
-                    e.ext_id = unique_ext_id();
-                    e.child = spawned.child;
-                    e.sock_path = spawned.sock_path;
-                    e.dead = false;
-                    e.resource_reap = Rc::new(RefCell::new(Vec::new()));
-                    e.life = life;
-                    e.life_idx = new_life_idx;
-                    e.incarnation = next;
-                })
-                .map_err(QuoinError::Other)?;
+            if supervised.0 {
+                return Err(QuoinError::Other(format!(
+                    "Extension.restart: `{peer}` is supervised — the policy owns its restarts"
+                )));
+            }
+            extension_restart_attempt(vm, mc, receiver, &recipe, old_ext_id, inc, &peer)?;
             Ok(vm.new_nil(mc))
         })
         .doc(
@@ -2287,6 +2541,37 @@ pub fn build_extension_class() -> NativeClassBuilder {
              the dead incarnation are permanently stale (`PeerDiedError` with reason \
              `#staleIncarnation`); recreate them from the current incarnation. \
              `events` re-asked after a restart answers the new incarnation's stream.",
+        )
+        .instance_method("supervise:", |vm, mc, receiver, args| {
+            let arg = *args.first().ok_or_else(|| {
+                QuoinError::Other("Extension.supervise: expects a Supervise policy".into())
+            })?;
+            let parsed =
+                crate::runtime::supervise::parse_policy(vm, mc, arg, "Extension.supervise:")?;
+            let Some(policy) = parsed else {
+                let supervised = receiver
+                    .with_native_state::<NativeExtension, _, _>(|e| e.policy.is_some())
+                    .map_err(QuoinError::Other)?;
+                if supervised {
+                    return Err(QuoinError::Other(
+                        "Extension.supervise: already supervised — detaching is not \
+                         supported (v1)"
+                            .into(),
+                    ));
+                }
+                return Ok(vm.new_nil(mc));
+            };
+            attach_extension_policy(vm, mc, receiver, policy, "Extension.supervise:")?;
+            Ok(vm.new_nil(mc))
+        })
+        .doc(
+            "Attach a Supervise policy (SUPERVISION.md): every DEATH of this extension -- \
+             crash, kill, idle exit (an exit watch arms with the policy) -- triggers an \
+             automatic respawn from the frozen recipe with exponential backoff, until more \
+             than the policy's `max` deaths land inside its `window` -- then it GIVES UP \
+             permanently (the circuit breaker) and calls raise `PeerDiedError` with reason \
+             `#gaveUp`. Stops are instructions, never restarted. Attach once; package \
+             extensions attach via `quoin.toml [extension]` keys instead.",
         )
         // `Extension loadPackage: '<dir>'` -> load an extension *package* (a folder with an
         // `quoin.toml` launch/identity spec + an optional `init.qn` of Quoin-side glue;

@@ -70,6 +70,15 @@ pub struct LifeSink {
     /// For extensions: the exit watch task has been armed (armed once, on the
     /// first `events` ask — unwatched peers pay nothing).
     pub watch_armed: AtomicBool,
+    /// Terminal-notification lanes for supervisors (SUPERVISION.md slice 3):
+    /// each `watch()` mints one; the terminal broadcast drains them (single
+    /// shot — a supervisor re-watches the NEXT incarnation's sink). Separate
+    /// from the staging so the user's events channel stays single-consumer.
+    watchers: Mutex<Vec<async_channel::Sender<WorkerMsg>>>,
+    /// Set by a supervisor that exhausted its restart budget: `VM.peers`
+    /// renders this (dead) incarnation's status as 'gaveUp' — strictly more
+    /// informative than 'died', not a second terminal.
+    pub gave_up: AtomicBool,
     /// Which incarnation this sink belongs to (SUPERVISION.md slice 2): a
     /// restart mints a FRESH sink — the terminal closed this one's stream —
     /// so `VM.peers` shows one row per incarnation. Stamped by the restart
@@ -96,6 +105,8 @@ impl LifeSink {
             status: Mutex::new(LifeStatus::Running),
             terminal: AtomicBool::new(false),
             watch_armed: AtomicBool::new(false),
+            watchers: Mutex::new(Vec::new()),
+            gave_up: AtomicBool::new(false),
             incarnation: AtomicU64::new(1),
             dropped: AtomicU64::new(0),
         });
@@ -110,7 +121,9 @@ impl LifeSink {
             return;
         }
         *self.status.lock().expect("life status") = LifeStatus::Stopped(message.to_string());
-        self.push(self.record("stopped", None, message));
+        let record = self.record("stopped", None, message);
+        self.push(record.clone());
+        self.notify_watchers(record);
         self.tx.close();
     }
 
@@ -124,8 +137,42 @@ impl LifeSink {
             reason,
             detail: detail.to_string(),
         };
-        self.push(self.record("died", Some(reason), detail));
+        let record = self.record("died", Some(reason), detail);
+        self.push(record.clone());
+        self.notify_watchers(record);
         self.tx.close();
+    }
+
+    /// Mint a terminal-notification lane (SUPERVISION.md slice 3): delivers
+    /// exactly the terminal event record, once — immediately if the terminal
+    /// already happened (a supervisor attaching to a corpse must still wake).
+    pub fn watch(&self) -> async_channel::Receiver<WorkerMsg> {
+        let (tx, rx) = async_channel::bounded(1);
+        // Decide enroll-vs-immediate UNDER the watchers lock: an emitter's
+        // notify (which drains this list) always runs after its status write,
+        // so a Running status observed here guarantees a later notify sees
+        // our entry — no window where the terminal slips between the check
+        // and the push.
+        let mut watchers = self.watchers.lock().expect("life watchers");
+        let already = match self.status() {
+            LifeStatus::Running => None,
+            LifeStatus::Stopped(m) => Some(self.record("stopped", None, &m)),
+            LifeStatus::Died { reason, detail } => Some(self.record("died", Some(reason), &detail)),
+        };
+        match already {
+            Some(record) => {
+                drop(watchers);
+                let _ = tx.try_send(WorkerMsg::Data(record));
+            }
+            None => watchers.push(tx),
+        }
+        rx
+    }
+
+    fn notify_watchers(&self, record: WireData) {
+        for tx in self.watchers.lock().expect("life watchers").drain(..) {
+            let _ = tx.try_send(WorkerMsg::Data(record.clone()));
+        }
     }
 
     pub fn is_terminal(&self) -> bool {

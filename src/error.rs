@@ -69,6 +69,10 @@ pub enum PeerDeathReason {
     /// and shipped channels die with their incarnation, permanently; only the
     /// root proxy rebinds.
     StaleIncarnation,
+    /// The supervision policy exhausted its restart budget (SUPERVISION.md §4
+    /// rule 7): the peer is permanently dead this process — the circuit
+    /// breaker. The message carries the attempt count and the last death.
+    GaveUp,
 }
 
 impl PeerDeathReason {
@@ -78,6 +82,7 @@ impl PeerDeathReason {
             PeerDeathReason::Exited => "exited",
             PeerDeathReason::Panicked => "panicked",
             PeerDeathReason::StaleIncarnation => "staleIncarnation",
+            PeerDeathReason::GaveUp => "gaveUp",
         }
     }
 }

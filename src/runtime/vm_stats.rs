@@ -737,8 +737,14 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                         ("running", None, String::new())
                     }
                     crate::runtime::lifecycle::LifeStatus::Stopped(m) => ("stopped", None, m),
+                    // 'gaveUp' refines 'died' (SUPERVISION.md slice 3): the
+                    // supervision budget is spent — permanently dead.
                     crate::runtime::lifecycle::LifeStatus::Died { reason, detail } => {
-                        ("died", Some(reason), detail)
+                        if sink.gave_up.load(std::sync::atomic::Ordering::Relaxed) {
+                            ("gaveUp", Some(reason), detail)
+                        } else {
+                            ("died", Some(reason), detail)
+                        }
                     }
                 };
                 let m = vec![

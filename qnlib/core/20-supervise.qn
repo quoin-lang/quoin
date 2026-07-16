@@ -1,0 +1,89 @@
+"* Supervision policy (docs/internal/SUPERVISION.md): plain, immutable data —
+"* attach one to a hosted worker with `svc.serviceSupervise:` or to an
+"* extension with `e.supervise:` (package extensions declare theirs in
+"* `quoin.toml` under `[extension]`). The runtime interprets it directly: every
+"* DEATH of the peer (a crash or kill — never an error it raised, never a stop)
+"* triggers an automatic respawn from the frozen spawn recipe, with delays
+"* doubling from `backoff` to `cap` (milliseconds); more than `max` deaths
+"* inside `window` ms and the peer GIVES UP permanently — the circuit breaker —
+"* after which calls raise `PeerDiedError` with reason #gaveUp.
+Supervise <- { |@restart @backoff @cap @max @window|
+    .meta <-- {
+        "* Restart on every death, with the defaults: backoff 100ms doubling
+        "* to a 10s cap, giving up after more than 5 deaths inside 60s.
+        "* Refine with `backoff:cap:` and `max:within:`.
+        "*
+        "* ```
+        "* Supervise.always.backoff    "* -> 100
+        "* ```
+        always -> {
+            .new:{
+                var restart = #always
+                var backoff = 100
+                var cap = 10000
+                var max = 5
+                var window = 60000
+            }
+        }
+
+        "* The explicit no-policy value: fail-fast on death (the default for
+        "* every peer — attaching this to an unsupervised peer is a no-op).
+        never -> {
+            .new:{
+                var restart = #never
+                var backoff = 0
+                var cap = 1
+                var max = 1
+                var window = 1
+            }
+        }
+    }
+
+    "* A copy with the first delay and the delay cap (both ms) replaced.
+    "*
+    "* ```
+    "* (Supervise.always.backoff:50 cap:2000).cap    "* -> 2000
+    "* ```
+    backoff:cap: -> { |b:Integer c:Integer|
+        var r = @restart
+        var m = @max
+        var w = @window
+        Supervise.new:{
+            var restart = r
+            var backoff = b
+            var cap = c
+            var max = m
+            var window = w
+        }
+    }
+
+    "* A copy with the give-up budget replaced: more than `m` deaths inside
+    "* `w` milliseconds gives up.
+    "*
+    "* ```
+    "* (Supervise.always.max:2 within:5000).max    "* -> 2
+    "* ```
+    max:within: -> { |m:Integer w:Integer|
+        var r = @restart
+        var b = @backoff
+        var c = @cap
+        Supervise.new:{
+            var restart = r
+            var backoff = b
+            var cap = c
+            var max = m
+            var window = w
+        }
+    }
+
+    "* The mode: #always (restart on death) or #never (fail fast).
+    restart -> { @restart }
+    "* The first restart delay, in milliseconds.
+    backoff -> { @backoff }
+    "* The delay ceiling the doubling stops at, in milliseconds.
+    cap -> { @cap }
+    "* The give-up budget: more than this many deaths inside `window` gives up.
+    max -> { @max }
+    "* The budget's sliding window, in milliseconds.
+    window -> { @window }
+}

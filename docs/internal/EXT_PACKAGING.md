@@ -158,7 +158,11 @@ root — see the 2026-07-13 status note. Registry/fetch remain deferred.)
   handle (the child is killed via `NativeExtension::Drop` / the reap queue on exit), and a place for
   `$packages`-style REPL introspection.
 - **No auto-respawn** if a package's extension has crashed and you `use` it again — doing that safely
-  needs a circuit breaker (avoid spawn-storms against a broken extension). Deferred.
+  needs a circuit breaker (avoid spawn-storms against a broken extension).
+  **SHIPPED (SUPERVISION.md slice 3):** `[extension]` supervision keys —
+  `restart = "always"` + `backoff-ms`/`cap-ms`/`max-restarts`/`window-ms` — restart a
+  crashed package extension with exponential backoff and give up permanently past the
+  budget (calls then raise `PeerDiedError` with reason `#gaveUp`).
 
 > Note: this depends on the I/O backend persisting across REPL evaluations (an extension spawned by
 > `use` on one line must survive to the next) — fixed by the session-persistent `VmState.io_backend`
@@ -186,7 +190,7 @@ up separately.
   building extensions out-of-tree (§13; Tier 0.5 in `docs/internal/FUTURE_EXT_ARCH.md` §9).
 - **Version / protocol-compat enforcement** — the manifest may carry a version; the host doesn't gate
   on it yet.
-- **Auto-respawn / circuit breaker** for a crashed package extension (§7).
+- **Auto-respawn / circuit breaker** for a crashed package extension (§7) — SHIPPED, see above.
 - **Signatures / supply-chain trust** (§10) — the scheme depends on how distribution works.
 - **`qn pkg` tooling** — `new` (scaffold), `build` (package the binary, emit glue), `install`, `list`,
   `info`. The manifest is kept rich enough that these are trivial later.
