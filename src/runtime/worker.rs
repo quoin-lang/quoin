@@ -25,6 +25,7 @@ use quoin_ext_proto::DataValue as WireData;
 
 use crate::error::{PeerDeathReason, QuoinError};
 use crate::io_backend::{IoRequest, IoResult};
+use crate::pin_table::PinOwner;
 use crate::runtime::extension::{value_to_wire, wire_to_value};
 use crate::runtime::lifecycle::LifeStatus;
 use crate::value::ObjectPayload;
@@ -275,24 +276,33 @@ fn start_block_worker<'gc>(
 /// creating it — and its pump task — on the first ask via the qnlib
 /// `LifecycleBoot` helper (native code mints tasks and channels only through
 /// a Quoin block). Later asks answer the SAME channel: one consumer stream
-/// per peer; `vm.life_channels` is both the cache and the GC root.
+/// per peer; the channel is rooted in `vm.pins` and cached by `life_idx` in
+/// `vm.life_channel_pins`.
 pub(crate) fn life_events_channel<'gc>(
     vm: &mut crate::vm::VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     life_idx: usize,
 ) -> Result<Value<'gc>, QuoinError> {
-    if let Some(Some(ch)) = vm.life_channels.get(life_idx) {
-        return Ok(*ch);
+    if let Some(ch) = vm
+        .life_channel_pins
+        .get(&life_idx)
+        .and_then(|pin| vm.pins.get(*pin))
+    {
+        return Ok(ch);
     }
     let boot = crate::runtime::extension::resolve_global(vm, "LifecycleBoot").ok_or_else(|| {
         QuoinError::Other("lifecycle events: LifecycleBoot is not installed (qnlib)".into())
     })?;
     let idx_val = vm.new_int(mc, life_idx as i64);
     let ch = vm.call_method(mc, boot, "start:", vec![idx_val])?;
-    if vm.life_channels.len() <= life_idx {
-        vm.life_channels.resize(life_idx + 1, None);
-    }
-    vm.life_channels[life_idx] = Some(ch);
+    let pin = vm.pins.pin(
+        PinOwner {
+            kind: "life-events",
+            id: life_idx as u64,
+        },
+        ch,
+    );
+    vm.life_channel_pins.insert(life_idx, pin);
     Ok(ch)
 }
 

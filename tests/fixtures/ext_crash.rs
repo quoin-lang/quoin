@@ -9,12 +9,23 @@
 //! The host must surface a crash/timeout as a catchable error (not a hang), mark the extension
 //! dead, and fail fast on the next call. A test/example fixture, not a shipped feature.
 
+use std::sync::Mutex;
+
+/// Ambient child-side state for the restart-hook tests: `set` stores, `get`
+/// answers (empty in a fresh incarnation — exactly what a hook re-applies).
+static STATE: Mutex<String> = Mutex::new(String::new());
+
 fn main() {
     let path = std::env::args()
         .nth(1)
         .expect("usage: ext_crash <socket-path>");
-    quoin_ext::serve(&path, |_host, op, _arg| match op {
+    quoin_ext::serve(&path, |_host, op, arg| match op {
         "ping" => "pong".to_string(),
+        "set" => {
+            *STATE.lock().unwrap() = arg.to_string();
+            "ok".to_string()
+        }
+        "get" => STATE.lock().unwrap().clone(),
         // Exit before sending a reply: the host is parked reading the response and sees EOF.
         "crash" => std::process::exit(7),
         // Never reply: block the handler so the host's read parks until it times out. (The child

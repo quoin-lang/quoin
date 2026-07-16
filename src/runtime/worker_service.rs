@@ -146,6 +146,11 @@ pub struct NativeServiceState {
     /// for the zero-gap gate close, and its presence hands restarts to the
     /// supervisor task (manual `serviceRestart` refuses).
     policy: Rc<RefCell<Option<crate::runtime::supervise::SupervisePolicy>>>,
+    /// The user's restart hook (`serviceOnRestart:`) as a `vm.pins` ticket —
+    /// ROOT PROXY ONLY, like the recipe. Runs inside every restart attempt,
+    /// after the rebind and before the gate reopens; it outlives incarnations
+    /// (rebind never touches it).
+    hook: Cell<Option<crate::pin_table::PinId>>,
 }
 
 /// The channels of the conversation a task currently has open on a worker:
@@ -167,10 +172,10 @@ const MAX_CONV_DEPTH: u32 = 16;
 /// `serviceRestart` re-runs, retained at the ORIGINAL host — the block's
 /// captures froze when it first shipped, and data/block args are the exact
 /// messages sent then, re-sent verbatim. Channel args are the one GC-bound
-/// part: their VALUES live in `vm.recipe_chans[chan_slot]` and re-ship
-/// against the new incarnation's link. The manifest fields are the rule-9
-/// equality gate: a new incarnation must present the same class or the
-/// restart refuses to rebind.
+/// part: their VALUES pin into `vm.pins` and re-ship against the new
+/// incarnation's link. The manifest fields are the rule-9 equality gate: a
+/// new incarnation must present the same class or the restart refuses to
+/// rebind.
 #[derive(Debug)]
 struct ServiceRecipe {
     /// The original claims/registry label; incarnations >1 suffix it.
@@ -180,8 +185,9 @@ struct ServiceRecipe {
     lanes: u32,
     backing: &'static str,
     args: Vec<RecipeArg>,
-    /// `vm.recipe_chans` slot holding the channel-arg values (None = none).
-    chan_slot: Option<usize>,
+    /// The channel-arg values' `vm.pins` tickets, pinned at the freeze;
+    /// `RecipeArg::Channel` indexes here.
+    chan_pins: Vec<crate::pin_table::PinId>,
     class_name: String,
     instance_selectors: Vec<String>,
     class_selectors: Vec<String>,
@@ -191,8 +197,8 @@ struct ServiceRecipe {
 enum RecipeArg {
     /// A data / portable-block arg: the spawn-time message, re-sent verbatim.
     Plain(crate::worker::WorkerMsg),
-    /// A channel arg: index into the recipe's `vm.recipe_chans` slot —
-    /// re-shipped as a VALUE so the fresh endpoint binds the new link.
+    /// A channel arg: index into the recipe's `chan_pins` — re-shipped as a
+    /// VALUE so the fresh endpoint binds the new link.
     Channel(usize),
 }
 
@@ -217,6 +223,11 @@ struct RestartGate {
     phase: GatePhase,
     /// `(task, park epoch)` — epoch identity filters cancelled waiters.
     waiters: Vec<(usize, u64)>,
+    /// The one task allowed through a `Restarting` gate: the restart hook's.
+    /// The hook runs after the rebind (the transport is live) but before the
+    /// gate reopens — its own sends to the service must dispatch, not park
+    /// behind themselves.
+    exempt: Option<usize>,
 }
 
 impl Drop for NativeServiceState {
@@ -383,6 +394,7 @@ pub(crate) fn installed_service_class<'gc>(
             ("serviceEvents", service_events),
             ("serviceRestart", service_restart),
             ("serviceSupervise:", service_supervise),
+            ("serviceOnRestart:", service_on_restart),
             ("==:", service_eq),
         ],
     );
@@ -1064,6 +1076,7 @@ fn sub_proxy<'gc>(
             restart: ctx.restart.clone(),
             recipe: None,
             policy: ctx.policy.clone(),
+            hook: Cell::new(None),
         },
     )
 }
@@ -1327,13 +1340,17 @@ fn finish_host<'gc>(
     };
     // Complete + freeze the respawn recipe (SUPERVISION.md slice 2): the
     // manifest fields double as the rule-9 equality gate; the channel-arg
-    // values get their GC root now that the host is definitely succeeding.
-    let chan_slot = if seed.chan_values.is_empty() {
-        None
-    } else {
-        vm.recipe_chans.push(Some(seed.chan_values));
-        Some(vm.recipe_chans.len() - 1)
+    // values get their GC root — a `vm.pins` ticket each — now that the host
+    // is definitely succeeding.
+    let chan_owner = crate::pin_table::PinOwner {
+        kind: "service-recipe",
+        id: chan_link as u64,
     };
+    let chan_pins = seed
+        .chan_values
+        .iter()
+        .map(|v| vm.pins.pin(chan_owner, *v))
+        .collect();
     let recipe = Rc::new(ServiceRecipe {
         label: label.clone(),
         path: seed.path,
@@ -1341,7 +1358,7 @@ fn finish_host<'gc>(
         lanes,
         backing,
         args: seed.args,
-        chan_slot,
+        chan_pins,
         class_name: class_name.clone(),
         instance_selectors: instance_selectors.clone(),
         class_selectors: class_selectors.clone(),
@@ -1373,6 +1390,7 @@ fn finish_host<'gc>(
             restart: Rc::new(RefCell::new(RestartGate::default())),
             recipe: Some(recipe),
             policy: Rc::new(RefCell::new(None)),
+            hook: Cell::new(None),
         },
     );
     vm.service_classes.push(crate::vm::ServiceClassEntry {
@@ -1391,6 +1409,7 @@ fn finish_host<'gc>(
             ("serviceEvents", service_events),
             ("serviceRestart", service_restart),
             ("serviceSupervise:", service_supervise),
+            ("serviceOnRestart:", service_on_restart),
             ("==:", service_eq),
         ],
     );
@@ -1545,7 +1564,12 @@ fn await_restart_window<'gc>(
             let mut g = restart.borrow_mut();
             match &g.phase {
                 GatePhase::Open => return Ok(()),
-                GatePhase::Restarting => g.waiters.push((me.0, epoch)),
+                GatePhase::Restarting => {
+                    if g.exempt == Some(me.0) {
+                        return Ok(());
+                    }
+                    g.waiters.push((me.0, epoch))
+                }
                 // The permanent terminal (slice 3): the policy's budget is
                 // spent — every sender gets the typed #gaveUp, forever.
                 GatePhase::GaveUp { attempts, last } => {
@@ -1734,11 +1758,9 @@ fn restart_attempt<'gc>(
             RecipeArg::Plain(m) => m.clone(),
             RecipeArg::Channel(idx) => {
                 let v = recipe
-                    .chan_slot
-                    .and_then(|slot| vm.recipe_chans.get(slot))
-                    .and_then(|slot| slot.as_ref())
-                    .and_then(|list| list.get(*idx))
-                    .copied()
+                    .chan_pins
+                    .get(*idx)
+                    .and_then(|pin| vm.pins.get(*pin))
                     .ok_or_else(|| {
                         QuoinError::Other(
                             "serviceRestart: a channel argument's recipe root vanished".into(),
@@ -1809,7 +1831,92 @@ fn restart_attempt<'gc>(
             s.incarnation.set(next);
         })
         .map_err(QuoinError::Other)?;
+    run_restart_hook(vm, mc, receiver, next)
+}
+
+/// The user's restart hook (`serviceOnRestart:`), run as the restart
+/// attempt's TAIL: after the rebind — the transport is live, so the hook can
+/// call the service — but before the gate reopens, so parked senders resume
+/// only against a hooked-up incarnation. The hook's own sends pass the closed
+/// gate through the exemption. A hook failure fails the ATTEMPT: the fresh
+/// worker is stopped cleanly (it must not serve half-set-up), the supervisor
+/// counts it against the budget, a manual restart relays it typed.
+fn run_restart_hook<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    incarnation: u64,
+) -> Result<(), QuoinError> {
+    let (hook, restart, class_name) = receiver
+        .with_native_state::<NativeServiceState, _, _>(|s| {
+            (s.hook.get(), s.restart.clone(), s.class_name.clone())
+        })
+        .map_err(QuoinError::Other)?;
+    let Some(block) = hook.and_then(|pin| vm.pins.get(pin)) else {
+        return Ok(());
+    };
+    restart.borrow_mut().exempt = Some(vm.sched.current_task.0);
+    let outcome = vm.call_method(mc, block, "value:", vec![receiver]);
+    restart.borrow_mut().exempt = None;
+    if let Err(e) = outcome {
+        // This native swallows the hook's throw, so it must also clear the
+        // in-flight exception VALUE — a stale `active` would be handed to the
+        // next `catch:` anywhere in the VM in place of its real error.
+        vm.exceptions.active = None;
+        let _ = service_stop(vm, mc, receiver, Vec::new());
+        vm.exceptions.active = None;
+        return Err(QuoinError::Other(format!(
+            "`{class_name}` restart hook (incarnation {incarnation}): {e}"
+        )));
+    }
     Ok(())
+}
+
+/// The proxy-owned `serviceOnRestart:` — install (a Block taking the root
+/// proxy), replace, or clear (nil) the restart hook. Root-only, like the
+/// recipe it complements; the block pins into `vm.pins` and survives
+/// incarnations.
+pub(crate) fn service_on_restart<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let arg = *args.first().ok_or_else(|| {
+        QuoinError::Other("serviceOnRestart: expects a Block (or nil to clear)".into())
+    })?;
+    let (has_recipe, old, life_idx) = receiver
+        .with_native_state::<NativeServiceState, _, _>(|s| {
+            (s.recipe.is_some(), s.hook.get(), s.life_idx)
+        })
+        .map_err(QuoinError::Other)?;
+    if !has_recipe {
+        return Err(QuoinError::Other(
+            "serviceOnRestart: only the root proxy holds the respawn recipe".into(),
+        ));
+    }
+    let new = if matches!(arg, Value::Nil) {
+        None
+    } else if crate::runtime::worker::block_parts(arg).is_some() {
+        Some(vm.pins.pin(
+            crate::pin_table::PinOwner {
+                kind: "restart-hook",
+                id: life_idx as u64,
+            },
+            arg,
+        ))
+    } else {
+        return Err(QuoinError::Other(
+            "serviceOnRestart: expects a Block (or nil to clear)".into(),
+        ));
+    };
+    if let Some(pin) = old {
+        vm.pins.unpin(pin);
+    }
+    receiver
+        .with_native_state::<NativeServiceState, _, _>(|s| s.hook.set(new))
+        .map_err(QuoinError::Other)?;
+    Ok(vm.new_nil(mc))
 }
 
 /// The proxy-owned `serviceSupervise:` (SUPERVISION.md slice 3): attach a

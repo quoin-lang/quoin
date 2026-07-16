@@ -148,6 +148,17 @@ fn workers_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Valu
     vm.new_map(mc, m)
 }
 
+/// The pin table's leak-accounting view: total live pins plus a count per
+/// owner kind (`src/pin_table.rs` — the one traced side table for native
+/// features that retain Values).
+fn pins_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
+    let mut m = vec![("live".to_string(), vm.new_int(mc, vm.pins.live() as i64))];
+    for (kind, n) in vm.pins.counts_by_kind() {
+        m.push((kind.to_string(), vm.new_int(mc, n as i64)));
+    }
+    vm.new_map(mc, m)
+}
+
 /// One task row of the `VM.ps` snapshot (shared by the guest method and the
 /// REPL's `$ps` table).
 pub(crate) struct PsTaskRow {
@@ -561,17 +572,18 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                 ("aot".to_string(), aot_section(vm, mc)),
                 ("compute".to_string(), compute_section(vm, mc)),
                 ("workers".to_string(), workers_section(vm, mc)),
+                ("pins".to_string(), pins_section(vm, mc)),
             ];
             Ok(vm.new_map(mc, sections))
         })
         .doc(
             "The VM's counters as a Map of sections: 'aot' (compiled / refused / skipped \
              plus per-reason counts), 'compute' (offload-pool jobs), 'workers' (isolates \
-             spawned / completed, messages copied). `compiled` counts translation events; \
-             `refused` / `skipped` count distinct members from a bounded log -- counters, \
-             not ledgers.\n\n\
+             spawned / completed, messages copied), 'pins' (live GC pins, per owner \
+             kind). `compiled` counts translation events; `refused` / `skipped` count \
+             distinct members from a bounded log -- counters, not ledgers.\n\n\
              ```\n\
-             VM.stats.keys    \"* -> #(aot compute workers)\n\
+             VM.stats.keys    \"* -> #(aot compute workers pins)\n\
              ```",
         )
         // `VM.aotRefusals` -> one Map per distinct refusal/skip, for finding

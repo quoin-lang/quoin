@@ -1,5 +1,8 @@
 //! The supervision policy value (SUPERVISION.md slice 3): plain data the
-//! runtime interprets directly — no callback into user code on the death path.
+//! runtime interprets directly — no callback into user code on the death
+//! path. (The DECISION stays data-only; the restart hook — `serviceOnRestart:`
+//! / `Extension.onRestart:` — runs user code in the recipe-replay phase of an
+//! attempt, after the decision and the rebind, like an Erlang child init.)
 //! Attached POST-SPAWN (`svc.serviceSupervise:` / `e.supervise:` / the
 //! `quoin.toml [extension]` keys), which keeps the hosting selector matrix
 //! flat and is exactly the attach shape a library strategy uses (§10.1). The

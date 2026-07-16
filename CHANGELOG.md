@@ -50,6 +50,24 @@ under **Changed**, with the migration.
   crashes restart too. Manual `serviceRestart`/`restart` refuse on a
   supervised peer — the policy owns the budget.
 
+- **Restart hooks — user code re-establishes its own state after a respawn.**
+  `svc.serviceOnRestart:{ |s| … }` (hosted workers, root proxy) and
+  `e.onRestart:{ |x| … }` (extensions) install a one-argument block that runs
+  inside every restart attempt — supervised or manual — after the fresh
+  incarnation is up. Its purpose is the state supervision deliberately does
+  not restore: ambient child-side configuration with no handle (an API key, a
+  log level, a registration) silently resets on respawn, and the hook is
+  where whatever *uses* the peer re-applies it — package `init.qn` glue stays
+  once-per-VM, define-once. For services the hook runs before the restart
+  gate reopens (parked senders resume only against a hooked-up incarnation),
+  and its own sends to the service pass the closed gate. A hook failure fails
+  the attempt: the fresh peer is stopped, a supervisor counts it against the
+  budget — a permanently broken hook spends to `#gaveUp` rather than serving
+  a half-configured peer. Re-installing replaces the hook; `nil` clears it.
+  Internal: hook blocks root through the new generic pin table (`vm.pins`,
+  one traced side table replacing the per-feature GC-root fields; `VM.stats`
+  gained a `pins` section reporting live pins per owner kind).
+
 - **The web worker pool self-heals** (WEB_ARCH.md workers — supervision's
   first consumer, built as a *library* strategy over the lifecycle events).
   A pool worker's death fails only its own in-flight requests (a clean 502)

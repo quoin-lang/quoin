@@ -33,6 +33,7 @@ pub mod io_codecs;
 pub mod md_html;
 pub mod packages;
 pub mod parser;
+pub mod pin_table;
 pub mod registry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod repl_complete;
