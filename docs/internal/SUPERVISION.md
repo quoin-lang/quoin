@@ -337,6 +337,16 @@ record/replay run containing a supervised death + restart.
    Lima VM by wake trace + gdb after ~100 CI-shaped iterations; fixed by the
    pumps draining their queues on exit. Pre-existing since hosted dispatch —
    load made it likely enough to see.*
+   *Residue (recorded 2026-07-15, post-arc): the roster grows without bound
+   under restart churn. Rows deliberately outlive their peers (the
+   post-mortem roster is a feature), and slices 2–3 mint a fresh `LifeSink`
+   in `vm.io.lives` per INCARNATION — so a supervised peer dying and
+   respawning for weeks accumulates a row (sink + staged records + label)
+   per incarnation, forever. The give-up budget bounds the rate inside a
+   window, never the total. Small per-row, but it is the one unbounded-growth
+   path the arc added. Fix shape when it matters: cap or compact terminal
+   rows per peer (e.g. keep the first death, the last N incarnations, and a
+   summarized count), never the current incarnation's row.*
 2. **Respawn mechanics:** retained recipes (worker block+args are already held;
    extensions retain their spawn recipe), rebind-in-place with incarnation stamps,
    park-during-restart, give-up state, manifest-equality gate. Surface: `restart`
