@@ -59,6 +59,8 @@ ergonomics, opt-in, never nagging on dynamic code.
 2. **Defer "suggest the fix" (did-you-mean).** Ecosystem/method-surface too small to be worth the
    fine-tuning, and a *wrong* suggestion is worse than none. Revisit when the ecosystem is larger.
 
+   > **Tracked as #44** — Add did-you-mean fix suggestions to type diagnostics.
+
 ## Settled surface syntax
 
 Three type-syntax decisions, locked before building the parser/resolver around them:
@@ -168,6 +170,8 @@ are the anti-drift guards.
 MNU and arg-checks are gated on **`from_vm` + `sealed`** (an open class could gain the method/overload, so
 staying silent there is sound); missed check = fine, false positive = not. Inline-block-args still deferred.
 
+> **Tracked as #52** — Extend cross-class MNU and arg-checks to inline block args.
+
 **3c — flow-sensitive type narrowing (nil-first, generic framework).** The hardest slice; needs real
 flow analysis to avoid false positives. Built as a **general refinement layer**, not a nil special case.
 
@@ -266,12 +270,18 @@ narrowing regardless of codegen inlining. (3) The exact nil-safe allowlist.
 *Future unlocked by this framework (generic by design):*
 - **Type-test narrowing** — a new *condition rule* (`x is-a Dog` → `Dog` in the arm) on the same overlay,
   reusing 3b's subtype relation. The framework is rule-agnostic.
+
+  > **Tracked as #48** — Add type-test (is-a) narrowing to the refinement overlay.
 - **General union types** (Phase 1 deferred these) — 3c's **join** operation *is* the union constructor;
   today it joins only `T`/`Nullable(T)`, but generalizing join → `A｜B` is the natural next step, and
   narrowing then becomes "narrow a union to a member." **3c is the substrate for unions.**
+
+  > **Tracked as #65** — Generalize the nil join into general union types.
 - **Exhaustiveness** (a `case` over a union), **reachability / dead-code** and **definite-assignment** (both
   seeded by the divergence tracking), and **devirt** (a narrowed non-nil/exact type removes nil-checks and
   enables monomorphic inlining — Phase 5).
+
+  > **Tracked as #45** — Add exhaustiveness, reachability, and definite-assignment checks.
 
 *Cross-cutting follow-up (not a blocker): an AST-matcher.* Structural recognizers are accreting
 (`call_selector_*`, `receiver_class`, `is_sealed_marker`, `mixin_target`, plus 3c's guard shapes), each a
@@ -281,6 +291,8 @@ with composable matcher fns / `macro_rules!` combinators, reserve a proc-macro s
 earns it. Hard constraint: Quoin AST matching is **not purely structural** (a selector is a *reconstruction*
 with variadic folding; local-vs-`@field`-vs-`Instance` are semantic predicates), so the matcher must **bottom
 out on the existing helpers**, never re-derive them.
+
+> **Tracked as #54** — Extract an AST-matcher for structural recognizers.
 
 ### Phase 4 — error ergonomics
 Reuse the existing span + caret renderer. Deliver:
@@ -351,6 +363,8 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
 - **5·6+ (next):** redirect `^^` to the inlined-call's end (a second caret channel) → inline `^^`-bearing bodies;
   **alpha-rename** spliced local bindings → inline `var`/`let` bodies; **cross-unit** receiver bodies (via the VM
   class object, not the AST).
+
+  > **Tracked as #53** — Extend method-body inlining with ^^, var/let, and cross-unit.
 - **`CallSelfDirect` removed DONE** (`e98cd0b`): it was a runtime no-op (identical `exec_send` to `Send`) whose
   planned resolve-and-cache was the ruled-out inline cache, *and* it blocked fusion (a sealed self-send emitted
   an unfused `LoadLocal(self); CallSelfDirect` where `Send` fuses to `SendLocal*`). `emit_call` now emits `Send`;
@@ -361,6 +375,8 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
 - **3c·3 loop back-edge widening** — the other Tier-2 half (arm-exit join/merge is done, `4fc8dd4`). Narrowing
   across a loop must conservatively widen at the back-edge (a value narrowed in one iteration may not hold on
   re-entry). Its own mechanism; zero corpus impact → deferred.
+
+  > **Tracked as #60** — Widen narrowed types at loop back-edges (3c·3).
 - **Typed-param declared contracts — DONE** (`6a5909c`): a `|x: T|` param now records via
   `record_declared_type`, so its annotation is a contract — reassignment is checked *and* flow-updates
   narrowing, completing the arm-exit join for nullable params. Corpus 1255/0/0. **Surfaced** the `Object`-as-top
@@ -372,6 +388,8 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   untouched. Corpus 1255/0/0.
 - **3c·4d — nullable-guard inline recovery** (see the 3c·4d slice above): per-arm narrowing spliced into the
   inline path so declared-`T?` guards inline *and* narrow. Opt-in, zero corpus impact → deferred.
+
+  > **Tracked as #58** — Recover inline path for declared-T? nullable guards (3c·4d).
 - **Fork-1b — persist return types into runtime introspection.** 3c·4a records declared returns into the
   *checker's* `ClassTable` from the AST. The runtime `MethodVariant`/`introspect::ClassInfo` still carry no
   return type, so `from_vm` sigs contribute none and `$inspect`/`describe_class` can't show returns. The bigger
@@ -379,6 +397,8 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   `MethodVariant`), so `$inspect` shows returns *and* cross-unit return contracts survive without relying on the
   AST-recording + merge-preserve path. Cheap-ish once 3c·4a's accumulator exists; also lifts the
   cross-class-return→`Any` limit noted in Phase 3b.
+
+  > **Tracked as #55** — Flow compiler-accumulated return types into introspection.
 - **Object return contracts beyond `defined?`** — `s : String` and `pp : String` **DONE** (`8c0336d`). These
   two are *native* (Rust) methods with no `^Ret` AST header, so their contracts are **seeded** into the
   ClassTable via `seed_native_object_returns` (called from `populate_from_vm`) rather than declared in bootstrap;
@@ -396,6 +416,8 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   `seed_native_object_returns` special-case and generalizing beyond a hand-picked few. Straightforward (mirrors
   the existing arg-type wiring); this is the *native-method half* of **Fork-1b** (compiler-declared returns are
   the other half), so the two are best done together — both make `from_vm` sigs carry returns.
+
+  > **Tracked as #50** — Declare return types on native methods (drop return seeding).
 
 ## Synergy with the perf roadmap
 

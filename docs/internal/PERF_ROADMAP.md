@@ -160,6 +160,8 @@ dynamic tail.
 
 ### 3a. Escape-analysis stack environments
 
+> **Tracked as #74** — Escape-analysis stack environments to kill per-call EnvFrame allocation.
+
 Every call GC-allocates an `EnvFrame` + vars Vec; pooling is impossible under
 gc_arena, so the fix is *not allocating*. After control-flow + method
 inlining, hot method bodies increasingly contain **no block literals at

@@ -243,6 +243,8 @@ Verdicts, each measured or re-derived:
   the read site is unsound in loops (per-iteration re-nil of the
   accumulator — the same hazard the cold-span exemption guards).
 
+  > **Tracked as #69** — Compile sum:/reduce:/count: — deferred-nil slot init + box-at-merge.
+
 ### ~~M2 — thin materialization: the frame env-home (codegen)~~ (DROPPED post-M1 — kept for the record)
 
 For compiled frames that still contain materialization sites: allocate

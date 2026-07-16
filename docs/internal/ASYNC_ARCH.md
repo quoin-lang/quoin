@@ -283,6 +283,9 @@ Still to add for later stages:
 - ✅ `async-net` for async DNS + resolve-and-connect (Stage 3)
 - ✅ `futures-rustls` + `rustls` + `webpki-roots`, **`ring`** provider, for TLS (Stage 4;
   `rustls-native-certs` for the OS trust store remains a future opt-in)
+
+  > **Tracked as #85** — Add rustls-native-certs OS trust-store opt-in for TLS.
+
 - `httparse` for HTTP/1.1 header parsing (Stage 5)
 - `IoBackend::perform` returns a plain `Pin<Box<dyn Future<Output = IoResult>>>`
   (`'static` — each future owns the `Rc` clones it needs and borrows nothing from
@@ -683,6 +686,10 @@ follows the `gather`/`join` park/wake model, *not* `await_io`:
   over multiple channels, an `Iterate` mixin (draining is destructive), and deadlock detection
   (a stuck main task exits silently, today's `break`-on-nothing-ready) are deferred.
 
+  > **Tracked as #86** — Add select over multiple channels.
+  > **Tracked as #78** — Add an Iterate mixin to Channel.
+  > **Tracked as #81** — Add deadlock detection for the task scheduler.
+
 *Test:* `qnlib/tests/38-channels.qn` (rendezvous, buffered fill/drain, sender/receiver
 parking, fan-in, `close`+`each:`, cancellation, ghost recovery, `gather` producer/consumer,
 heap-churn GC) — green under normal, `QN_SCHED_STRESS`, and `QN_GC_STRESS`; a Rust `trace_gc`
@@ -694,6 +701,9 @@ survival unit test in `vm_tests.rs`; and two soak phases (`channelPipeline`, `ch
 - **HTTP/2, QUIC, websockets, connection pooling, proxies** — where tokio's
   ecosystem (h2, quinn, tungstenite, hyper-util) runs far ahead. If/when needed,
   add a `TokioBackend` behind the same trait rather than rewriting upward.
+
+  > **Tracked as #94** — Add a TokioBackend for HTTP/2, QUIC, and proxies.
+
 - **`hyper` 1.x core via a smol shim** — a maintained HTTP engine + HTTP/2 path
   while staying on smol, if hand-rolled HTTP/1.1 outgrows itself (its `hyper::rt`
   traits are runtime-agnostic; the adapter from `async-io` streams is small).
@@ -703,3 +713,5 @@ survival unit test in `vm_tests.rs`; and two soak phases (`channelPipeline`, `ch
 - **`Bytes` extras** — a mutable `BytesBuilder` (if concat churn shows up) and a
   `#b'HEX'` literal (the `#`-prefixed user-literal syntax; a parser change). Deferred
   until needed.
+
+  > **Tracked as #113** — Add Bytes extras — mutable BytesBuilder and #b'HEX' literal.

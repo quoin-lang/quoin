@@ -125,6 +125,9 @@ dimmed. Huge collections may be truncated (P1).
 - **Plain stdin** (no editing/history) until rustyline lands in P1.
 
 ## Path to a Quoin-native REPL (P3)
+
+> **Tracked as #116** — Migrate the REPL loop into Quoin (P3 / QuoinRepl).
+
 The Rust loop is the bootstrap. Migrating it into `qnlib` needs three primitives, each already
 tracked: `eval:bindings:` (persistent locals as injected bindings — the in-language analogue of
 `repl_env`), the `Runtime.eval:` parse-panic fix (so a Quoin loop can `catch:` bad input), and an

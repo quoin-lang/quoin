@@ -21,24 +21,8 @@ This document outlines the language features, compiler updates, and VM modificat
   `qn doc` (a corpus file that parks forever — hit via the VM repo's own tree in an e2e); a
   per-unit load timeout or `--exclude` would bound it.
 
-- [ ] **`doesNotUnderstand:` as a language protocol.** Promote the dispatch miss path to one
-  generic protocol: on lookup miss, if the receiver's class defines `doesNotUnderstand:` (with
-  a reified message — selector + args), send it; otherwise raise MNU as today. Makes proxies,
-  mocks, delegators, and lazy loaders ordinary user-space code, and retires the last reason
-  for feature-specific hooks in `vm.rs`'s miss branches (the WorkerService proxy hook — whose
-  own exit is manifest-installed classes, see ACTOR_OBJECTS.md §10). Design surface: the
-  message reification value, `super` interaction, sealed-class rules, and how the gradual
-  checker treats DNU classes (open-ended selector sets). Deliberately NOT the load-bearing
-  mechanism for hosted objects/extensions — those have enumerable selectors and install real
-  method nodes; DNU is for genuinely dynamic receivers.
-- [ ] **`qn doc` for COMMANDS, not just classes/methods.** A `[CLI]Spec`-based tool is an API
-  too — its flags, options, positionals, and subcommands deserve a generated doc page (roughly:
-  the `-h` help, as publishable HTML/Markdown, next to the tool's library classes). Blocked on
-  the doc rework's **static discovery mode** (`[Lang]Parser`-based, "option B" in the rework
-  plan): a command's top level IS the program, so the runtime load-and-introspect model cannot
-  document one without *running* it — and the spec (`cli.flag:…` calls) only exists as data at
-  runtime, so static discovery must read the builder sends from the AST. Do this after the
-  project-first `qn doc` rework lands.
+- Tracked as #135 — Promote doesNotUnderstand: to a language dispatch protocol.
+- Tracked as #125 — Generate qn doc pages for commands, not just classes/methods.
 
 - [x] **`qn fmt` only adds semicolons where the statement end is ambiguous.**
   DONE (fix/fmt-minimal-semicolons): the `;` is a separator, not a terminator —
@@ -53,22 +37,7 @@ This document outlines the language features, compiler updates, and VM modificat
   backstop, and the whole tree (174 .qn files) is reformatted canonical.
   Pinned by format_tests::semicolons_survive_exactly_the_gluing_boundaries.
 
-- [ ] **Support light terminal backgrounds in all colored output.** The ANSI palette
-  (`colors_for` in `crates/quoin-syntax/src/highlight.rs`) is tuned for a dark
-  terminal — literally `#ffffff` for operators/returns — and it feeds everything
-  colored: `qn highlight`, the REPL's live highlighting and `$class` output, error
-  annotations' source snippets, MNU candidate signatures, and the test reporter.
-  On a light background much of that output is faint-to-invisible. The doc
-  generator hit the same wall and hand-picked a light-scheme CSS map
-  (`light()` in `src/highlighter.rs::code_stylesheet`) next to the dark scheme it
-  generates from the ANSI table; the terminal needs the same second palette.
-  Sketch: give `colors_for` a light/dark axis, hoisting the doc generator's
-  `light()` choices as the light values so terminal and web agree in both
-  schemes; detect via `COLORFGBG` (set by iTerm2/rxvt/kitty; `;15` ≈ light) or an
-  OSC 11 query where available, with an explicit `QN_THEME=light|dark` override —
-  auto-detection is unreliable enough that the override is the load-bearing part.
-  `NO_COLOR`/`supports_color` gating is unchanged; this is about *which* colors,
-  not whether.
+- Tracked as #129 — Support light terminal backgrounds in all colored output.
 - [x] **Lint: `^` inside an `if:`/`else:` arm that intends a method return.** DONE —
   `^` returns from the BLOCK (by design — it's `break`); `^^` returns from the
   method. The trap is `cond.if:{ ^expr }` written to mean "return from the
@@ -83,27 +52,9 @@ This document outlines the language features, compiler updates, and VM modificat
   is unused (statement position) — that combination is almost always a
   mistyped `^^`. The legitimate uses of `^` (early exit from `each:`-style
   iteration blocks, value-producing `if:` arms) don't match it.
-- [ ] `.is:`/`.isTrue:` assertions inside an `each:` block wedge the `qn test`
-  harness (the suite stops at that test with no failure reported). No suite uses the
-  pattern today — found writing `47-url.qn`, worked around by unrolling. Either
-  support it or fail loudly.
-- [ ] Harden the "value types have no instance variables" check. Today the compiler
-  rejects `@x` in a value-type extension whose target is *statically* a value type
-  (`Integer <-- …`, `5 <-- …`, `true <-- …`). A **computed** target slips through —
-  e.g. `(1 + 2) <-- { |@x| test -> { @x } }` compiles (harmlessly: `@x` reads `nil`,
-  `@x =` throws at runtime, so it's useless rather than wrong). Closing the gap needs
-  a runtime check in `get_target_class_for_def`: when the receiver resolves to a value
-  type, reject instance-variable declaration/use. See the note on
-  `Compiler::is_value_type_target`.
-- [ ] Investigate a latent GC root-coverage gap surfaced by ultra-aggressive collection.
-  Forcing `arena.finish_cycle()` (or even `collect_debt()`) on *every* VM step instead of every
-  10 (`src/runner.rs`) makes the bblib `test` run fail with `Message not understood:
-  receiver=Nil, selector='add:'` — some value the test harness relies on is collected when GC
-  runs that frequently. **Reproduces identically on a pre-`send-receiver-split` HEAD**, so it
-  predates that change (not caused by the receiver/args rooting, which was stress-validated
-  separately). The normal `% 10` debt-paced collection masks it. Worth tracking down: likely a
-  temporary that's reachable only via the Rust stack across a step boundary in the `add:` /
-  collection-builder path. See `profiling/send-receiver-split/notes.md`.
+- Tracked as #137 — Fix .is:/.isTrue: assertions inside each: wedging qn test harness.
+- Tracked as #132 — Harden the value-types-have-no-instance-variables check.
+- Tracked as #134 — Investigate latent GC root-coverage gap under aggressive collection.
 - [x] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
   DONE (release-prep, 2026-07): `clap` derive (`Cli`/`Cmd` in `src/runner.rs`); `parse` keeps its
   `&[String] -> Self` signature, so `--help`/`--version`/usage errors are answered by clap and every
@@ -120,10 +71,9 @@ This document outlines the language features, compiler updates, and VM modificat
   on an uncaught error** (`UnitOutcome` in `src/runner.rs`; a falsy final value stays exit 0 —
   only `qn test` gates on the final boolean). Tests: `tests/exit_code.rs`. Remaining option:
   have `qnlib/main.qn` call `Runtime.exit:` directly instead of the final-value inference.
-- [ ] Design an installer.
+- Tracked as #123 — Design an installer for the qn binary and support files.
   - [x] Named the language **Quoin** (extension `.qn`); rationale in `~/code/quoin/DECISIONS.md`.
   - [x] Binary name is `qn` (set via `[[bin]]` in `Cargo.toml`).
-  - [ ] Support installing the binary and support files to `/usr/local/bin` or something.
   - [x] Create a more general purpose way of determining what to load by default on start.
     - The prelude is now `qnlib/prelude.qn` (`use core/*`), loaded by the runner alongside one
       mode-entry file — instead of a hardcoded `glob("qnlib/*.qn")`.
@@ -173,16 +123,10 @@ This document outlines the language features, compiler updates, and VM modificat
       - [x] **Demote natives to Quoin where possible.** Done for the operators (the main case): the *derived* comparisons (`>:` ≡ `x < self`, `<=:` ≡ `!(x < self)`, `>=:` ≡ `!(self < x)`) are shared Quoin methods on `Object`; `!` and unary `+`/`-` are Quoin; equality stays as `Object#==:`/`#!=:`. Native is kept only where it genuinely needs Rust (raw per-type arithmetic, string ops, regex, native state). (A broader pass — auditing *non-operator* natives that only compose other sends, e.g. in `list.rs`/`map.rs`, and moving them to qnlib — remains as optional future cleanup.)
     - [x] *Single-type checks* migrated to typed variants (wrong type → MNU instead of a hand-rolled `TypeError`): `List#at:`/`at:put:`/`sliceFrom:` (`&["Integer"]` — only the index is typed; `at:put:`'s value stays untyped) and `String#insert:at:` (`&["String", "Integer"]`). The index is then extracted with `arg!(…, Int, …)` (pure extraction — the scorer already guaranteed the type). Left as *not* this pattern: `Fiber.new:`/`KeyValuePair.new:` (class-side constructors entangled with `new:`/`NewCallable` dispatch — typing them would mis-route to the default constructor) and io.rs's internal String/ANSI coercion helper (not a dispatched method). Coverage: repointed `runtimeTypeErrorIsStructured` (`07-errors.qn`) to a still-`TypeError` op (`'abc'.contains?:5`, an `arg!`-based check) so it keeps demonstrating structured TypeErrors, and added a `typedArgDispatch` test pinning both the valid-dispatch and wrong-type→MNU paths for all four methods. The `at:put:` hot path (sieve benchmark) verified.
   - [x] Ambiguity detection (enabled by the total order). Scoring is now lexicographic — `(Σ type_distance, guarded?)` — where an untyped param counts as `:Object` (the universal supertype) so the `UNTYPED_PARAM_SCORE` sentinel is gone, and a guard *refines* specificity (a guarded variant outranks an otherwise-equal unguarded one). The lowest score wins; **two distinct candidates sharing the lowest score throw `AmbiguousMethodError`** — this covers both equal-distance unguarded *typed* variants (e.g. two mixin types at distance 1) and two *guarded* variants that both pass at the same type level. Definition order is no longer a tiebreaker (so overloaded methods can't rely on ordered overlapping guards — that's `case`/`~`'s job, which is sequential and unaffected). A guarded+unguarded pair never ties (the guard rank separates them), so the specific-guards-then-unguarded-catch-all idiom is unambiguous; `dispatchByBlock`'s catch-all changed from a `{.class==Object}` guard to a plain `|x|`. Signatureless native methods score `i64::MAX` and are exempt (a pure fallback, never ambiguous). New `AmbiguousMethodError` Quoin error type. Tests: `dispatchAmbiguityType`/`dispatchAmbiguityGuard` (`06-methods.qn`).
-  - [ ] **Make `Class` and `ClassMeta` directly subclass `Object`** so the simulation hacks aren't needed: today a metaclass receiver *falls through* to `Object`'s instance methods in `lookup_method`, and `type_distance(_, "Object")` has a universal-supertype fallback (so untyped/`:Object` params still match metaclass values whose `parent` chain doesn't physically reach `Object`). Wiring `Class`/`ClassMeta`'s parent to `Object` for real would let both hacks be removed.
+  - Tracked as #131 — Finish method dispatch overhaul: metaclass rooting and per-arg guards.
   - [x] When no method match is found but the _selector_ does exist, the filtered-out candidates are listed in the `MessageNotUnderstood` error (a hint that the method exists but the arguments were wrong). `MessageNotUnderstood`/`AmbiguousMethod` (`error.rs`) each carry a `candidates: Vec<String>` rendered one-per-line below the message and above the stack trace (`QuoinError` Display). Candidate signatures use the stack-trace style — selector keywords interleaved with each variant's *declared* param types, e.g. `bar:Integer`, `bar:String {x.length > 3}` — with a guarded variant's guard shown as its syntax-highlighted source (or a colorized `{...}` placeholder when source is unavailable), via `format_candidate_signature`/`collect_method_candidates` (`vm.rs`). Display-only (the caught path keeps the concise message). Tests: `dispatchNoMatchRaisesMNU` (`06-methods.qn`) + Display unit tests (`error.rs`).
-  - [ ] **Per-argument guard blocks (multiple guards per method).** Intended design: a `{…}` guard block may follow *any* parameter (and several may appear in one param list), and each guard is evaluated against the argument it follows — `self` (`.`) and the guard's own first param are bound to *that* argument's value. A variant applies only if **all** its guards pass.
-    - **Current state (single-guard only).** The representation keeps just one guard per method: `BlockNode.decl_block: Option<…>` and `BlockArgNode { identifier, type_hint }` has no per-arg guard slot. The parser (`parse…` in `parser/pest/parser.rs`) does `decl_block = Some(b)` for *each* `{…}` it sees in the param list, so multiple guards **collapse to the last one** (earlier guards silently dropped) and none is associated with a specific argument. `execute_validation_block` (`vm.rs`) binds **every method argument by its parameter name** (so `{ x > 100 }` / `{ a < b }` reach any arg directly), binds `self` to the **method's receiver** (the subject of the send — threaded through `lookup_method` → `lookup_method_in_class_hierarchy[_rec]` → `match_score`), so a guard can also use the class's other methods/instance vars, and doesn't re-declare its own params. (Earlier this bound `self` and the guard's own params to `args[0]`; both were dropped in favor of by-name args + receiver-`self`.) The grammar already *allows* writing interspersed guards; only the AST/parser/eval don't honor them (the guard isn't tied to its argument, and per-arg `self` isn't a thing yet).
-    - **Implementation scope:** (1) AST — move the guard onto the argument, e.g. `BlockArgNode { identifier, type_hint, guard: Option<Arc<BlockNode>> }` (or a `Vec<(usize, guard)>` on `BlockNode`). (2) Parser — attach each `{…}` to the argument it follows instead of overwriting one slot. (3) Dispatch (`match_score`) — a variant applies iff *all* its per-arg guards pass; evaluate each with `self`/first-param = its own argument. (4) Error formatting — render each guard right after its argument (`foo:Integer {x>0} bar:String {y.len>3}`) in `format_candidate_signature`, replacing the single trailing-`{guard}` rendering.
-    - **Open questions:** (a) **Scoring/specificity** — does *any* guard just make a variant "guarded" (today's single rank bit in the lexicographic `(Σ type_distance, guarded?)` score), or should *more* guards mean more-specific (so `{g1}{g2}` outranks `{g1}`)? This changes which guarded variants tie → throw `AmbiguousMethodError`. (b) A guard with no params and no `.` usage — is binding `self` to its argument enough, or do we also want positional access to *other* args inside a guard (currently all method params are in scope by name; keep that, or restrict a guard to only its own argument)? (c) Evaluation order / short-circuit — left-to-right, stop at first failing guard (matters only for guard side effects, which should be discouraged).
 - [x] Implement the `#< … >` set literal. Added a native `Set` type (`src/runtime/set.rs`, `NativeSetState`) mirroring `List`/`Map`: insertion-ordered, unique by `==:`, with `count`/`add:`/`remove:`/`contains?:`/`each:`/`s`/`==:`; `Set` mixes in `Iterate` and gets `union:`/`intersection:`/`difference:`/`subset?:`/`superset?:` in `qnlib/02-iterate.qn`. Literal compiles via a new `NewSet(n)` instruction (deduped by `==:`). The closing `>` collided with the greater-than operator, so the grammar now excludes `>`/`>=` from set elements (`set_elem`/`set_infix_op` in `Quoin.pest`) — a bare `>` ends the set; parenthesize to use `>` in an element. Tests in `qnlib/tests/15-sets.qn`; docs updated.
-- [ ] Find duplicate bits of code and refactor.
-  - Spinning the VM while executing in a native method.
-  - Object initialization/new:{} logic
+- Tracked as #130 — Find and refactor duplicate bits of code.
 - [x] **Extract the dispatch subsystem out of `vm.rs`** (which is ~5.5k lines). Move the method-dispatch
   machinery into its own module (e.g. `src/dispatch.rs` or `src/vm/dispatch.rs`): the `Callable` enum +
   `call`, `lookup_method`, `lookup_method_in_class_hierarchy[_rec]`, `match_score`/`score_param_types`/
@@ -218,8 +162,7 @@ This document outlines the language features, compiler updates, and VM modificat
   - See qnlib/presentation/20-method-destructuring.qn (all three examples now run —
     its map literal needed quoting to `#{ 'a': 1 }`: bare-identifier and symbol keys
     don't parse in map literals, only via `at:put:`).
-- [ ] Think about a better destructuring protocol than assuming `#at:` exists.
-  - use an Iterator?
+- Tracked as #107 — Design a better destructuring protocol than assuming #at: exists.
 - [x] Confirm `%'string%{eval}' is working.
   - [x] Optimize it into string concatenation by the compiler. `compile_interpolated_literal`
     lowers a `%'…'` literal to a `+` chain at compile time: fragments compile inline in the
@@ -232,16 +175,15 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] Make sure case statements are tested and working.
 - [x] Make the `^>` yield operator usable in expression position.
   - Moved `yield_return` from `stmt` to `primary` in the pest grammar; it now works anywhere an expression does (e.g. `a = ^> v`), with greedy operand precedence matching `Fiber.yield:` (parenthesize to scope). ANTLR grammar (legacy/unused path) left as-is.
-- [ ] Have the `LoadGlobal` instruction consult the `BuiltinCache`. Currently it always does a `HashMap<NamespacedName, Value>` lookup against `globals` (see `vm.rs` `Instruction::LoadGlobal`); builtin classes (`Fiber`, `List`, `Integer`, etc.) could be served from the cache to avoid hashing the name on every load (e.g. for the `^>` -> `Fiber.yield:` lowering). `BuiltinCache` may need to be keyed more generally by name to cover all builtins.
+- Tracked as #133 — Have the LoadGlobal instruction consult the BuiltinCache.
 - [x] Formalize an interface for Quoin error types.
   - `Error` base (`message`/`payload`, class-side `throw:`/`throw:payload:`) + core subtypes (`TypeError`, `ArgumentError`, `MessageNotUnderstood`, `ArithmeticError`, `IndexError`) in `00-bootstrap.qn`. Catch-by-type via `case`/`~`.
   - Runtime now raises structured errors: `QuoinError::Thrown` marker (value rides in `active_exception`), and `vm.quoinerror_to_value` maps internal `QuoinError` variants to typed Quoin `Error` objects at the `catch:` boundary. `does:throw:` widened to match by value/type or message string.
-  - [ ] Future: give the VM more fine-grained internal error variants and route more raise sites through typed Quoin errors.
+  - Tracked as #136 — Route more VM raise sites through typed Quoin error variants.
 - [x] Make sure #symbol types are working.
 - [x] Language server (~/code/quoin-language-server/)
   - [x] VSCode plugin (~/code/quoin-language-server/editors/vscode/)
-- [ ] Integrate fff into claude for non-Rust searches
-  - https://github.com/dmtrKovalenko/fff#mcp-server
+- Tracked as #127 — Integrate fff into claude for non-Rust searches.
 - [x] Write a document fully explaining the language semantics, including all corner cases.
   - Capture the subtle/surprising behaviors here as they surface so they can be folded into the doc.
   - **`new:{}` block initialization & lexical scope.** Instance variables are *not* pre-bound inside a `new:{}` block, so an empty `new:{}` leaves every field at its default (`nil`) — it does **not** silently capture a same-named variable from the surrounding scope. Only an explicit assignment binds a field. The right-hand side of such an assignment resolves up the lexical chain (so `{ x = x }` copies the enclosing `x` into the field), but the assignment itself binds in the block's own frame and never mutates the enclosing variable. Corollary: a plain-assignment `init:` like `init: -> {|a| @a = a }` is redundant — field population already sets `@a` from the block before `init:` runs — so it behaves identically to the default no-op `init`.
@@ -261,24 +203,9 @@ both under `## Misc`.)
   `./tool.qn --verbose` (and `qn tool.qn --verbose`) hands the flags to the SCRIPT — the old
   `--` separator is no longer needed. Tests: parser/fmt pins + `tests/shebang.rs` (direct
   exec with hyphen args; unshifted error positions). Book §36.
-- [ ] **Scope a namespace for definitions (`module`-like).** A way to open a namespace in code so
-  that `Class` and constant definitions inside the scope implicitly register under it — instead of
-  repeating the `[Ns]` prefix on every definition. Analogous to Ruby's `module Foo … end` (or
-  C#/Rust `namespace`/`mod`). The load *path* is already decoupled from the `[Ns]` namespace a file
-  registers under (see `use` in `## Misc` / `## 7. Namespaces`). Open design questions:
-  - **Form:** a block `namespace Foo { … }` vs a file-level `namespace Foo;` header applying to the
-    rest of the file; nesting; interaction with the existing `[Ns]` prefix.
-  - **Does this imply import scopes?** If a scope sets the *current namespace* for definitions, does
-    it also scope *resolution* — unqualified names inside resolving against the open namespace first
-    (scoped imports / `using`)?
-  - **`use` inside a namespace block:** does a `use` within the scope alias everything the imported
-    unit registers *under that namespace* — so those imports are visible unqualified within the
-    block — and is that aliasing confined to the block?
-- [ ] **`#b'HEX'` byte literal.** A `#`-prefixed user-literal for `Bytes`, like `#(…)` / `#/…/` /
-  `#< … >`; a parser change. (Companion to the `BytesBuilder` in `## Networking & Async I/O`.)
-- [ ] **User-facing `defer` form.** Expose the frame-level defer mechanism — today internal, used by
-  `mix:`'s deferred `assertMeetsRequirements:` — to Quoin source as a `defer` form (see the `mix:`
-  item in `## Misc`).
+- Tracked as #109 — Scope a namespace for definitions (module-like).
+- Tracked as #113 — Add Bytes extras (mutable BytesBuilder and #b'HEX' literal).
+- Tracked as #105 — Add a user-facing defer form.
 - [x] **Wildcard selector dispatch.** Variadic keyword selectors: a definition marks a repeatable
   keyword component with `+` (`catch+:finally:`; grammar `selector_w_args = (ident ~ kw_var? ~ ":")+`,
   `parse_selector` bakes the marker into the canonical name). At a call site there is no marker — a run
@@ -304,16 +231,7 @@ both under `## Misc`.)
   interactive REPL on ANY uncaught error with a qnlib frame (latent since the
   embedded stdlib made those filenames unreadable; NO_COLOR masked it) — the
   snippet highlighter now degrades to plain text.
-- [ ] **Full Unicode identifiers.** Today `IDENT_PREFIX`/`IDENT_REST` are ASCII-closed
-  (`[a-zA-Z_][a-zA-Z0-9?_]*`); eventually identifiers should support full Unicode ([UAX #31](https://www.unicode.org/reports/tr31/)
-  `XID_Start`/`XID_Continue` or similar). **Coupling to watch:** the compiler's alpha-renaming
-  for control-flow fusion (docs/internal/MATERIALIZATION_ARCH.md, M1) mints *source-unspellable* local
-  names by using a character outside the identifier charset (e.g. `·` U+00B7) — the
-  collision-freedom/invisibility guarantee is pure grammar closure. U+00B7 is `XID_Continue`
-  (Catalan), so naive Unicode identifiers would make the minted names spellable and break the
-  guarantee. Any Unicode identifier design must preserve a reserved compiler namespace: either
-  explicitly exclude one sigil from the identifier grammar forever, or switch the renamer to a
-  scheme the parser structurally rejects (e.g. a reserved prefix the grammar refuses).
+- Tracked as #110 — Support full Unicode identifiers.
 
 ## Networking & Async I/O
 
@@ -324,9 +242,7 @@ streams, and `TcpListener` servers. These are the deferred refinements — none 
 core, and each fits the existing narrow-waist seam (a thin backend op + a QN class, or pure
 Quoin over the current sockets/streams).
 
-- [ ] **HTTP client refinements.** Remaining: keep-alive / connection pooling (a *stateful*
-  client as an instance of `[HTTP]Client` — the class-side facade was kept thin for exactly
-  this), and cookies. All pure Quoin over the existing sockets/streams. See `qnlib/net/http.qn`.
+- Tracked as #82 — Add HTTP client keep-alive, connection pooling, and cookies.
   - [x] **`Content-Encoding`** — transparent on responses (gzip / x-gzip / deflate / zstd),
     with `Accept-Encoding: gzip, zstd` advertised by default and decode-on-drain. Backed by
     new `Bytes` methods (`decodeGz`/`encodeGz`, `decodeDeflate`/`encodeDeflate`, `decodeZstd`)
@@ -346,41 +262,15 @@ Quoin over the current sockets/streams).
     frame), so `.chunks`/`.each:` drain+decode the whole entity and yield a single decoded
     chunk; a non-encoded body still streams its raw transfer-chunks with per-chunk metadata.
     The internal wire-framing generator is `[HTTP]Body.rawChunks`.
-  - [ ] Expose **trailer headers** (after the terminating `0\r\n`) — currently read and
-    discarded.
-  - [ ] **True per-chunk streaming decode** — incremental content-decode as chunks arrive,
-    via a streaming (`ByteStream`) decompressor (see the `gzip / zstd` streaming follow-up
-    below); today an encoded streamed body buffers the whole entity before decoding.
+  - Tracked as #92 — Expose HTTP trailer headers and true per-chunk streaming decode.
 - [x] **Unified `[HTTP]Body` + JSON.** One value object (bytes- or stream-backed) backs both
   request and response bodies: `.bytes`/`.text`/`.json`/`.mediaType`/`.meta`. The polymorphic
   `[HTTP]Request.body:` auto-encodes a Map/List to JSON (`Content-Type: application/json`) and
   a String to bytes; responses auto-decode via `resp.body.json`. `qnlib/net/http.qn`.
-- [ ] **TLS server-side.** Pair with `TcpListener`: accept a `TcpSocket`, then upgrade it
-  with a *server* handshake (a rustls `ServerConfig` built from a cert/key) — the mirror of
-  `TlsSocket.wrap:host:`. Needs a config-loading surface plus a backend op (e.g.
-  `TlsAccept { id, config }`). Enables QN HTTPS servers.
-- [ ] **Servers: serial `acceptLoop:` vs concurrent `TcpServer` — document the seam (and
-  reconsider `acceptLoop:`).** `acceptLoop:` (native, `sockets.rs`) is **serial**: it runs the
-  block to completion and *closes the accepted socket* before accepting the next, breaking only
-  on a non-local exit (`^^`) from the block. That's great for tests/fixtures (see
-  `qnlib/tests/24-server.qn`) and simple request-response, and its win is ergonomic (automatic
-  socket cleanup on return/throw/cancel + a clean `^^` break). But it's a **footgun for real
-  servers**: the natural "spawn a Task per connection" instinct silently breaks under it (the
-  socket is closed the instant the spawning block returns, so the deferred handler writes to a
-  dead socket, and a per-task `^^`/throw never reaches the loop). Concurrent serving belongs one
-  layer up: `TcpServer` (`qnlib/core/tcp_server.qn`) built on manual `accept` + `Task.spawn:`
-  (each task owns/closes its socket), with **external** termination via cancelling the
-  accept-loop task (cancel aborts even a parked `accept`). To capture in the eventual docs: the
-  layering (`accept`/`acceptOnce:`/`acceptLoop:` = thin native primitives; `TcpServer` = the
-  blessed concurrent server), and a decision on whether `acceptLoop:` should stay once `TcpServer`
-  is standard or at least cross-reference it. A *native* concurrent-accept variant is probably not
-  worth it — the pure-Quoin `TcpServer` already nails it, and the native surface is better kept thin.
-- [ ] **Write-mode file streams + `seek:`.** `[IO]File` streams are read-only today
-  (`OpenFile` opens read-only). Add a write/append mode (a `mode` on `OpenFile`, or a
-  separate selector) and `seek:` on a file-backed `ByteStream` — a file-only op (sockets
-  aren't seekable; the first real reason to consider a file-stream subclass).
-- [ ] **IPv6 `[host]:port` parsing.** `parse_host_port` (`src/runtime/sockets.rs`) splits on
-  the last `:`, so a bracketed IPv6 literal (`[::1]:8080`) mis-parses. Handle the bracket form.
+- Tracked as #87 — Add server-side TLS (TlsAccept + TlsAcceptor).
+- Tracked as #91 — Document the acceptLoop: vs TcpServer seam and reconsider acceptLoop:.
+- Tracked as #90 — Add write-mode file streams and seek: on file-backed streams.
+- Tracked as #93 — Handle IPv6 [host]:port parsing.
 - [x] **Structured `IoError` class.** Socket/stream/file errors now throw a typed Quoin
   `IoError` (an `Error` subtype carrying a `kind` symbol + `message`), so `catch:`-by-type and
   `e.kind == #connectionRefused` work. New `QuoinError::Io { kind, message }` + `IoErrorKind`
@@ -392,8 +282,7 @@ Quoin over the current sockets/streams).
   sites, deferred to later error tranches:* the `parse_host_port` bad-host/port and the
   `ByteStream`/`StringStream` UTF-8 / empty-delimiter cases (a `ValueError` / `ParseError` tranche),
   and the `unexpected I/O result` internal-invariant guards.
-- [ ] **`Bytes` extras.** A mutable `BytesBuilder` (if concat churn shows up — body assembly
-  is `bytes + chunk` today). (The `#b'HEX'` byte literal moved to `## Syntax`.)
+- Tracked as #113 — Add Bytes extras (mutable BytesBuilder and #b'HEX' literal).
 - [x] **(Separate, larger track) Polyglot extension system.** Out-of-process extensions over a
   unix-domain socket — design in `docs/internal/FUTURE_EXT_ARCH.md`. Shipped: Tier 0 (gc-free `Host`
   trait) + Tier 1 transport, structured values, host-reach, crash/timeout isolation, and
@@ -508,7 +397,7 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   match. A closed `[ns]` completes the fully-qualified name (`[IO]Fi`→`[IO]File`); else a bare word.
   The rustyline `Completer` (`CompletionType::List`) is a thin adapter. **v1 limit:** only receivers
   whose class genuinely needs evaluation (`@ivars`, `(expr)` groupings, chained sends) yield nothing.
-- [ ] **VM introspection API** (`src/introspect.rs`; design in `docs/internal/INTROSPECTION.md`). Read-only
+- [x] **VM introspection API** (`src/introspect.rs`; design in `docs/internal/INTROSPECTION.md`). Read-only
   surface metadata as plain owned structs (no `'gc`), owning the VM-internal walking so the REPL /
   completion / a future Quoin `Mirror` stay ignorant of internals. Exact: `globals` /
   `describe_class` / `describe_value` / `session_locals`; prefix finds: `find_globals` /
@@ -519,21 +408,12 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
     eval then `describe_value`: value repr + `(class X)` + `@field: Class` lines). Built on a generic
     `eval_value(arena, input, render)` (HRTB `render` closure) with `eval_repl_input`/`_type`/`_inspect`
     as the three renders; `format_globals`/`format_class`/`format_inspect`/`flow_names` helpers.
-  - [ ] Later: the Quoin `Mirror` wrapper (native reflection class converting the structs to Quoin
-    objects) — a layer over this API, not part of it.
+  - Tracked as #117 — Add a Quoin Mirror reflection API.
 - [x] Startup file: `~/.quoinrc` is run into the session on interactive REPL boot (shell-style:
   not for piped scripts or `qn -e`); errors are reported but non-fatal. Banner suppressible with
   `QN_NO_BANNER`; prompt overridable with `QN_PROMPT` (default `qn> `). (`QN_*` to match the binary
   and the `tuning` stress knobs.) The shared arena setup is factored into `build_repl_arena`.
-  - [ ] **Evaluate `~/.quoinrc` against a `QuoinRepl` object** (`self` bound to a fresh `QuoinRepl`
-    instance) so the rc can both define helpers *and* act as a config file — calling setter methods
-    (`.prompt: 'λ> '`, `.banner: false`, …) on `self` to configure the session, plus overriding
-    `QuoinRepl` methods to customize behavior. This generalizes the env-var knobs above into a
-    first-class, scriptable config surface. Needs a native `QuoinRepl` class exposing the REPL's
-    settings (a sibling/consumer of the introspection API and the future `Mirror`).
-    - [ ] Once `QuoinRepl` exists, **drive the prompt from it** (`self.prompt:`), superseding
-      `QN_PROMPT` — initially a read-once-at-startup value is fine (a live/dynamic prompt can come
-      later). Same for the banner and any other knobs that graduate from `QN_*` env vars.
+  - Tracked as #115 — Evaluate ~/.quoinrc against a QuoinRepl config object.
 - [x] One-shot eval `qn -e '<expr>'`: evaluates one expression in a fresh prelude-loaded session and
   prints its `.s` result (a `nil` result prints nothing); parse/compile/runtime errors go to stderr
   with a non-zero exit, so it composes in pipelines. Non-interactive `qn repl < script` (pipe mode)
@@ -611,10 +491,7 @@ deferred `Mirror` in `## REPL`.
   `src/runtime/civil.rs` + `span.rs`; tests `qnlib/tests/68-civil-time.qn`; book §44;
   full as-built spec in `docs/internal/STDLIB_TIME.md` Phase 3. Named `Span` (jiff's term), not
   `Period`.
-  - [ ] Deferred from v1: strftime-style custom parse/format (`format:`/`parseFormat:`),
-    week-of-year / quarter accessors, `Date` range iteration (`d1..d2` riding the range
-    protocol), `Span` rounding/normalization (`round:`/`total:` — needs a relative-date
-    anchor design), and `DateTime#nearest:`-style snapping.
+  - Tracked as #114 — Round out stdlib Time: formatting, accessors, ranges, scaling.
 
 **Crypto & hashing**
 - [x] ⭐ **Digests** — `[Crypto]Digest` class methods `sha256:`/`sha512:`/`sha1:`/`md5:`/`blake3:`
@@ -760,18 +637,7 @@ deferred `Mirror` in `## REPL`.
   deadlines, detached spawn+join — `docs/internal/ASYNC_ARCH.md` Stage 2b).
 
 ## Bugs/Odd Behavior
-- [ ] **Teardown abort (`fatal runtime error: failed to initiate panic, error 3`) when the
-  driver errors out deep in a run.** Found via wake-log replay of `qn test qnlib/tests`
-  (2026-07-13): a mid-suite `QuoinError` exit from `drive_to_completion` sometimes aborts
-  the process during teardown, AFTER the error prints correctly. Not replay-specific — the
-  replay divergence error is just an easy way to stop the driver at an arbitrary point.
-  Suspected: dropping a task whose coroutine is suspended inside an AOT/Cranelift frame
-  forces an unwind through code with no unwind info (corosensei force-unwind on drop).
-  Divergence early in the suite (interpreter-only frames live) exits cleanly; the same
-  error at a deep point aborts. Repro: record the suite (`QN_WAKE_RECORD`), replay it
-  (`QN_WAKE_REPLAY`) — the divergence at the first random-content op aborts on teardown.
-  Needs: identify the suspended frame kind at the abort, then either skip force-unwind for
-  frames that can't unwind or leak-and-exit on the error path.
+- Tracked as #139 — Fix teardown abort when the driver errors deep in a run.
 - [x] **`qn fmt` internal error: multi-line `#( … )` as `%`'s right operand inside a parenthesized
   argument.** The self-verification caught it (aborted, no corruption), but the file couldn't be
   formatted — `ParseError.throw:('… %1 …' % #(\n a\n b\n ))` lost the outer closing `)`. Root
@@ -899,40 +765,10 @@ deferred `Mirror` in `## REPL`.
   reply) — still recurses without a bound, so a deep value built in Quoin can overflow the host
   on the way out. Cap it the same way: a depth check in `value_to_data` (or a fallible
   depth-bounded `encode_dv`) raising a catchable error.
-- [ ] **Dangling `^^` (home method already returned) silently unwinds to the top-level frame
-  and ends the program early** instead of raising. Repro:
-  `Maker <- { .meta <-- { make -> { ^{ ^^ 'RET' } } } }; var blk = Maker.make; blk.value; 55.print`
-  — `55` never prints, exit 0 (verified 2026-07-10; consistent interp↔AOT). Wrapped in a
-  `catch:`, the error is a bare `String` `'Non-local return'`, so a typed `catch:{|e:Error|}`
-  can't catch it — the one survivor of the F12 bare-String-errors fix (class-structural errors
-  became `ClassError`; the NLR escape didn't). Most languages raise here (Ruby
-  `LocalJumpError`, Smalltalk `cannotReturn:`). Design decision from the 2026-07 bug hunt,
-  moved here when BUGS.md was retired: pick raise-vs-unwind, and either way make the error a
-  typed `Error` subclass.
-- [ ] **A `sort:` comparator returning a non-Boolean silently yields an unsorted list.**
-  `#(3 1 2).sort:{ |a b| 'yes' }` → `#(2 1 3)` (verified 2026-07-10) — garbage-in, but now
-  inconsistent with the strict-Boolean family (`if:`/`whileDo:` raise on non-Bool since the
-  bug-hunt F1/F14 fixes; the comparator result is the remaining truthiness leak in a
-  documented-strict position). Minor: raise like `whileDo:` does, or document.
-- [ ] **`var x = x` in a `new:{}` block read nil in one specific context** (2026-07-11,
-  found writing [Archive]Tar). In `[Archive]Tar#next`, `TarEntry.new:{ var name = name; … }`
-  bound @name to nil although a debug print showed `name` = './' immediately before the
-  construction; renaming the enclosing locals (`entryName` etc.) fixed it — the workaround
-  shipped in `qnlib/core/15-tar.qn` (`next`). THREE minimization attempts did NOT reproduce:
-  seven self-shadowed vars at top level; class method + whileDo + 3-deep else + `^^` + mixin +
-  intervening self-sends; multiple self-shadowed vars in a method. The failing shape had, in
-  addition: the outer var initialized from a `@field.defined?.if:else:` chain, the enclosing
-  class carrying same-named state, and 7 block vars. Needs VM-level debugging (env-frame capture
-  in instantiation blocks?) — start by restoring the original names in 15-tar.qn and bisecting
-  the real site.
-- [ ] **Builder-panic parse errors leak the raw Rust panic banner to stderr** before the
-  graceful report. The F4/F7 fix converts post-pest AST-builder panics (int literal ≥ 2^63,
-  `\uD800` surrogate escape) into catchable `ParseError`s via `catch_unwind`
-  (`try_parse_quoin_string_named`), but the default panic hook still prints
-  `thread 'main' panicked at …` + the `RUST_BACKTRACE` note first — file mode and
-  `Runtime.eval:` both show it (exit codes and catchability are correct). Cosmetic: suppress
-  the hook around the `catch_unwind` (single-threaded parse path), or return `Result` from
-  the two panicking sites.
+- Tracked as #140 — Raise (typed) on dangling ^^ instead of a silent early exit.
+- Tracked as #141 — Raise when a sort: comparator returns a non-Boolean.
+- Tracked as #138 — Fix var x = x reading nil in a new:{} instantiation block.
+- Tracked as #142 — Suppress raw Rust panic banner on builder-panic parse errors.
 
 ## 1. Class & Method Definition Semantics
 - [x] **Class Creation (`<-` operator)**:
@@ -1012,12 +848,7 @@ deferred `Mirror` in `## REPL`.
 - [x] **Alternative Parser Architecture Evaluation**:
   - Evaluate replacing ANTLR with Tree-sitter for faster full-file compiles using its compiled C engine.
   - Assess native Rust parser generators (e.g., LALRPOP or Pest) or hand-writing a recursive-descent parser for optimal compiler performance.
-- [ ] **Method-dispatch optimization** — live rollup in `profiling/status.md` (the authoritative
-  before/after + next-options doc). Original baseline (`profiling/dispatch-cache/notes.md`): the Send path
-  was malloc-dominated (37.8% self), `lookup_method` 21.5% inclusive (13.6% walk + 2.7% scoring). Since
-  then the bounded wins (caching, hashing, allocator, per-step/per-send allocs) **and** the first
-  structural swing (superinstructions) have landed — cumulatively ~65-78% faster than the start-of-session
-  baseline. The resolution-side levers are spent (IC ruled out); remaining headroom is structural.
+- Tracked as #72 — Method-dispatch optimization: structural headroom follow-ups.
   - [x] **Selector interning.** Replaced `Instruction::Send(String, …)` with an interned
     `Symbol(&'static str)` (Eq/Hash by pointer, lock-free `as_str()`; global leak-forever interner in
     `src/symbol.rs`). Kills the per-Send `selector.clone()` (~8.8% `String::clone`) and gives the dispatch
@@ -1069,22 +900,6 @@ deferred `Mirror` in `## REPL`.
     var-name `String` clones, and the per-access local SipHash (~2.6% → 1.1%). Capture model unchanged
     (closures still capture via `EnvFrame.parent`). **Result: malloc 32.6% → 27.7%; Fib −13% / Sieve
     −22% / Binary Trees −18%.** All green incl. `QN_GC_STRESS=1`. See `profiling/local-var-symbols/notes.md`.
-  - [ ] **Local variables — Step B (optional): full `(depth, slot)` resolution.** Replace the per-frame
-    `Vec<(Symbol,Value)>` with a `Box<[Value]>` sized to the slot count; compiler resolves every reference
-    to `(depth, slot)` (incl. a reserved `self` slot + capture depth + frame sizing). Buys: smaller env
-    allocs (no `Symbol` storage) + O(1) index access + the shared `Slots` primitive with instance vars.
-    Step A already captured the big win, so B's remaining upside is modest (same per-frame alloc *count*,
-    Vec→Box). **Only pursue if a later profile shows `EnvFrame::get`/the env alloc still hot.** Blocker for
-    B: the `%{}` string interpolation captures caller locals by name (`string.rs`) — see the "lower it to
-    String concat" item in §8; do that between A and B if we proceed.
-  - [ ] **Follow-up: migrate method tables to `Symbol` keys.** After the cache lands, rekey
-    `Class.instance_methods`/`class_methods` (and ideally `globals`/`NamespacedName`) from `String` to
-    `Symbol`, turning the per-class `methods.get(selector)` SipHash into an integer hash. Ripples through
-    the ~150 native `instance_method("name", …)` builder sites and `register_native_class`; do it as its
-    own pass once dispatch caching is in.
-  - [ ] **Follow-up: unify the symbol caches.** Reconcile the new compile-time selector interner
-    (`Symbol(&'static str)`) with the existing runtime `symbol_table` (`VmState`, interned `#foo` Quoin
-    symbol *values*) so there's a single canonical interning mechanism rather than two parallel ones.
   - [x] **Per-step whole-instruction clone.** `step_internal` used to deep-clone the whole `Instruction`
     every step (`frame.block.bytecode.get(ip).cloned()`), allocating for every heap-carrying variant.
     Fixed by cloning only the bytecode `Rc` (refcount bump, no alloc) into a local and taking a
@@ -1102,16 +917,9 @@ deferred `Mirror` in `## REPL`.
     Removed the dead write-only `last_send_receiver`. Stack traces diffed byte-identical before/after.
     **Result: malloc 30.4% → 22.9% (−7.4pts, the largest single drop); Fib −6% / Sieve −5% / Binary
     Trees −4%.** All green incl. `QN_GC_STRESS=1`. See `profiling/phase3-send-allocs/notes.md`.
-  - [ ] **Make stack-trace/error formatting unit-testable (data, not direct print).** `annotate_error`
-    (`vm.rs`) builds the stack trace by formatting strings inline (selector + arg types + source location
-    per frame). Extract the *structured data* — a `Vec` of per-frame records (selector, arg class names,
-    location) — from the string rendering, so the data can be asserted in Rust unit tests. This gives
-    Phase 3 (B) a real regression test: that an error raised from a 1+-arg send still reports its args
-    correctly (today only the `.qn` `07-errors` suite covers this indirectly, by matching printed output).
 
 ## 10. Test Coverage
-- [ ] **Increase Code Coverage**:
-  - Add more integration tests under `qnlib/tests/` to target uncovered parts of the compiler, runtime, and VM.
+- Tracked as #126 — Increase code coverage with more integration tests.
 - [x] **Track Quoin-level (`.qn`) coverage, not just Rust-level.** `cargo cov` / `cargo cov-test`
   (llvm-cov) only measure which *Rust* paths in the VM/runtime are exercised, not whether every
   `qnlib` method is actually called by the suite — a pure-Quoin method can sit untested while Rust
@@ -1120,35 +928,5 @@ deferred `Mirror` in `## REPL`.
   the debugger's line-map seam (one bool-load on the hot path when off), attributing hits per
   executing block so defining a method doesn't count its body as run. Emits LCOV or Cobertura XML.
   The first run flagged ~86 of 330 stdlib methods never exercised by the suite. Remaining:
-  - [ ] **Branch coverage** — harder than the usual "tag the conditional jumps." In Quoin only
-    `&&`/`||` lower to `IfJump`/`ElseJump` (`compiler.rs` `compile_binary_operator`); *every other*
-    conditional — `if:`, `if:else:`, `else:`, `whileTrue:`, `whileFalse:`, `ifNil:`, `ifNotNil:`,
-    `caseOf:` — is a **message send to a Boolean/nil receiver with block arguments** (the generic
-    keyword-send path, `Send(selector, n)`). The branch is the polymorphic dispatch to `True#if:`
-    vs `False#if:` deciding whether to run a block. So tagging jumps would catch almost nothing;
-    the right model is *a branch is a conditional send where the receiver decides which block-arm
-    runs.*
-    - **Leverage:** the arms are blocks and we already track per-block hit counts (block-span
-      keying), so "did each arm run?" is already measured — branch coverage largely reduces to
-      **arm-block coverage**, nearly free.
-    - **Gap:** the *implicit not-taken* side of one-armed / short-circuit forms is not a block
-      (a bare `cond.if:{a}` runs nothing on false; a loop may never enter; `&&`'s RHS may never
-      eval), so block hits alone can't see it. We tick line-starts, not every send, so there is no
-      exact per-site execution count to subtract.
-    - **(a) Arm coverage — cheap, recommended next:** at the denominator walk, recognize
-      branching-selector send sites (`Send` / `SendConst` / fused `SendLocalConst`) and pair them
-      with their arm blocks; report each arm covered or not. Also instrument the `&&`/`||`
-      `IfJump`/`ElseJump` the classic way. Honest and surfaces dead arms (the high-value finding),
-      but reports *arms taken*, not full two-way coverage (the implicit-else stays a blind spot).
-      Fiddly part: matching arm blocks through the fusion superinstructions.
-    - **(b) Condition-polarity coverage — accurate, later:** a gated send-site hook over a fixed
-      table of branching selectors that records the receiver's true/false/nil per site; a branch
-      is covered iff both polarities were seen there. Classic branch coverage, uniform across
-      one-armed/loops/short-circuit — at the cost of a second hot-path hook, a selector table, and
-      per-site identity.
-    - Emit as LCOV `BRDA` (and Cobertura `branch` attrs) once a model is chosen.
-  - [ ] The denominator is class methods only; file-level/top-level code and test-body blocks (not
-    reachable from the class registry) aren't enumerated. Walk loaded program blocks too.
-  - [ ] Per-tick filename hashing is fine for opt-in runs but could be interned if coverage ever
-    runs by default.
+  - Tracked as #128 — Round out Quoin-level (.qn) coverage: branch coverage & denominator.
 

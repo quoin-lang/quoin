@@ -181,6 +181,8 @@ any order.
 
 ## 5. Phase 3 (later): unboxed struct types — the tree lever
 
+> **Tracked as #61** — Add unboxed struct types for sealed all-typed-ivar classes.
+
 Binary Trees needs a *different* lever (`profiling/unboxed-ceiling/notes.md`): per-node `Gc`
 allocation, not scalar dispatch. Design sketch, built on the same typed+sealed machinery, **deferred
 until the numeric path lands**:
@@ -233,6 +235,8 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
     enclosing local needs `var` (`new:{ var key='a' }`), while `new:{ item=item }` (name matches a
     param) stays bare — inconsistent. Fix: treat a `new:{}` init block as a special context where
     `field=value` is always field-binding (no `var`, never the undeclared-local error). Small, separate.
+
+    > **Tracked as #57** — Make new:{} field inits always field-binding under strict mode.
   - **Followup — highlighter.** Add `var`/`let` to the syntax highlighter, colored the same as `use`
     (`crates/quoin-syntax/src/highlight.rs`).
 - **Slice 2a — arithmetic devirt. ✅ DONE** (`df65763` seal + `e8d726b`). Type propagation +
@@ -276,6 +280,8 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
   - **Followup — per-method sealing.** Whole-class `sealed!` is coarse; sealing an *individual method*
     (so only that method's dispatch is frozen/devirtualizable while the rest of the class stays open)
     would be finer-grained and preferable. Syntax TBD. Track for after 2b-B lands.
+
+    > **Tracked as #59** — Support sealing an individual method (per-method sealing).
 - **Slice 2d — control-flow inlining (v1 `if:`/`if:else:` + v2 `whileDo:` + options B & C DONE; v3 next).**
   Measured **2.0× typed fib(30)** (1.42s→0.71s), **1.5× untyped fib** (B), **~2.5× Sieve** (~40→~16ms),
   **~1.2× Binary Trees** (~545→~454ms, C). All three tracked benchmarks improved. All green: `.qn`
@@ -322,9 +328,13 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
       longer pushes a frame). The debugger's variable/scope display and step model will need scope
       metadata to reconstruct the source view over inlined regions — track against
       `docs/internal/DEBUGGER_ARCH.md`.
+
+      > **Tracked as #47** — Add scope metadata so the debugger reconstructs inlined regions.
   - **Slicing:** v1 inlines **declaration-free** control-flow blocks (covers **fib** + **sieve**
     immediately — their bodies only assign to method-level locals). v2 adds alpha-renaming for
     **declaration-carrying** blocks (**tree**'s `makeTree` `if:` declares `var left`/`var right`).
+
+    > **Tracked as #49** — Alpha-rename to inline declaration-carrying control-flow blocks.
   - **Correctness gate:** the full `.qn` suite stays green (behavior-identical), plus a differential
     test (inlined `bool.if:else:{}` vs. the same via a non-literal block variable) and `^`/`^^` edge
     cases (early `^` in a branch, `^^` through an inlined branch, `^` inside a nested non-inlined block).

@@ -143,6 +143,8 @@ predated strict `var`/`let`.
 - [ ] Digests (sha256/blake3/HMAC) — optional; verified absent.
   (UUID/ULID already ship: `src/runtime/ids.rs`, `qnlib/tests/37-ids.qn`.)
 
+  > **Tracked as #112** — Add a digests stdlib: sha256, blake3, HMAC.
+
 ## Docs publishing — generate everything as HTML, publish to the website
 
 Decided 2026-07-10: the release ships browsable docs on the project website
@@ -176,6 +178,8 @@ the state on `release/v0.1-final`:
   code-spans ONLY to avoid false positives on common words (Set, Log, Match, Span, Term).
   Decision 2026-07-12: defer — the book names classes and points at `qn doc`/the reference,
   which is acceptable for v0.1.
+
+  > **Tracked as #122** — Cross-link the book to the API reference in qn doc --md.
 
 ## Tier 4 — packaging, CI, docs triage
 
@@ -251,6 +255,9 @@ the state on `release/v0.1-final`:
   over parallel arrays, `await_holding_refcell_ref` on the intentional `ProcWait` borrow)
   carry justified per-site `#[allow]`s; the rest were fixed outright. (`crates/adbc` dropped
   2026-07-12 — deferred past v0.1 with the extension surface, see "Out of scope" above.)
+
+  > **Tracked as #118** — Add macOS CI runner and docs-regen-on-release CI. (The docs-regen-on-release half is the "Docs publishing → Publish pipeline" nicety above.)
+
 - [x] **Release workflow** (`.github/workflows/release.yml`, on `release/v0.1-final`):
   `v*` tag → matrix build (macOS arm64 on `macos-14`, Linux x86_64 on `ubuntu-22.04` for
   an old-enough glibc), **out-of-tree smoke test** (`cd $(mktemp -d)` then `qn --version`

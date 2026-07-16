@@ -199,3 +199,7 @@ over them. The feature is a second formatter, not a new highlighter:
 - **Deferred, explicitly:** extension-manifest docs (designed in §5, built when wanted),
   markdown richness beyond paragraphs + fenced code, multiline strings (independent feature,
   decide on its own merits).
+
+> **Tracked as #124** — Extend qn doc: extension-manifest docs and richer markdown.
+>
+> **Tracked as #106** — Add multiline string literals.

@@ -298,6 +298,8 @@ re-audit.
 
 ## 7. Tier C3 — shared immutables (sketch, deferred)
 
+> **Tracked as #33** — Add C3 shared immutable values across worker isolates.
+
 When C2 message traffic shows real copy cost, add a `Value` payload variant
 holding `Arc`-backed frozen data — big `Bytes`, strings, later frozen
 collections — that crosses workers **by reference**. It traces as
@@ -393,6 +395,8 @@ free-global set is statically knowable, so the pool checks at submit time:
 v1 errors naming the missing global (or the program preloads via
 `pool.use:'fetcher'`); the later magic version auto-ships the defining unit,
 BEAM-code-loading style (units know their source).
+
+> **Tracked as #36** — Auto-ship defining units for portable-block free globals.
 
 ### The layers
 
@@ -606,6 +610,9 @@ dependency with the C2/library line.
 - Resource handles across workers (socket handoff for an accept-and-dispatch
   server is the likely forcing function; the `DvResource` ownership pattern
   is the template).
+
+  > **Tracked as #43** — Support resource handle handoff across worker isolates.
+
 - C3 freeze semantics (explicit `freeze` vs frozen-by-construction literals)
   — defer until C2 data exists.
 - Snapshot/fork worker boot (only if fleet startup cost measures as real).
@@ -619,6 +626,9 @@ dependency with the C2/library line.
   linked workers) — a library concern, deliberately not runtime.
 - Fire-and-forget service sends: ordering/delivery guarantees, backpressure
   on the service mailbox.
+
+  > **Tracked as #40** — Define fire-and-forget service send delivery and backpressure.
+
 - Process-backed service transport: in-memory lanes don't cross a process
   boundary — likely the extension wire's UDS + msgpack verbatim, which
   would make a process-backed service nearly indistinguishable from an

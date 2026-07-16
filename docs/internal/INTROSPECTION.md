@@ -98,6 +98,8 @@ instance singletons, not user-facing types.
 
 ## Future: a Quoin `Mirror` API
 
+> **Tracked as #117** — Add a Quoin Mirror reflection API.
+
 The plan (not v1) is a native reflection class in Quoin — Bracha-style **mirrors**, so reflection
 lives in separate mirror objects rather than methods bolted onto every class. The Rust structs are
 the bridge: a `Mirror.of: Foo` (or `[Reflect]Class.named:`) native method calls `describe_class`
