@@ -89,7 +89,11 @@ fn to_spec(val: Value<'_>) -> ValueSpec {
                 }
                 ObjectPayload::Block(b) => ValueSpec::Block(b.template.name.clone()),
                 ObjectPayload::Bytes(_) => ValueSpec::Instance("Bytes".to_string()),
-                ObjectPayload::Instance | ObjectPayload::NativeState(_) => {
+                ObjectPayload::Instance
+                | ObjectPayload::List(_)
+                | ObjectPayload::Map(_)
+                | ObjectPayload::Set(_)
+                | ObjectPayload::NativeState(_) => {
                     ValueSpec::Instance(borrowed.class.borrow().name.to_string())
                 }
             }

@@ -450,6 +450,27 @@ impl AnyCollect for NativeMapState {
     }
 }
 
+impl Default for NativeMapState {
+    fn default() -> Self {
+        Self::new_empty()
+    }
+}
+
+// Statically-dispatched tracing for the dedicated `ObjectPayload::Map`
+// variant (the Box<dyn> path traces via `AnyCollect::trace_gc` above).
+unsafe impl<'gc> gc_arena::Collect<'gc> for NativeMapState {
+    const NEEDS_TRACE: bool = true;
+
+    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+        for (_, key, val) in &self.entries {
+            let key_gc: &Value<'gc> = unsafe { transmute(key) };
+            key_gc.trace(cc);
+            let val_gc: &Value<'gc> = unsafe { transmute(val) };
+            val_gc.trace(cc);
+        }
+    }
+}
+
 pub fn build_map_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Map", Some("Object"))
         .construct_with("use #{ … } literals")

@@ -145,23 +145,10 @@ pub fn build_string_class() -> NativeClassBuilder {
                 c.arg(&vm.stack, 0).unwrap()
             };
             let mut format_args_raw = Vec::new();
-            if let Value::Object(o) = arg1 {
-                let oref = o.borrow();
-                match &oref.payload {
-                    ObjectPayload::NativeState(state_cell) => {
-                        let state_ref = state_cell.borrow();
-                        if let Some(list_state) =
-                            state_ref.as_any().downcast_ref::<NativeListState>()
-                        {
-                            for val in list_state.get_vec() {
-                                format_args_raw.push(*val);
-                            }
-                        } else {
-                            format_args_raw.push(arg1);
-                        }
-                    }
-                    _ => format_args_raw.push(arg1),
-                }
+            if let Ok(items) =
+                arg1.with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
+            {
+                format_args_raw.extend(items);
             } else {
                 format_args_raw.push(arg1);
             }
@@ -188,29 +175,24 @@ pub fn build_string_class() -> NativeClassBuilder {
             // value runs arbitrary Quoin that can cooperatively yield, and a map-state
             // borrow held across that suspend collides with any concurrent use of the
             // same map (or a `s` that touches it) — "RefCell already borrowed".
-            let map_pairs: Vec<(String, Value)> = if let Value::Object(obj) = arg1
-                && let ObjectPayload::NativeState(state_cell) = &obj.borrow().payload
-                && let Some(map_state) = state_cell
-                    .borrow()
-                    .as_any()
-                    .downcast_ref::<NativeMapState>()
-            {
-                map_state
-                    .entries()
-                    .iter()
-                    .filter_map(|(_, k, v)| {
-                        if let Value::Object(kobj) = k
-                            && let crate::value::ObjectPayload::String(s) = &kobj.borrow().payload
-                        {
-                            Some(((**s).clone(), *v))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let map_pairs: Vec<(String, Value)> = arg1
+                .with_native_state::<NativeMapState, _, _>(|map_state| {
+                    map_state
+                        .entries()
+                        .iter()
+                        .filter_map(|(_, k, v)| {
+                            if let Value::Object(kobj) = k
+                                && let crate::value::ObjectPayload::String(s) =
+                                    &kobj.borrow().payload
+                            {
+                                Some(((**s).clone(), *v))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             for (k, v) in map_pairs {
                 let val_str_val = vm.call_method(mc, v, "s", vec![])?;
                 let val_str = match val_str_val {

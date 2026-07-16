@@ -129,7 +129,12 @@ fn value_to_data_at<'gc>(
                     ObjectPayload::Symbol(_) => Some("Symbol".to_string()),
                     ObjectPayload::Block(_) => Some("Block".to_string()),
                     ObjectPayload::Instance => Some(borrowed.class_name()),
-                    ObjectPayload::NativeState(_) => None, // dispatched below
+                    // dispatched below (with_native_state covers the
+                    // dedicated collection variants and the Box path)
+                    ObjectPayload::List(_)
+                    | ObjectPayload::Map(_)
+                    | ObjectPayload::Set(_)
+                    | ObjectPayload::NativeState(_) => None,
                 }
             };
             if let Some(kind) = blocked {

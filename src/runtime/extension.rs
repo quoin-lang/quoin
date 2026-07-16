@@ -124,7 +124,11 @@ pub(crate) fn value_to_wire(
                     ObjectPayload::Symbol(_) => return Err(unrepresentable("Symbol")),
                     ObjectPayload::Block(_) => return Err(unrepresentable("Block")),
                     ObjectPayload::Instance => return Err(unrepresentable(&borrowed.class_name())),
-                    ObjectPayload::NativeState(_) => {} // dispatched below, after dropping the borrow
+                    // dispatched below, after dropping the borrow
+                    ObjectPayload::List(_)
+                    | ObjectPayload::Map(_)
+                    | ObjectPayload::Set(_)
+                    | ObjectPayload::NativeState(_) => {}
                 }
             }
             if let Ok(owned) = v.with_native_state::<NativeExtResource, _, _>(|r| {

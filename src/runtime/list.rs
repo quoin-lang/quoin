@@ -67,6 +67,25 @@ impl AnyCollect for NativeListState {
     }
 }
 
+impl Default for NativeListState {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+// Statically-dispatched tracing for the dedicated `ObjectPayload::List`
+// variant (the Box<dyn> path traces via `AnyCollect::trace_gc` above).
+unsafe impl<'gc> gc_arena::Collect<'gc> for NativeListState {
+    const NEEDS_TRACE: bool = true;
+
+    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+        for val in &self.vec {
+            let val_gc: &Value<'gc> = unsafe { transmute(val) };
+            val_gc.trace(cc);
+        }
+    }
+}
+
 /// A fresh List value carrying an element tag (`List.of:`, `ensure:`,
 /// tag-propagating copies like `sliceFrom:`).
 pub fn new_list_with_tag<'gc>(

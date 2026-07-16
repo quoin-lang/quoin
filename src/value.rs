@@ -251,6 +251,16 @@ pub enum ObjectPayload<'gc> {
     Bytes(Gc<'gc, Vec<u8>>),
     Block(Gc<'gc, Block<'gc>>),
     Instance,
+    /// The hot builtin collections carry DEDICATED variants — still one thin
+    /// `Gc` pointer each, but the state struct lives directly in the
+    /// `Gc<RefLock<…>>` node, collapsing the former Gc → Box → Vec triple hop
+    /// to Gc → Vec and dropping the `Box` allocation per collection. The long
+    /// tail of native types (sockets, workers, times, …) stays in
+    /// `NativeState`; `new_native_state_boxed` re-routes any boxed collection
+    /// state here, so a collection can never end up on the Box path.
+    List(Gc<'gc, RefLock<NativeListState>>),
+    Map(Gc<'gc, RefLock<NativeMapState>>),
+    Set(Gc<'gc, RefLock<NativeSetState>>),
     NativeState(Gc<'gc, RefLock<Box<dyn AnyCollect>>>),
 }
 
@@ -330,12 +340,33 @@ impl<'gc> Value<'gc> {
     pub fn with_native_state<T: 'static, R, F: FnOnce(&T) -> R>(&self, f: F) -> Result<R, String> {
         if let Value::Object(obj) = self {
             let borrowed = obj.borrow();
-            if let ObjectPayload::NativeState(state_cell) = &borrowed.payload {
-                let state_ref = state_cell.borrow();
-                let any_ref = (**state_ref).as_any();
-                if let Some(concrete) = any_ref.downcast_ref::<T>() {
-                    return Ok(f(concrete));
+            match &borrowed.payload {
+                ObjectPayload::List(cell) => {
+                    let state = cell.borrow();
+                    if let Some(concrete) = (&*state as &dyn Any).downcast_ref::<T>() {
+                        return Ok(f(concrete));
+                    }
                 }
+                ObjectPayload::Map(cell) => {
+                    let state = cell.borrow();
+                    if let Some(concrete) = (&*state as &dyn Any).downcast_ref::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                ObjectPayload::Set(cell) => {
+                    let state = cell.borrow();
+                    if let Some(concrete) = (&*state as &dyn Any).downcast_ref::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                ObjectPayload::NativeState(state_cell) => {
+                    let state_ref = state_cell.borrow();
+                    let any_ref = (**state_ref).as_any();
+                    if let Some(concrete) = any_ref.downcast_ref::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                _ => {}
             }
         }
         Err("Not a native state of the requested type".to_string())
@@ -348,12 +379,33 @@ impl<'gc> Value<'gc> {
     ) -> Result<R, String> {
         if let Value::Object(obj) = self {
             let borrowed = obj.borrow();
-            if let ObjectPayload::NativeState(state_cell) = &borrowed.payload {
-                let mut state_ref = state_cell.borrow_mut(mc);
-                let any_mut = (**state_ref).as_any_mut();
-                if let Some(concrete) = any_mut.downcast_mut::<T>() {
-                    return Ok(f(concrete));
+            match &borrowed.payload {
+                ObjectPayload::List(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    if let Some(concrete) = (&mut *state as &mut dyn Any).downcast_mut::<T>() {
+                        return Ok(f(concrete));
+                    }
                 }
+                ObjectPayload::Map(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    if let Some(concrete) = (&mut *state as &mut dyn Any).downcast_mut::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                ObjectPayload::Set(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    if let Some(concrete) = (&mut *state as &mut dyn Any).downcast_mut::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                ObjectPayload::NativeState(state_cell) => {
+                    let mut state_ref = state_cell.borrow_mut(mc);
+                    let any_mut = (**state_ref).as_any_mut();
+                    if let Some(concrete) = any_mut.downcast_mut::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                _ => {}
             }
         }
         Err("Not a native state of the requested type".to_string())
@@ -371,9 +423,24 @@ impl<'gc> Value<'gc> {
     ) -> Option<R> {
         if let Value::Object(obj) = self {
             let borrowed = obj.borrow();
-            if let ObjectPayload::NativeState(state_cell) = &borrowed.payload {
-                let mut state_ref = state_cell.borrow_mut(mc);
-                return Some(f((**state_ref).as_any_mut()));
+            match &borrowed.payload {
+                ObjectPayload::List(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    return Some(f(&mut *state as &mut dyn Any));
+                }
+                ObjectPayload::Map(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    return Some(f(&mut *state as &mut dyn Any));
+                }
+                ObjectPayload::Set(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    return Some(f(&mut *state as &mut dyn Any));
+                }
+                ObjectPayload::NativeState(state_cell) => {
+                    let mut state_ref = state_cell.borrow_mut(mc);
+                    return Some(f((**state_ref).as_any_mut()));
+                }
+                _ => {}
             }
         }
         None
@@ -418,6 +485,12 @@ pub fn value_hash_scalar(v: &Value<'_>) -> Option<u64> {
                 ObjectPayload::Symbol(sym) => hash_i64(sym.as_str().as_ptr() as i64),
                 ObjectPayload::Block(b) => hash_i64(Gc::as_ptr(*b) as i64),
                 ObjectPayload::Instance => return None,
+                // Mutable builtin collections key by IDENTITY, matching their
+                // native `==` (content-hashing a mutable key is the classic
+                // footgun) — same as the NativeState fallback below.
+                ObjectPayload::List(_) | ObjectPayload::Map(_) | ObjectPayload::Set(_) => {
+                    hash_i64(Gc::as_ptr(*obj) as i64)
+                }
                 ObjectPayload::NativeState(cell) => {
                     let state = cell.borrow();
                     let any = (**state).as_any();
