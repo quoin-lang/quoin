@@ -148,14 +148,24 @@ fn workers_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Valu
     vm.new_map(mc, m)
 }
 
-/// The pin table's leak-accounting view: total live pins plus a count per
-/// owner kind (`src/pin_table.rs` — the one traced side table for native
-/// features that retain Values).
+/// The leak-accounting view over every Value-retaining registry: the pin
+/// table's total plus a count per owner kind (`src/pin_table.rs`), and — so
+/// this is ONE dashboard — the two registries that deliberately stay outside
+/// it: the extension handle table (wire-visible generational handles) and
+/// the installed service classes (a program-lifetime keyed registry).
 fn pins_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
     let mut m = vec![("live".to_string(), vm.new_int(mc, vm.pins.live() as i64))];
     for (kind, n) in vm.pins.counts_by_kind() {
         m.push((kind.to_string(), vm.new_int(mc, n as i64)));
     }
+    m.push((
+        "extHandles".to_string(),
+        vm.new_int(mc, vm.handle_table.live_count() as i64),
+    ));
+    m.push((
+        "serviceClasses".to_string(),
+        vm.new_int(mc, vm.service_classes.len() as i64),
+    ));
     vm.new_map(mc, m)
 }
 
@@ -579,8 +589,10 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
         .doc(
             "The VM's counters as a Map of sections: 'aot' (compiled / refused / skipped \
              plus per-reason counts), 'compute' (offload-pool jobs), 'workers' (isolates \
-             spawned / completed, messages copied), 'pins' (live GC pins, per owner \
-             kind). `compiled` counts translation events; `refused` / `skipped` count \
+             spawned / completed, messages copied), 'pins' (live GC pins per owner kind, \
+             plus the extension handle table and installed service classes -- every \
+             Value-retaining registry on one dashboard). `compiled` counts translation \
+             events; `refused` / `skipped` count \
              distinct members from a bounded log -- counters, not ledgers.\n\n\
              ```\n\
              VM.stats.keys    \"* -> #(aot compute workers pins)\n\

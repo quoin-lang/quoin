@@ -431,9 +431,16 @@ record/replay run containing a supervised death + restart.
    the death path" law precisely: the DECISION stays data-only; the hook runs
    in the recipe-replay phase, like an Erlang child init. The hook block
    roots through `vm.pins` — the NEW generic traced pin table
-   (`src/pin_table.rs`) that consolidated `recipe_chans` + `life_channels`
-   and stops the one-GC-root-per-feature pattern (`VM.stats` now reports
-   live pins per owner kind). Construction found a VM gotcha: a native that
+   (`src/pin_table.rs`) that consolidated `recipe_chans` + `life_channels` +
+   the worker-side hosted-object table (owner kind "hosted", identity-deduped
+   via `pin_or_find`, wire id = slot + 1 through owner-checked index
+   accessors) and stops the one-GC-root-per-feature pattern. The two
+   registries that deliberately STAY outside it, scoped in review: the
+   extension `handle_table` (a wire protocol, not a pin — generation-tagged
+   handles cross the socket, call-epoch local scoping on the hot path) and
+   `service_classes` (a program-lifetime keyed registry, class-table-shaped).
+   `VM.stats`' `pins` section is the ONE leak-accounting dashboard: live
+   pins per owner kind plus `extHandles` and `serviceClasses` rows. Construction found a VM gotcha: a native that
    SWALLOWS a Quoin-thrown error must clear `vm.exceptions.active`, or the
    stale value is handed to the next `catch:` anywhere in the VM in place of
    its real error (bit the poison-hook e2e; both hook seams clear it).*

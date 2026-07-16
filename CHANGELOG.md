@@ -65,8 +65,10 @@ under **Changed**, with the migration.
   budget — a permanently broken hook spends to `#gaveUp` rather than serving
   a half-configured peer. Re-installing replaces the hook; `nil` clears it.
   Internal: hook blocks root through the new generic pin table (`vm.pins`,
-  one traced side table replacing the per-feature GC-root fields; `VM.stats`
-  gained a `pins` section reporting live pins per owner kind).
+  one traced side table replacing the per-feature GC-root fields — recipe
+  channel args, lifecycle event channels, and the worker-side hosted-object
+  table all live there now; `VM.stats` gained a `pins` section reporting
+  every Value-retaining registry on one dashboard).
 
 - **The web worker pool self-heals** (WEB_ARCH.md workers — supervision's
   first consumer, built as a *library* strategy over the lifecycle events).

@@ -761,13 +761,6 @@ pub struct VmState<'gc> {
     /// `src/handle_table.rs` / `docs/internal/FUTURE_EXT_ARCH.md` §2.
     pub handle_table: crate::handle_table::HandleTable<'gc>,
 
-    /// WORKER-side hosted-object table (`ACTOR_OBJECTS.md` §2): the objects this
-    /// worker hosts for its parent, keyed by the id in `Call.recv` /
-    /// `CallReturnResource.resource` (index + 1; 0 is never issued). A GC root set,
-    /// like `handle_table` — a hosted object lives until the parent's proxy drop
-    /// releases it (`Call.releases`) or the serve loop ends. Always empty outside
-    /// `Worker.hostServe:`.
-    pub hosted: Vec<Option<Value<'gc>>>,
     /// Installed hosted-service classes (ACTOR_OBJECTS.md §2 manifests), keyed
     /// by (worker link, class name) — deliberately unbound as globals; this
     /// registry is their GC root (and, through their method nodes, the
@@ -787,8 +780,10 @@ pub struct VmState<'gc> {
     /// `Value` long-term (`src/pin_table.rs`): untraced native state stores a
     /// plain `PinId` instead of growing its own `VmState` root field. Holds
     /// the per-peer lifecycle events Channels (SUPERVISION.md slice 1, cached
-    /// via `life_channel_pins`), service-recipe channel args (slice 2), and
-    /// restart hooks.
+    /// via `life_channel_pins`), service-recipe channel args (slice 2),
+    /// restart hooks, and the WORKER-side hosted-object table
+    /// (ACTOR_OBJECTS.md §2 — owner kind "hosted", wire id = slot + 1; see
+    /// `hosted_insert` in `vm/call.rs`).
     pub pins: crate::pin_table::PinTable<'gc>,
     /// The ask-twice cache over `pins` for lifecycle events Channels, keyed
     /// by `vm.io.lives` index: a second `events` ask answers the SAME channel
@@ -951,7 +946,6 @@ impl<'gc> VmState<'gc> {
             },
             options,
             handle_table: crate::handle_table::HandleTable::new(),
-            hosted: Vec::new(),
             pins: crate::pin_table::PinTable::default(),
             life_channel_pins: rustc_hash::FxHashMap::default(),
             service_classes: Vec::new(),

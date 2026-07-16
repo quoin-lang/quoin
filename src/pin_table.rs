@@ -66,6 +66,50 @@ impl<'gc> PinTable<'gc> {
         self.slots.get(id.0).and_then(|s| s.as_ref()).map(|s| s.1)
     }
 
+    /// The ticket's raw slot index — for features whose consumers hold a
+    /// WIRE-side id derived from it (the hosted-object table) rather than the
+    /// `PinId` itself. Pair every index-based access with the owner-checked
+    /// accessors below, never with `get`/`unpin` on a reconstructed ticket.
+    pub fn index(id: PinId) -> usize {
+        id.0
+    }
+
+    /// Pin `value` under `owner`, answering the EXISTING ticket when the same
+    /// object is already pinned by that owner (identity dedupe — `Gc` pointer
+    /// equality; non-object values always pin fresh). The hosted-object
+    /// contract: hosting the same object twice must answer the same id.
+    pub fn pin_or_find(&mut self, owner: PinOwner, value: Value<'gc>) -> PinId {
+        if let Value::Object(obj) = value {
+            for (i, slot) in self.slots.iter().enumerate() {
+                if let Some((o, Value::Object(existing))) = slot
+                    && *o == owner
+                    && gc_arena::Gc::ptr_eq(*existing, obj)
+                {
+                    return PinId(i);
+                }
+            }
+        }
+        self.pin(owner, value)
+    }
+
+    /// The value at a raw slot index, ONLY if that slot's owner kind matches —
+    /// a wire-derived index must never resolve another feature's pin.
+    pub fn get_at(&self, index: usize, kind: &str) -> Option<Value<'gc>> {
+        match self.slots.get(index)? {
+            Some((o, v)) if o.kind == kind => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Release the pin at a raw slot index, ONLY if its owner kind matches
+    /// (idempotent — a stale or foreign index is a no-op).
+    pub fn unpin_at(&mut self, index: usize, kind: &str) {
+        if matches!(self.slots.get(index), Some(Some((o, _))) if o.kind == kind) {
+            self.slots[index] = None;
+            self.free.push(index);
+        }
+    }
+
     /// Release one pin, answering the value it held.
     pub fn unpin(&mut self, id: PinId) -> Option<Value<'gc>> {
         let slot = self.slots.get_mut(id.0)?.take()?;
