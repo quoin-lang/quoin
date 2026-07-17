@@ -1508,7 +1508,7 @@ pub(crate) fn lanes_arg<'gc>(v: Value<'gc>) -> Result<u32, QuoinError> {
 pub(crate) fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, QuoinError> {
     match v {
         Value::Object(obj) => match &obj.borrow().payload {
-            crate::value::ObjectPayload::String(s) => Ok((**s).clone()),
+            crate::value::ObjectPayload::String(s) => Ok(s.to_string()),
             _ => Err(QuoinError::Other(format!(
                 "Worker.host: {what} must be a String"
             ))),

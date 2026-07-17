@@ -666,7 +666,8 @@ pub fn build_lang_node_class() -> NativeClassBuilder {
         .instance_method("at:", |vm, mc, receiver, args| {
             let field = match args.first() {
                 Some(Value::Object(obj)) => match &obj.borrow().payload {
-                    ObjectPayload::Symbol(s) | ObjectPayload::String(s) => Some((**s).clone()),
+                    ObjectPayload::Symbol(s) => Some((**s).clone()),
+                    ObjectPayload::String(s) => Some(s.to_string()),
                     _ => None,
                 },
                 _ => None,

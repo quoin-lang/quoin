@@ -67,6 +67,25 @@ impl AnyCollect for NativeListState {
     }
 }
 
+impl Default for NativeListState {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+// Statically-dispatched tracing for the dedicated `ObjectPayload::List`
+// variant (the Box<dyn> path traces via `AnyCollect::trace_gc` above).
+unsafe impl<'gc> gc_arena::Collect<'gc> for NativeListState {
+    const NEEDS_TRACE: bool = true;
+
+    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+        for val in &self.vec {
+            let val_gc: &Value<'gc> = unsafe { transmute(val) };
+            val_gc.trace(cc);
+        }
+    }
+}
+
 /// A fresh List value carrying an element tag (`List.of:`, `ensure:`,
 /// tag-propagating copies like `sliceFrom:`).
 pub fn new_list_with_tag<'gc>(
@@ -296,7 +315,7 @@ pub fn build_list_class() -> NativeClassBuilder {
         // "not overridden" — otherwise every element pays the full dispatch
         // the mixin would.
         .typed_instance_method("join:", &["String"], |vm, mc, receiver, args| {
-            let sep: String = (*arg!(args, String, 0)).clone();
+            let sep: String = arg!(args, String, 0).to_string();
             let pristine_s = matches!(
                 vm.lookup_method(mc, args[0], Symbol::intern("s"), &[]),
                 Ok(Some(Callable::Native(_)))

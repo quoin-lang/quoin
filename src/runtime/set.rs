@@ -171,6 +171,25 @@ impl AnyCollect for NativeSetState {
     }
 }
 
+impl Default for NativeSetState {
+    fn default() -> Self {
+        Self::new_empty()
+    }
+}
+
+// Statically-dispatched tracing for the dedicated `ObjectPayload::Set`
+// variant (the Box<dyn> path traces via `AnyCollect::trace_gc` above).
+unsafe impl<'gc> gc_arena::Collect<'gc> for NativeSetState {
+    const NEEDS_TRACE: bool = true;
+
+    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+        for (_, val) in &self.entries {
+            let val_gc: &Value<'gc> = unsafe { transmute(val) };
+            val_gc.trace(cc);
+        }
+    }
+}
+
 /// Find `value`'s entry: `(hash, Some(index))` on a hit. Shares the Map's
 /// hash + equality ladder (`map_hash_key`/`keys_equal`), including the
 /// stack-rooting of bucket candidates across a parking `==:` hook.

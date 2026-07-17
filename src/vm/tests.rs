@@ -61,7 +61,7 @@ fn to_spec(val: Value<'_>) -> ValueSpec {
         Value::Object(obj) => {
             let borrowed = obj.borrow();
             match &borrowed.payload {
-                ObjectPayload::String(s) => ValueSpec::String((**s).clone()),
+                ObjectPayload::String(s) => ValueSpec::String(s.to_string()),
                 ObjectPayload::Symbol(s) => ValueSpec::Symbol((**s).clone()),
                 _ if borrowed.class_name() == "List" => {
                     let res = val.with_native_state::<NativeListState, _, _>(|l| {
@@ -89,7 +89,11 @@ fn to_spec(val: Value<'_>) -> ValueSpec {
                 }
                 ObjectPayload::Block(b) => ValueSpec::Block(b.template.name.clone()),
                 ObjectPayload::Bytes(_) => ValueSpec::Instance("Bytes".to_string()),
-                ObjectPayload::Instance | ObjectPayload::NativeState(_) => {
+                ObjectPayload::Instance
+                | ObjectPayload::List(_)
+                | ObjectPayload::Map(_)
+                | ObjectPayload::Set(_)
+                | ObjectPayload::NativeState(_) => {
                     ValueSpec::Instance(borrowed.class.borrow().name.to_string())
                 }
             }
@@ -2240,6 +2244,21 @@ fn value_layout_facts() {
     assert_eq!(probe(Value::Nil)[0], 3);
     assert_eq!(crate::codegen::helpers_kind_int(), 0);
     assert_eq!(crate::codegen::helpers_kind_nil(), 3);
+}
+
+#[test]
+fn payload_layout_facts() {
+    // Not ABI (nothing emits payload offsets), but load-bearing for the
+    // single-allocation-payload economics (#77): `Str` carries its inline
+    // bytes in 16 bytes, and rustc niches the payload discriminant into
+    // `Str`'s spare tag values, so the payload enum stays 16 bytes — Objects
+    // did NOT grow over the old one-pointer payload. A failure here means a
+    // variant change re-widened every Object (the inline-fields cancellation
+    // effect: cap 22 / payload 24 measured btrees +1.7-2.2%); re-measure
+    // btrees before accepting it.
+    use crate::value::{INLINE_STR_CAP, ObjectPayload, Str};
+    assert_eq!(std::mem::size_of::<Str>(), INLINE_STR_CAP + 2);
+    assert_eq!(std::mem::size_of::<ObjectPayload>(), 16);
 }
 
 /// Tier-shape pins (the AOT gallery's Rust-side twins — see

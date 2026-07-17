@@ -53,9 +53,18 @@ def run_once(binary, bench):
     return elapsed
 
 
-def run_bench(binary, bench, runs):
-    times = [run_once(binary, bench) for _ in range(runs)]
-    return {"min": min(times), "median": statistics.median(times), "times": times}
+def run_bench_set(bins, bench, runs):
+    """One bench across all binaries, interleaved run-by-run (A,B,A,B,...) so
+    thermal/background drift lands on both sides equally instead of biasing
+    whichever binary's sweep ran later."""
+    times = {label: [] for label, _ in bins}
+    for _ in range(runs):
+        for label, b in bins:
+            times[label].append(run_once(b, bench))
+    return {
+        label: {"min": min(ts), "median": statistics.median(ts), "times": ts}
+        for label, ts in times.items()
+    }
 
 
 def fmt_s(seconds):
@@ -99,15 +108,12 @@ def main():
     results = {}
     failed = False
     for bench in benches:
-        row = {}
-        for label, b in bins:
-            try:
-                row[label] = run_bench(b, bench, args.runs)
-            except RuntimeError as e:
-                print(f"FAIL  {e}", file=sys.stderr)
-                failed = True
-                row[label] = None
-        results[bench] = row
+        try:
+            results[bench] = run_bench_set(bins, bench, args.runs)
+        except RuntimeError as e:
+            print(f"FAIL  {e}", file=sys.stderr)
+            failed = True
+            results[bench] = {label: None for label, _ in bins}
 
     name_w = max(len(b) for b in benches)
     if args.compare:

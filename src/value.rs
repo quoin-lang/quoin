@@ -238,10 +238,135 @@ pub enum Value<'gc> {
     ClassMeta(Gc<'gc, RefLock<Class<'gc>>>) = 6,
 }
 
+/// Bytes a string payload can hold inline in the Object itself. 14 makes
+/// `Str` exactly 16 bytes (1 enum tag + 1 len + 14) — and rustc niches the
+/// `ObjectPayload` discriminant into `Str`'s spare tag values, so the payload
+/// enum stays 16 bytes and Objects DON'T grow at all (the inline-fields
+/// cancellation effect measured on btrees at cap 22 / payload 24: +1.7-2.2%).
+pub const INLINE_STR_CAP: usize = 14;
+
+/// The String payload representation. A small string lives INLINE in the
+/// Object — ONE GC allocation total, no inner buffer, no pointer chase. A
+/// long string (and every shared literal buffer) stays behind a
+/// `Gc<'gc, String>` exactly as before.
+///
+/// `Str` is `Copy` (24 bytes), which is what preserves the `recv!`/`arg!`
+/// discipline: natives still lift a cheap self-contained handle out of the
+/// `RefLock` borrow — the bytes themselves or a rooted `Gc` pointer — and
+/// `Deref<Target = str>` makes both read as `&str` with no guard held and
+/// no per-access buffer clone.
+#[derive(Clone, Copy)]
+pub enum Str<'gc> {
+    Inline { len: u8, buf: [u8; INLINE_STR_CAP] },
+    Heap(Gc<'gc, String>),
+}
+
+impl<'gc> Str<'gc> {
+    /// Inline the bytes of `s`. Caller guarantees `s.len() <= INLINE_STR_CAP`.
+    #[inline]
+    pub fn inline(s: &str) -> Self {
+        debug_assert!(s.len() <= INLINE_STR_CAP);
+        let mut buf = [0u8; INLINE_STR_CAP];
+        buf[..s.len()].copy_from_slice(s.as_bytes());
+        Str::Inline {
+            len: s.len() as u8,
+            buf,
+        }
+    }
+
+    /// From an owned String: inline if it fits (dropping the buffer), else
+    /// move the String into a fresh Gc node — no byte copy either way.
+    #[inline]
+    pub fn from_string(mc: &Mutation<'gc>, s: String) -> Self {
+        if s.len() <= INLINE_STR_CAP {
+            Str::inline(&s)
+        } else {
+            Str::Heap(Gc::new(mc, s))
+        }
+    }
+
+    /// From a borrowed str: inline when it fits — NO allocation at all —
+    /// else copy into a fresh Gc buffer. The right constructor whenever the
+    /// source is a slice (split pieces, path components), where going
+    /// through an owned `String` first would malloc+copy+free for nothing.
+    #[inline]
+    pub fn new(mc: &Mutation<'gc>, s: &str) -> Self {
+        if s.len() <= INLINE_STR_CAP {
+            Str::inline(s)
+        } else {
+            Str::Heap(Gc::new(mc, s.to_string()))
+        }
+    }
+
+    /// `a` + `b` assembled straight into an inline payload. Caller
+    /// guarantees `a.len() + b.len() <= INLINE_STR_CAP`.
+    #[inline]
+    pub fn inline2(a: &str, b: &str) -> Self {
+        let total = a.len() + b.len();
+        debug_assert!(total <= INLINE_STR_CAP);
+        let mut buf = [0u8; INLINE_STR_CAP];
+        buf[..a.len()].copy_from_slice(a.as_bytes());
+        buf[a.len()..total].copy_from_slice(b.as_bytes());
+        Str::Inline {
+            len: total as u8,
+            buf,
+        }
+    }
+
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Str::Inline { len, buf } => {
+                // The `.min` is a no-op (constructors guarantee
+                // `len <= INLINE_STR_CAP`) but lets LLVM prove the slice
+                // in-bounds — without it every access pays a bounds-check
+                // branch, which map lookups feel (~4 `as_str` per probe).
+                let len = (*len as usize).min(INLINE_STR_CAP);
+                // SAFETY: `buf[..len]` is always a whole `&str` copied in by
+                // `inline` — never a split byte sequence.
+                unsafe { std::str::from_utf8_unchecked(&buf[..len]) }
+            }
+            Str::Heap(g) => g.as_str(),
+        }
+    }
+}
+
+impl<'gc> std::ops::Deref for Str<'gc> {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<'gc> Debug for Str<'gc> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl<'gc> fmt::Display for Str<'gc> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// Hand-written (not derived) so the Inline arm is a traced-nothing leaf.
+unsafe impl<'gc> Collect<'gc> for Str<'gc> {
+    const NEEDS_TRACE: bool = true;
+
+    fn trace<T: Trace<'gc>>(&self, cc: &mut T) {
+        if let Str::Heap(g) = self {
+            g.trace(cc);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Collect, Debug)]
 #[collect(no_drop)]
 pub enum ObjectPayload<'gc> {
-    String(Gc<'gc, String>),
+    String(Str<'gc>),
     /// An interned symbol (`#foo`). The inner string is shared across all
     /// occurrences of the same name, so symbols compare by pointer identity.
     Symbol(Gc<'gc, String>),
@@ -251,6 +376,16 @@ pub enum ObjectPayload<'gc> {
     Bytes(Gc<'gc, Vec<u8>>),
     Block(Gc<'gc, Block<'gc>>),
     Instance,
+    /// The hot builtin collections carry DEDICATED variants — still one thin
+    /// `Gc` pointer each, but the state struct lives directly in the
+    /// `Gc<RefLock<…>>` node, collapsing the former Gc → Box → Vec triple hop
+    /// to Gc → Vec and dropping the `Box` allocation per collection. The long
+    /// tail of native types (sockets, workers, times, …) stays in
+    /// `NativeState`; `new_native_state_boxed` re-routes any boxed collection
+    /// state here, so a collection can never end up on the Box path.
+    List(Gc<'gc, RefLock<NativeListState>>),
+    Map(Gc<'gc, RefLock<NativeMapState>>),
+    Set(Gc<'gc, RefLock<NativeSetState>>),
     NativeState(Gc<'gc, RefLock<Box<dyn AnyCollect>>>),
 }
 
@@ -330,12 +465,33 @@ impl<'gc> Value<'gc> {
     pub fn with_native_state<T: 'static, R, F: FnOnce(&T) -> R>(&self, f: F) -> Result<R, String> {
         if let Value::Object(obj) = self {
             let borrowed = obj.borrow();
-            if let ObjectPayload::NativeState(state_cell) = &borrowed.payload {
-                let state_ref = state_cell.borrow();
-                let any_ref = (**state_ref).as_any();
-                if let Some(concrete) = any_ref.downcast_ref::<T>() {
-                    return Ok(f(concrete));
+            match &borrowed.payload {
+                ObjectPayload::List(cell) => {
+                    let state = cell.borrow();
+                    if let Some(concrete) = (&*state as &dyn Any).downcast_ref::<T>() {
+                        return Ok(f(concrete));
+                    }
                 }
+                ObjectPayload::Map(cell) => {
+                    let state = cell.borrow();
+                    if let Some(concrete) = (&*state as &dyn Any).downcast_ref::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                ObjectPayload::Set(cell) => {
+                    let state = cell.borrow();
+                    if let Some(concrete) = (&*state as &dyn Any).downcast_ref::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                ObjectPayload::NativeState(state_cell) => {
+                    let state_ref = state_cell.borrow();
+                    let any_ref = (**state_ref).as_any();
+                    if let Some(concrete) = any_ref.downcast_ref::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                _ => {}
             }
         }
         Err("Not a native state of the requested type".to_string())
@@ -348,12 +504,33 @@ impl<'gc> Value<'gc> {
     ) -> Result<R, String> {
         if let Value::Object(obj) = self {
             let borrowed = obj.borrow();
-            if let ObjectPayload::NativeState(state_cell) = &borrowed.payload {
-                let mut state_ref = state_cell.borrow_mut(mc);
-                let any_mut = (**state_ref).as_any_mut();
-                if let Some(concrete) = any_mut.downcast_mut::<T>() {
-                    return Ok(f(concrete));
+            match &borrowed.payload {
+                ObjectPayload::List(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    if let Some(concrete) = (&mut *state as &mut dyn Any).downcast_mut::<T>() {
+                        return Ok(f(concrete));
+                    }
                 }
+                ObjectPayload::Map(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    if let Some(concrete) = (&mut *state as &mut dyn Any).downcast_mut::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                ObjectPayload::Set(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    if let Some(concrete) = (&mut *state as &mut dyn Any).downcast_mut::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                ObjectPayload::NativeState(state_cell) => {
+                    let mut state_ref = state_cell.borrow_mut(mc);
+                    let any_mut = (**state_ref).as_any_mut();
+                    if let Some(concrete) = any_mut.downcast_mut::<T>() {
+                        return Ok(f(concrete));
+                    }
+                }
+                _ => {}
             }
         }
         Err("Not a native state of the requested type".to_string())
@@ -371,9 +548,24 @@ impl<'gc> Value<'gc> {
     ) -> Option<R> {
         if let Value::Object(obj) = self {
             let borrowed = obj.borrow();
-            if let ObjectPayload::NativeState(state_cell) = &borrowed.payload {
-                let mut state_ref = state_cell.borrow_mut(mc);
-                return Some(f((**state_ref).as_any_mut()));
+            match &borrowed.payload {
+                ObjectPayload::List(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    return Some(f(&mut *state as &mut dyn Any));
+                }
+                ObjectPayload::Map(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    return Some(f(&mut *state as &mut dyn Any));
+                }
+                ObjectPayload::Set(cell) => {
+                    let mut state = cell.borrow_mut(mc);
+                    return Some(f(&mut *state as &mut dyn Any));
+                }
+                ObjectPayload::NativeState(state_cell) => {
+                    let mut state_ref = state_cell.borrow_mut(mc);
+                    return Some(f((**state_ref).as_any_mut()));
+                }
+                _ => {}
             }
         }
         None
@@ -418,6 +610,12 @@ pub fn value_hash_scalar(v: &Value<'_>) -> Option<u64> {
                 ObjectPayload::Symbol(sym) => hash_i64(sym.as_str().as_ptr() as i64),
                 ObjectPayload::Block(b) => hash_i64(Gc::as_ptr(*b) as i64),
                 ObjectPayload::Instance => return None,
+                // Mutable builtin collections key by IDENTITY, matching their
+                // native `==` (content-hashing a mutable key is the classic
+                // footgun) — same as the NativeState fallback below.
+                ObjectPayload::List(_) | ObjectPayload::Map(_) | ObjectPayload::Set(_) => {
+                    hash_i64(Gc::as_ptr(*obj) as i64)
+                }
                 ObjectPayload::NativeState(cell) => {
                     let state = cell.borrow();
                     let any = (**state).as_any();
@@ -599,7 +797,7 @@ impl<'gc> fmt::Display for Value<'gc> {
 
                 let o_borrow = o.borrow();
                 match &o_borrow.payload {
-                    ObjectPayload::String(s) => write!(f, "{}", **s),
+                    ObjectPayload::String(s) => write!(f, "{}", s),
                     ObjectPayload::Symbol(s) => write!(f, "#{}", **s),
                     ObjectPayload::Bytes(b) => {
                         // Length + a short hex preview; never dump raw bytes to a terminal.

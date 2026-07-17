@@ -16,8 +16,14 @@ impl<'gc> VmState<'gc> {
             Constant::Int(i) => self.new_int(mc, *i),
             Constant::Double(f) => self.new_double(mc, *f),
             Constant::String(s) => {
-                let buf = self.literal_string_buffer(mc, s);
-                self.new_string_shared(mc, buf)
+                // Short literals inline into the Object payload directly —
+                // no shared-buffer map lookup, no inner buffer at all.
+                if s.len() <= crate::value::INLINE_STR_CAP {
+                    self.new_string_inline(mc, s)
+                } else {
+                    let buf = self.literal_string_buffer(mc, s);
+                    self.new_string_shared(mc, buf)
+                }
             }
             Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
             Constant::Block(sb) => {

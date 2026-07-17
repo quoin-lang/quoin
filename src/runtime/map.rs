@@ -413,7 +413,7 @@ impl PrettyPrint for NativeMapState {
                 if let Value::Object(obj) = k
                     && let ObjectPayload::String(s) = &obj.borrow().payload
                 {
-                    ((**s).clone(), true, *v)
+                    (s.to_string(), true, *v)
                 } else {
                     (
                         crate::runtime::pretty::render(*k, usize::MAX, false),
@@ -446,6 +446,27 @@ impl AnyCollect for NativeMapState {
             key_gc.dyn_trace(cc);
             let val_gc: &Value<'gc> = unsafe { transmute(val) };
             val_gc.dyn_trace(cc);
+        }
+    }
+}
+
+impl Default for NativeMapState {
+    fn default() -> Self {
+        Self::new_empty()
+    }
+}
+
+// Statically-dispatched tracing for the dedicated `ObjectPayload::Map`
+// variant (the Box<dyn> path traces via `AnyCollect::trace_gc` above).
+unsafe impl<'gc> gc_arena::Collect<'gc> for NativeMapState {
+    const NEEDS_TRACE: bool = true;
+
+    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+        for (_, key, val) in &self.entries {
+            let key_gc: &Value<'gc> = unsafe { transmute(key) };
+            key_gc.trace(cc);
+            let val_gc: &Value<'gc> = unsafe { transmute(val) };
+            val_gc.trace(cc);
         }
     }
 }

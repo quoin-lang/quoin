@@ -119,12 +119,16 @@ pub(crate) fn value_to_wire(
             {
                 let borrowed = obj.borrow();
                 match &borrowed.payload {
-                    ObjectPayload::String(s) => return Ok(WireData::Str((**s).clone())),
+                    ObjectPayload::String(s) => return Ok(WireData::Str(s.to_string())),
                     ObjectPayload::Bytes(b) => return Ok(WireData::Bytes((**b).clone())),
                     ObjectPayload::Symbol(_) => return Err(unrepresentable("Symbol")),
                     ObjectPayload::Block(_) => return Err(unrepresentable("Block")),
                     ObjectPayload::Instance => return Err(unrepresentable(&borrowed.class_name())),
-                    ObjectPayload::NativeState(_) => {} // dispatched below, after dropping the borrow
+                    // dispatched below, after dropping the borrow
+                    ObjectPayload::List(_)
+                    | ObjectPayload::Map(_)
+                    | ObjectPayload::Set(_)
+                    | ObjectPayload::NativeState(_) => {}
                 }
             }
             if let Ok(owned) = v.with_native_state::<NativeExtResource, _, _>(|r| {
@@ -166,7 +170,7 @@ pub(crate) fn value_to_wire(
                     let ObjectPayload::String(ks) = &kobj.borrow().payload else {
                         return Err(unrepresentable("Map with non-String keys"));
                     };
-                    entries.push(((**ks).clone(), value_to_wire(val, owner)?));
+                    entries.push((ks.to_string(), value_to_wire(val, owner)?));
                 }
                 return Ok(WireData::Map(entries));
             }

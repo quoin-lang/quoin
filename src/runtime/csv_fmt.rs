@@ -127,7 +127,7 @@ pub fn build_csv_class() -> NativeClassBuilder {
                                 && let crate::value::ObjectPayload::String(s) =
                                     &kobj.borrow().payload
                             {
-                                Some((**s).clone())
+                                Some(s.to_string())
                             } else {
                                 None
                             }
@@ -186,7 +186,7 @@ fn field_to_string<'gc>(host: &mut dyn Host<'gc>, field: Value<'gc>) -> Result<S
     if let Value::Object(obj) = s_val
         && let ObjectPayload::String(s) = &obj.borrow().payload
     {
-        return Ok((**s).clone());
+        return Ok(s.to_string());
     }
     Ok(format!("{s_val}"))
 }

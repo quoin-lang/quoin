@@ -337,7 +337,7 @@ fn object_doc<'gc>(
     let payload = {
         let b = o.borrow();
         match &b.payload {
-            ObjectPayload::String(s) => Payload::Str((**s).clone()),
+            ObjectPayload::String(s) => Payload::Str(s.to_string()),
             ObjectPayload::Symbol(s) => Payload::Sym((**s).clone()),
             ObjectPayload::Bytes(by) => {
                 Payload::Bytes(by.iter().take(16).copied().collect(), by.len())
@@ -358,7 +358,10 @@ fn object_doc<'gc>(
                     .collect();
                 Payload::Ivars(ivars)
             }
-            ObjectPayload::NativeState(_) => Payload::Native,
+            ObjectPayload::List(_)
+            | ObjectPayload::Map(_)
+            | ObjectPayload::Set(_)
+            | ObjectPayload::NativeState(_) => Payload::Native,
         }
     };
     match payload {
@@ -478,7 +481,10 @@ pub fn value_children<'gc>(value: Value<'gc>) -> Vec<(String, PpChild<'gc>)> {
                     .collect();
                 Kind::Ivars(ivars)
             }
-            ObjectPayload::NativeState(_) => Kind::Native,
+            ObjectPayload::List(_)
+            | ObjectPayload::Map(_)
+            | ObjectPayload::Set(_)
+            | ObjectPayload::NativeState(_) => Kind::Native,
             // String / Symbol / Bytes / Block render as a single inline leaf — no children.
             _ => Kind::Leaf,
         }

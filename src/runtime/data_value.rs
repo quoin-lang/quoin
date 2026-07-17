@@ -124,12 +124,17 @@ fn value_to_data_at<'gc>(
             let blocked: Option<String> = {
                 let borrowed = obj.borrow();
                 match &borrowed.payload {
-                    ObjectPayload::String(s) => return Ok(DataValue::Str((**s).clone())),
+                    ObjectPayload::String(s) => return Ok(DataValue::Str(s.to_string())),
                     ObjectPayload::Bytes(b) => return Ok(DataValue::Bytes((**b).clone())),
                     ObjectPayload::Symbol(_) => Some("Symbol".to_string()),
                     ObjectPayload::Block(_) => Some("Block".to_string()),
                     ObjectPayload::Instance => Some(borrowed.class_name()),
-                    ObjectPayload::NativeState(_) => None, // dispatched below
+                    // dispatched below (with_native_state covers the
+                    // dedicated collection variants and the Box path)
+                    ObjectPayload::List(_)
+                    | ObjectPayload::Map(_)
+                    | ObjectPayload::Set(_)
+                    | ObjectPayload::NativeState(_) => None,
                 }
             };
             if let Some(kind) = blocked {
@@ -156,7 +161,7 @@ fn value_to_data_at<'gc>(
                     let crate::value::ObjectPayload::String(ks) = &kobj.borrow().payload else {
                         return Err(unrepresentable("Map with non-String keys"));
                     };
-                    pairs.push(((**ks).clone(), value_to_data_at(vm, mc, val, depth + 1)?));
+                    pairs.push((ks.to_string(), value_to_data_at(vm, mc, val, depth + 1)?));
                 }
                 return Ok(DataValue::Object(pairs));
             }

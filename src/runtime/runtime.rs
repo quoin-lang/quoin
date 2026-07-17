@@ -151,7 +151,7 @@ pub fn build_runtime_class() -> NativeClassBuilder {
                         .get(frame_ip)
                         .and_then(|opt| opt.as_ref())
                         .or(f.block.template.source_info.as_ref())?;
-                    if si.filename.contains(&**frag) {
+                    if si.filename.contains(frag.as_str()) {
                         None
                     } else {
                         Some(format!("{}:{}:{}", si.filename, si.line, si.column + 1))
