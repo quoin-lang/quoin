@@ -262,16 +262,21 @@ childless/NULL-fk asks after the batch = 0).
 
 Additional findings from slice 2:
 
-- **A VM closure bug, worked around**: in a package (runner-compiled) unit, a
-  constructor-block local that shadows its own capture by name (`.new:{ var
-  model = model … }`) **with at least one more `var` in the block** pins the
-  FIRST invocation's binding — every later call reuses it (`Relation.on:Post`
-  minted User relations once `on:User` had run; eval/REPL-compiled units are
-  immune, which is why slice 1's monoculture tests never saw it). Workaround
-  everywhere in this package: never self-shadow in a `.new:` block (`on:` takes
-  `|m|`, the assoc mint copies through `o`). Deserves a VM issue + fix; minimal
-  repro: a two-var `.new:{ var x = x; var y = 1 }` in a `[lib]` package unit
-  called from two sites.
+- **A VM closure bug, found here and then fixed in the VM**: a block local
+  shadowing its own capture (`.new:{ var model = model … }`) reads the capture
+  BEFORE defining the shadow — a real free read — but `scan_closed`
+  (`src/instruction.rs`) collected `DefineLocal`s in an order-insensitive
+  pre-pass, judged the read bound, and declared the template CLOSED; the
+  constant-closure promotion then cached one closure per VM with the FIRST
+  materialization's environment (`Relation.on:Post` minted User relations once
+  `on:User` had run). Only runner-compiled units mint `template_id`s, so
+  eval/REPL probes were immune — why slice 1's monoculture tests never saw it.
+  Fixed by making the scan a single ordered pass (reads check defines seen so
+  far; `DefineLocalKeep` counts too); regression tests in
+  `src/compiler/tests.rs` (`closed_scan_is_order_sensitive`) and
+  `qnlib/tests/02-blocks.qn` (`shadowingCapturesAreFreshPerCall`). This
+  package keeps the distinct-name style anyway (`on:` takes `|m|`, the assoc
+  mint copies through `o`) — clearer, and independent of the fix.
 - `belongsTo` deliberately answers the instance (or nil), not a node — the
   asymmetry with `hasMany` is the ergonomic point (`p.author.name`); its force
   happens at the accessor, still cohort-batched.

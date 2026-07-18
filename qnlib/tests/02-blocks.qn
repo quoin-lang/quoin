@@ -54,6 +54,24 @@
     };
 
     .test:
+    shadowingCapturesAreFreshPerCall -> {
+        "* `var x = x` reads the capture BEFORE defining the shadow — a free
+        "* read, so this literal must never be judged closed and cached: each
+        "* call materializes a fresh closure over the CURRENT frame.
+        "* (Regression: with another var in the block, the constant-closure
+        "* promotion pinned the first call's environment into every later one.)
+        var mk = { |x|
+            {
+                var x = x
+                var y = 0
+                x + y
+            }
+        };
+        .is:{ (mk.value:1).value } equalTo:1;
+        .is:{ (mk.value:2).value } equalTo:2;
+    };
+
+    .test:
     valueArgs -> {
         .is:{ {|n| n*n}.value:3 } equalTo:9;
         .is:{ {|l| (l.at:0) + (l.at:1)}.value:#(10 5) } equalTo:15;

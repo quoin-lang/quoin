@@ -155,13 +155,16 @@ fn scan_closed(sb: &StaticBlock) -> bool {
     if template_uses_self(sb) {
         return false;
     }
+    // Locals defined in this body are not free — but only from their define
+    // onward, in ONE ordered pass. A read before its own define (`var x = x`
+    // self-shadowing a capture) is a real free read: judging it bound let the
+    // promotion cache a closure whose env-chain read resolved against the
+    // FIRST materialization's frame forever after. Linear order is sound
+    // here: vars are block-scoped and inlined regions rename their locals per
+    // generation, so no reachable read follows a define it can skip; a loop's
+    // first iteration still runs any read-before-define, which this pass
+    // correctly calls free.
     let mut defined: std::collections::HashSet<Symbol> = sb.param_syms.iter().copied().collect();
-    for inst in sb.bytecode.iter() {
-        // Locals defined in this body are not free.
-        if let Instruction::DefineLocal(sym) = inst {
-            defined.insert(*sym);
-        }
-    }
     for inst in sb.bytecode.iter() {
         let free = match inst {
             Instruction::LoadLocal(s)
@@ -191,6 +194,12 @@ fn scan_closed(sb: &StaticBlock) -> bool {
             && !scan_closed(inner)
         {
             return false;
+        }
+        // The define lands AFTER this instruction's read side: DefineLocal
+        // consumes the already-pushed value, it reads nothing by symbol.
+        // DefineLocalKeep (a decl in tail position) defines just the same.
+        if let Instruction::DefineLocal(sym) | Instruction::DefineLocalKeep(sym) = inst {
+            defined.insert(*sym);
         }
     }
     true
