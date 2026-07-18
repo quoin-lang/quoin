@@ -208,7 +208,44 @@ documented element type. `Relation` type-var annotations are checker-only
    typed DB errors when ADBC grows them; migrations/introspection (blocked on
    ADBC's deferred `get_objects`).
 
-## 11. Decisions record
+## 11. Status (2026-07-18)
+
+**Slice 1 complete** on `feat/strata-orm` (two commits: `Block#captures` in the
+VM, then this package + `qnlib/tests/81-strata.qn`), not yet pushed / no PR.
+Full matrix verified: qnlib suites 2511/0 (pure suite runs everywhere; e2e suite
+ran for real against SQLite — hydration, generated accessors, memoization,
+count/pluck/exists?, `via:` routing), nextest 810/810, clippy, wasm clippy +
+cdylib link, dylint, `qn doc --check` (stdlib + book), `qn fmt`.
+
+Implementation notes that amend or sharpen the design above:
+
+- **The `@ivar` hole is real and closed.** In the AST, `@min` parses as an
+  `identifier` whose `name` field drops the `@` — only `.text` keeps it — and a
+  top-level `Runtime.eval:` reads an undefined ivar as nil, so an ivar in a
+  predicate would have *silently bound NULL*. `hostValue:` therefore walks every
+  host subtree (`allNodes`) and refuses any `@`-text identifier or receiverless
+  send with a "bind it to a local first" error, before eval.
+- **ADBC refuses an empty bind batch** ("must either specify a row count or at
+  least one column"): the repo skips the `params:` send entirely when the list
+  is empty.
+- **The `;`-glue rule bites the DSL itself**: consecutive class-body declaration
+  lines (and any method-body line followed by a `.`-leading line) need explicit
+  `;` or the next send swallows into the previous one — this caused three
+  distinct bugs during the build, one inside the package's own `on:`. The model
+  doc-comment example now warns about it.
+- **Two test suites, not one**: `TestSuite#skip:` marks a *whole* suite skipped,
+  so the pure tier (lowering + refusals, no database) is its own suite and the
+  e2e tier gates on the 43-adbc readiness probe separately.
+- The symbolic-proxy alternative was confirmed dangerous before rejection: `&&`
+  on a truthy non-Boolean silently returns the right operand (see §12), so the
+  AST path was the correct fork.
+
+**Next: slice 2** — `hasMany:of:via:` / `belongsTo:of:via:` declarations, lazy
+`[Strata]Assoc` nodes, sibling-batched IN loading, and `with:` preloads. The
+`@batch` cohort tagging it fans out across is already in place in
+`strataHydrate:`.
+
+## 12. Decisions record
 
 - **Name**: Strata (layered rock; tables as strata). Damon's pick, 2026-07-18.
 - **Predicates**: AST-compile via `block.code` + new `Block#captures`, over a

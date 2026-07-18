@@ -34,10 +34,11 @@
             (.strataMeta.at:'cols').at:c.s put:sqlName
             self
         }
-        "* type: is checker/DDL-facing metadata; recorded, not enforced.
+        "* type: is checker/DDL-facing metadata; recorded, not enforced. The
+        "* class NAME is stored ('Double', not a rendered value).
         col:type: -> { |c t|
             .col:c
-            (.strataMeta.at:'types').at:c.s put:t.s
+            (.strataMeta.at:'types').at:c.s put:t.name
             self
         }
 

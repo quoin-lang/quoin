@@ -1,0 +1,87 @@
+"* Model declaration DSL + registry (lib/04-model.qn, lib/00-core.qn): table
+"* and key defaults, camelCase -> snake_case column mapping, col:as:/col:type:
+"* overrides, unknown-column refusals, and first-use accessor generation —
+"* strataHydrate: is pure, so hydration and accessors test without a database.
+"*
+"* Widget and Gadget are shared by the later test units (units in one run see
+"* each other's classes); models used by a single test are declared local.
+use strata:*
+
+[Strata]Model <- Widget <- {
+    .table:'widgets';
+    .col:#id type:Integer;
+    .col:#name;
+    .col:#kind;
+    .col:#weightKg type:Double
+}
+
+"* Declaration defaults: no .table: -> lowercased name + 's'; col:as: override.
+[Strata]Model <- Gadget <- {
+    .col:#id;
+    .col:#label as:'tag_text'
+}
+
+[Strata]Model <- KeyedThing <- {
+    .table:'things' key:#thingId;
+    .col:#thingId
+}
+
+"* A hand-written accessor anywhere in the body wins over generation.
+[Strata]Model <- Sprocket <- {
+    .col:#id;
+    .col:#label
+    label -> { 'L:' + (@row.at:'label') }
+}
+
+(TestSuite.new:{ var name = 'StrataModel' }).add:{
+    .test:
+    registryAndDefaults -> {
+        .is:{ Widget.strataTable } equalTo:'widgets';
+        .is:{ Widget.strataSqlCol:#weightKg } equalTo:'weight_kg';
+        .is:{ Widget.strataMeta.at:'key' } equalTo:'id';
+        .is:{ Gadget.strataTable } equalTo:'gadgets';
+        .is:{ Gadget.strataSqlCol:#label } equalTo:'tag_text';
+        .is:{ KeyedThing.strataTable } equalTo:'things';
+        .is:{ KeyedThing.strataMeta.at:'key' } equalTo:'thing_id';
+    };
+
+    .test:
+    snakeCaseMapping -> {
+        .is:{ Widget.strataSnake:'name' } equalTo:'name';
+        .is:{ Widget.strataSnake:'weightKg' } equalTo:'weight_kg';
+        .is:{ Widget.strataSnake:'aBigLongName' } equalTo:'a_big_long_name';
+    };
+
+    .test:
+    typeMetadataIsRecorded -> {
+        .is:{ (Widget.strataMeta.at:'types').at:'id' } equalTo:'Integer';
+        .is:{ (Widget.strataMeta.at:'types').at:'weightKg' } equalTo:'Double';
+        "* col: without type: records nothing
+        .is:{ (Widget.strataMeta.at:'types').at:'name' } equalTo:nil;
+    };
+
+    .test:
+    unknownColumnsRefuseWithTheDeclaredList -> {
+        .does:{ Widget.strataSqlCol:#nope } throw:#/unknown column nope/;
+        .does:{ Widget.strataSqlCol:#nope } throw:#/declared: id/;
+    };
+
+    .test:
+    accessorsGenerateOnFirstUse -> {
+        Sprocket.strataEnsure;
+        var s = (Sprocket.strataHydrate:#( (#{ 'id': 1 'label': 'x' }) )).first;
+        "* the hand-written accessor won; the generated getter fills the rest
+        .is:{ s.label } equalTo:'L:x';
+        .is:{ s.id } equalTo:1;
+        "* generated setter writes through to the row; generic at: reads raw
+        s.id:7;
+        .is:{ s.at:#id } equalTo:7;
+        .is:{ s.at:#label } equalTo:'x';
+        .is:{ s.row.at:'label' } equalTo:'x';
+        "* ensure is one-time (registry-flagged): a second call changes nothing
+        Sprocket.strataEnsure;
+        .is:{ s.label } equalTo:'L:x';
+        "* hydration tagged the cohort (slice-2 batching reads it)
+        .is:{ s.strataBatch.count } equalTo:1;
+    };
+}

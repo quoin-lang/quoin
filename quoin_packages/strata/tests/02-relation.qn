@@ -1,0 +1,71 @@
+"* The lazy relation (lib/03-relation.qn) + dialects (lib/01-dialect.qn):
+"* combinators derive immutable plan nodes, toSql lowers without executing,
+"* and the Postgres dialect renumbers placeholders at force time. Widget comes
+"* from 00-model.qn. Pure: no repo is ever reached (missingDefaultRepoRefuses
+"* proves the one force point exercised here stops at the repo lookup).
+use strata:*
+
+(TestSuite.new:{ var name = 'StrataRelation' }).add:{
+    .test:
+    lowersThePlan -> {
+        var lowered = (((Widget.where:{ |w| w.kind == 'gear' }).orderBy:#name).limit:2).toSql;
+        .is:{ lowered.first } equalTo:'SELECT * FROM "widgets" WHERE ("kind" = ?) ORDER BY "name" LIMIT 2';
+        .is:{ lowered.second } equalTo:#( 'gear' );
+
+        var paged = ((((Widget.all.distinct).orderByDesc:#weightKg).limit:5).skip:10).toSql;
+        .is:{ paged.first } equalTo:'SELECT DISTINCT * FROM "widgets" ORDER BY "weight_kg" DESC LIMIT 5 OFFSET 10';
+    };
+
+    .test:
+    whereTiersCompose -> {
+        "* Map tier: equality per pair (nil -> IS NULL); multiple wheres AND
+        var lowered = ((Widget.where:#{ 'kind': 'tool' }).where:#{ 'name': nil }).toSql;
+        .is:{ lowered.first } equalTo:'SELECT * FROM "widgets" WHERE ("kind" = ?) AND ("name" IS NULL)';
+        .is:{ lowered.second } equalTo:#( 'tool' );
+
+        "* raw tier: fragment + params pass straight through
+        var raw = (Widget.where:'weight_kg > ? and kind = ?' params:#( 1.5 'tool' )).toSql;
+        .is:{ raw.first } equalTo:'SELECT * FROM "widgets" WHERE (weight_kg > ? and kind = ?)';
+        .is:{ raw.second } equalTo:#( 1.5 'tool' );
+    };
+
+    .test:
+    derivationSharesNothing -> {
+        var base = Widget.where:#{ 'kind': 'tool' };
+        var limited = base.limit:1;
+        var ordered = base.orderBy:#name;
+        var narrowed = base.where:#{ 'name': 'Anvil' };
+
+        "* three children minted, the parent's plan is untouched
+        .is:{ base.toSql.first } equalTo:'SELECT * FROM "widgets" WHERE ("kind" = ?)';
+        .is:{ base.toSql.second } equalTo:#( 'tool' );
+
+        "* ...and no child sees a sibling's refinement
+        .is:{ limited.toSql.first } equalTo:'SELECT * FROM "widgets" WHERE ("kind" = ?) LIMIT 1';
+        .is:{ ordered.toSql.first } equalTo:'SELECT * FROM "widgets" WHERE ("kind" = ?) ORDER BY "name"';
+        .is:{ narrowed.toSql.first } equalTo:'SELECT * FROM "widgets" WHERE ("kind" = ?) AND ("name" = ?)';
+        .is:{ narrowed.toSql.second } equalTo:#( 'tool' 'Anvil' );
+    };
+
+    .test:
+    unknownColumnsRefuseInEveryCombinator -> {
+        .does:{ Widget.orderBy:#nope } throw:#/unknown column nope/;
+        .does:{ Widget.where:#{ 'nope': 1 } } throw:#/unknown column nope/;
+    };
+
+    .test:
+    postgresPlaceholders -> {
+        var d = [Strata]PostgresDialect.new;
+        .is:{ d.placeholders:'a = ? AND b IN (?, ?)' } equalTo:'a = $1 AND b IN ($2, $3)';
+        .is:{ d.placeholders:'no params' } equalTo:'no params';
+        "* numbering does not stop at one digit
+        .is:{ d.placeholders:'?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?' } equalTo:'$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11';
+        .is:{ [Strata]SqliteDialect.new.placeholders:'a = ?' } equalTo:'a = ?';
+    };
+
+    .test:
+    missingDefaultRepoRefuses -> {
+        [Strata]State.at:'defaultRepo' put:nil;
+        .does:{ (Widget.where:#{ 'kind': 'tool' }).toList } throw:#/no default repo/;
+    };
+}
