@@ -1,0 +1,157 @@
+"* The predicate compiler: a `where:` block becomes SQL, it never runs.
+"*
+"* Mechanism (DESIGN.md 5): the block's recorded source ([Lang]Parser over
+"* block.code) gives the boolean structure; any maximal subtree that does NOT
+"* mention the row parameter is evaluated host-side — its source text runs
+"* through Runtime.eval:bindings: against the block's captured environment
+"* (Block#captures) — and binds as a SQL parameter. Everything unsupported
+"* refuses loudly at BUILD time, not at force time.
+use std:lang/ast
+
+[Strata]Sql <- { |@param @cols @caps @params|
+    .meta <-- {
+        "* Compile `blk` against `model`'s declared columns. Answers
+        "* #( whereSql paramsList ); whereSql is fully parenthesized.
+        compile:for: -> { |blk model|
+            (blk.arity == 1).else:{
+                [Strata]Error.throw:'where: block must take exactly one row parameter, e.g. { |u| u.age > 21 }'
+            }
+            var code = blk.code
+            code.defined?.else:{
+                [Strata]Error.throw:'where: block carries no source (assembled at runtime?) — use where:params: with raw SQL instead'
+            }
+            var tree = [Lang]Parser.parse:code
+            var body = tree.children.first.children
+            (body.count == 1).else:{
+                [Strata]Error.throw:'where: block must be a single expression'
+            }
+            var p = blk.args.first
+            var cs = model.strataCols
+            var cp = blk.captures
+            var c = .new:{
+                var param = p
+                var cols = cs
+                var caps = cp
+                var params = #()
+            }
+            var sql = c.expr:body.first
+            #( sql c.params )
+        }
+    }
+
+    params -> { @params }
+
+    "* Does this subtree mention the row parameter?
+    mentions: -> { |n|
+        (n.kind == #identifier).if:{ ^^ (n.at:#name) == @param }
+        var me = self
+        n.children.any?:{ |c| me.mentions:c }
+    }
+
+    "* Compile one expression node to a SQL fragment (parameters accumulate
+    "* into @params in emission order).
+    expr: -> { |n|
+        (.mentions:n).else:{ ^^ .host:n }
+        var k = n.kind
+        (k == #binaryOp).if:{ ^^ .binary:n }
+        ((k == #unaryOp) && ((n.at:#operator) == '!')).if:{
+            ^^ '(NOT ' + (.expr:(n.children.first)) + ')'
+        }
+        (k == #send).if:{ ^^ .send:n }
+        (k == #identifier).if:{
+            [Strata]Error.throw:('where: the row parameter itself is not a value — select a column: ' + @param + '.<col>')
+        }
+        [Strata]Error.throw:('where: unsupported expression: ' + n.text)
+    }
+
+    binary: -> { |n|
+        var op = n.at:#operator
+        var l = n.children.first
+        var r = n.children.second
+        (op == '&&').if:{ ^^ '(' + (.expr:l) + ' AND ' + (.expr:r) + ')' }
+        (op == '||').if:{ ^^ '(' + (.expr:l) + ' OR ' + (.expr:r) + ')' }
+        "* == / != against literal nil are the SQL NULL tests.
+        ((op == '==') && (.nilNode?:r)).if:{ ^^ '(' + (.expr:l) + ' IS NULL)' }
+        ((op == '!=') && (.nilNode?:r)).if:{ ^^ '(' + (.expr:l) + ' IS NOT NULL)' }
+        var sqlOp = #{
+            '==': '=' '!=': '<>' '~': 'LIKE'
+            '>': '>' '<': '<' '>=': '>=' '<=': '<='
+            '+': '+' '-': '-' '*': '*' '/': '/' '%': '%'
+        }.at:op
+        sqlOp.defined?.else:{
+            [Strata]Error.throw:('where: operator ' + op + ' is not supported in predicates')
+        }
+        '(' + (.expr:l) + ' ' + sqlOp + ' ' + (.expr:r) + ')'
+    }
+
+    send: -> { |n|
+        var sel = n.at:#selector
+        (n.children.count == 0).if:{
+            [Strata]Error.throw:('where: predicates cannot reference self (.' + sel + ') — bind it to a local first')
+        }
+        var recv = n.children.first
+        "* A unary send to the row parameter is a column reference.
+        ((recv.kind == #identifier) && ((recv.at:#name) == @param)).if:{ ^^ .colRef:sel }
+        (sel == 'defined?').if:{ ^^ '(' + (.expr:recv) + ' IS NOT NULL)' }
+        (sel == 'in:').if:{ ^^ .inList:n receiver:recv }
+        (sel == 'between:and:').if:{
+            ^^ '(' + (.expr:recv) + ' BETWEEN ' + (.host:(n.children.second)) + ' AND ' + (.host:(n.children.at:2)) + ')'
+        }
+        [Strata]Error.throw:('where: selector ' + sel + ' is not supported on row values')
+    }
+
+    colRef: -> { |sel|
+        (sel.starts?:'@').if:{
+            [Strata]Error.throw:('where: predicates cannot read instance state (' + sel + ') — bind it to a local first')
+        }
+        var col = @cols.at:sel
+        col.defined?.else:{
+            [Strata]Error.throw:('where: unknown column ' + sel + ' (declared: ' + (@cols.keys.join:', ') + ')')
+        }
+        '"' + col + '"'
+    }
+
+    inList:receiver: -> { |n recv|
+        var arg = n.children.second
+        (.mentions:arg).if:{
+            [Strata]Error.throw:'where: the in: argument must not mention the row parameter'
+        }
+        var vals = .hostValue:arg
+        (List ~ vals).else:{
+            [Strata]Error.throw:'where: in: expects a List'
+        }
+        (vals.count == 0).if:{ ^^ '(1 = 0)' }
+        var marks = #()
+        vals.each:{ |v|
+            @params.add:v
+            marks.add:'?'
+        }
+        '(' + (.expr:recv) + ' IN (' + (marks.join:', ') + '))'
+    }
+
+    "* A row-free subtree: evaluate host-side, bind as a parameter.
+    host: -> { |n|
+        @params.add:(.hostValue:n)
+        '?'
+    }
+
+    hostValue: -> { |n|
+        "* An ivar read (`@x` — the identifier's name drops the @, only text
+        "* keeps it) or a self send would silently evaluate against the WRONG
+        "* self (top-level eval reads undefined ivars as nil) — refuse every
+        "* such node anywhere in the subtree, loudly.
+        n.allNodes.each:{ |sub|
+            ((sub.kind == #identifier) && (sub.text.starts?:'@')).if:{
+                [Strata]Error.throw:('where: predicates cannot read instance state (' + sub.text + ') — bind it to a local first')
+            }
+            ((sub.kind == #send) && (sub.children.count == 0)).if:{
+                [Strata]Error.throw:('where: predicates cannot reference self (' + sub.text + ') — bind it to a local first')
+            }
+        }
+        { Runtime.eval:n.text bindings:@caps }.catch:{ |e|
+            [Strata]Error.throw:('where: cannot evaluate `' + n.text + '` outside the row (' + e.message + ')')
+        }
+    }
+
+    nilNode?: -> { |n| (n.kind == #identifier) && ((n.at:#name) == 'nil') }
+}
