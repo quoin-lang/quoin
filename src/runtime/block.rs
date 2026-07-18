@@ -2,8 +2,9 @@ use crate::arg;
 use crate::error::QuoinError;
 use crate::recv;
 use crate::runtime::list::NativeListState;
-use crate::value::{Block, NativeClassBuilder, ObjectPayload, Value};
+use crate::value::{Block, EnvFrame, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
+use crate::worker::scan_captures;
 
 use gc_arena::{Gc, Mutation};
 
@@ -92,6 +93,38 @@ pub fn build_block_class() -> NativeClassBuilder {
             "Where the block was defined: `#( filename line column )` -- line 1-indexed, \
              column 0-indexed -- or nil when the block carries no source info. The test \
              reporter uses it to point a failed assertion at its source.",
+        )
+        // Reflection over the closure's environment: every free variable the
+        // block reads or writes, resolved through the capture chain LIVE (no
+        // copy -- mutating a captured object is visible here and vice versa).
+        // The lax scan (`scan_captures`) is the portability scanner minus its
+        // refusals: `self`/`@field` access is instance state, not a capture,
+        // and is simply absent from the result.
+        .instance_method("captures", |vm, mc, receiver, _args| {
+            let block = recv!(receiver, Block);
+            let pairs = scan_captures(&block.template)
+                .into_iter()
+                .map(|sym| {
+                    // A binding the chain cannot see reads as nil, matching
+                    // both the interpreter and `snapshot_block`.
+                    let val = block
+                        .parent_env
+                        .and_then(|env| EnvFrame::get(env, sym))
+                        .unwrap_or(Value::Nil);
+                    (sym.as_str().to_string(), val)
+                })
+                .collect();
+            Ok(vm.new_map(mc, pairs))
+        })
+        .doc(
+            "The block's captured variables -- enclosing locals it uses but does not \
+             bind -- as a Map of name String to current value, in first-use order. \
+             Values are the live captured bindings, not copies. Globals, `self`, and \
+             `@field` access are not captures and do not appear.\n\n\
+             ```\n\
+             var n = 3;\n\
+             { |x| x + n }.captures    \"* -> #{'n': 3}\n\
+             ```",
         )
         // `value`/`value:` have an interpreter fast path (`exec_send`, which
         // short-circuits before lookup), but they must ALSO be real methods:

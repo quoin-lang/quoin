@@ -28,6 +28,27 @@
     };
 
     .test:
+    captures -> {
+        var n = 3;
+        var list = #( 1 2 );
+        .is:{ { |x| x + n }.captures } equalTo:#{ 'n': 3 };
+        .is:{ { |x| (x + n) * list.count }.captures } equalTo:#{ 'n': 3 'list': #( 1 2 ) };
+        "* params and locals the block binds itself are not captures
+        .is:{ { |x| var y = x; y * 2 }.captures } equalTo:#{};
+        "* a write-captured binding is still a free variable with a value
+        var m = 1;
+        .is:{ { m = m + 1 }.captures } equalTo:#{ 'm': 1 };
+        "* nested literals: inner frees resolve, outer params shadow
+        var a = 1;
+        .is:{ { |x| { |y| x + y + a }.value:2 }.captures } equalTo:#{ 'a': 1 };
+        "* the live binding, not a copy: mutation is visible
+        var box = #( 0 );
+        var watcher = { box.first };
+        box.at:0 put:9;
+        .is:{ (watcher.captures.at:'box').first } equalTo:9;
+    };
+
+    .test:
     value -> {
         .is:{ {1; 2; 3}.value } equalTo:3;
     };
