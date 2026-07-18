@@ -139,19 +139,30 @@ placeholders). Multiple `where:` calls AND together.
 ## 6. The graph: sibling batching
 
 Hydration tags every instance with its cohort (`@batch` — the list hydrated by
-one force). `u.posts` answers a lazy `[Strata]Assoc` node; its first force
-gathers the foreign keys of **all** batch siblings and issues one
-`SELECT … WHERE author_id IN (…)`, partitioning results into each sibling's
-`@rel` cache. The loaded children form a **union batch across all owners**, so
-the next level (`p.comments` inside the nested loop) again batches across every
-post of every user. Implicit traversal is fully batched at every depth — the
-N+1 shape is unwritable.
+one force) and with the repo that produced it, so association walks on a
+`via:`-routed graph stay on that repo. `u.posts` answers a lazy `[Strata]Assoc`
+node; its first force gathers the foreign keys of **all** batch siblings and
+issues one `SELECT … WHERE author_id IN (…)`, partitioning results into each
+sibling's `@rel` cache (childless owners memoize as empty; batched children
+come back in key order). The loaded children form a **union batch across all
+owners**, so the next level (`p.comments` inside the nested loop) again batches
+across every post of every user. Implicit traversal is fully batched at every
+depth — the N+1 shape is unwritable.
+
+The Assoc node is a Relation subclass whose own plan is already the per-owner
+query (`WHERE fk = ownerKey`), so every combinator derives a **plain** relation
+from it: a refinement (`u.posts.where:…`) queries for that owner alone —
+refined per-owner results are not shared state. `belongsTo` answers no node:
+a single row is not a relation, so the accessor itself is the force point
+(`p.author.name` just works) — one IN-query over the cohort's foreign keys,
+each owner caching its parent, a NULL fk a memoized nil.
 
 `with:#posts` preloads eagerly at the parent force (same IN-query mechanism),
-with scoping (`with:#posts scope:{ |p| p.published }`) and nested paths
-(`with:'posts.comments'`). Chaining a refinement onto one owner's assoc
-(`u.posts.where:…`) queries for that owner alone — refined per-owner results
-are not shared state.
+with scoping (`with:#posts scope:{ |p| p.published }` — the scoped subset is
+what `posts` then answers on those instances) and nested paths
+(`with:'posts.comments'`, one query per level). `[Strata]Repo#queries` counts
+SELECT round trips so the batching invariant is pinned in tests as exact
+query-count deltas, not just result contents.
 
 Same mechanism, later slices: batched association aggregates (`u.posts.count`
 → one `GROUP BY` for the cohort), lane-parallel independent preload branches
@@ -240,10 +251,32 @@ Implementation notes that amend or sharpen the design above:
   on a truthy non-Boolean silently returns the right operand (see §12), so the
   AST path was the correct fork.
 
-**Next: slice 2** — `hasMany:of:via:` / `belongsTo:of:via:` declarations, lazy
-`[Strata]Assoc` nodes, sibling-batched IN loading, and `with:` preloads. The
-`@batch` cohort tagging it fans out across is already in place in
-`strataHydrate:`.
+**Slice 2 (the graph) is also complete** — `hasMany:of:via:` /
+`belongsTo:of:via:`, the `[Strata]Assoc` node (`lib/06-assoc.qn`),
+sibling-batched IN loading with per-owner `@rel` memoization, `with:` preloads
+(scoped + dotted nested paths), assoc refinement degrading to plain per-owner
+relations, repo threading through hydration, and `Repo#queries`. The e2e graph
+suite pins every invariant as an exact query-count delta (nested two-level
+traversal = 2 queries; `with:'posts.comments'` = 3 including the parent;
+childless/NULL-fk asks after the batch = 0).
+
+Additional findings from slice 2:
+
+- **A VM closure bug, worked around**: in a package (runner-compiled) unit, a
+  constructor-block local that shadows its own capture by name (`.new:{ var
+  model = model … }`) **with at least one more `var` in the block** pins the
+  FIRST invocation's binding — every later call reuses it (`Relation.on:Post`
+  minted User relations once `on:User` had run; eval/REPL-compiled units are
+  immune, which is why slice 1's monoculture tests never saw it). Workaround
+  everywhere in this package: never self-shadow in a `.new:` block (`on:` takes
+  `|m|`, the assoc mint copies through `o`). Deserves a VM issue + fix; minimal
+  repro: a two-var `.new:{ var x = x; var y = 1 }` in a `[lib]` package unit
+  called from two sites.
+- `belongsTo` deliberately answers the instance (or nil), not a node — the
+  asymmetry with `hasMany` is the ergonomic point (`p.author.name`); its force
+  happens at the accessor, still cohort-batched.
+- Batched IN loads append `ORDER BY key` — deterministic child ordering for
+  free, and content assertions in tests don't depend on driver row order.
 
 ## 12. Decisions record
 

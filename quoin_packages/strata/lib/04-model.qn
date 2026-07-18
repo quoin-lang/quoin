@@ -23,7 +23,7 @@
 "* ordering and lets hand-written methods appear anywhere in the body. Known
 "* trade: generated accessors are invisible to qn check — write the accessor
 "* by hand where checking matters. The generic at: always works.
-[Strata]Model <- { |@row @rel @batch|
+[Strata]Model <- { |@row @rel @batch @repo|
     .meta <-- {
         "* -- declaration DSL (run inside a subclass body) -----------------
         table: -> { |t| .strataMeta.at:'table' put:t; self }
@@ -41,6 +41,39 @@
             (.strataMeta.at:'types').at:c.s put:t.name
             self
         }
+        "* -- associations (DESIGN.md 6). The target is a NAME (of:#Post),
+        "* resolved at first use, so mutually referential models declare in
+        "* any order. via: names the foreign-key COLUMN as declared on the
+        "* many side — the target model for hasMany:, this model for
+        "* belongsTo:.
+        hasMany:of:via: -> { |name target fk|
+            (.strataMeta.at:'assocs')
+                .at:name.s
+                 put:#{ 'kind': 'hasMany' 'target': target.s 'via': fk.s }
+            self
+        }
+        belongsTo:of:via: -> { |name target fk|
+            (.strataMeta.at:'assocs')
+                .at:name.s
+                 put:#{ 'kind': 'belongsTo' 'target': target.s 'via': fk.s }
+            self
+        }
+        "* A declared association's metadata, or a loud refusal.
+        strataAssocMeta: -> { |name|
+            var a = (.strataMeta.at:'assocs').at:name.s
+            a.defined?.else:{
+                [Strata]Error.throw:('unknown association ' + name.s + ' on ' + self.name + ' (declared: ' + ((.strataMeta.at:'assocs').keys.join:', ') + ')')
+            }
+            a
+        }
+        "* Resolve an association's target model class from its name.
+        strataResolve: -> { |a|
+            var t = a.at:'target'
+            (Class.exists?:t).else:{
+                [Strata]Error.throw:('association target ' + t + ' is not defined (is the model class loaded?)')
+            }
+            Runtime.eval:t
+        }
 
         "* -- registry ------------------------------------------------------
         "* This class's registry entry, created on first touch. The default
@@ -54,6 +87,7 @@
                     'key': 'id'
                     'cols': #{}
                     'types': #{}
+                    'assocs': #{}
                     'ready': false
                 }
                 models.at:self.name put:m
@@ -97,6 +131,9 @@
                     src = src + c + ': -> { |v| @row.at:\'' + sqlName + '\' put:v; self }\n'
                 }
             }
+            (meta.at:'assocs').keys.each:{ |a|
+                (probe.can?:a).else:{ src = src + a + ' -> { .strataAssocFetch:\'' + a + '\' }\n' }
+            }
             (src == '').else:{ Runtime.eval:(self.name + ' <-- {\n' + src + '}') }
             self
         }
@@ -111,13 +148,19 @@
 
         "* -- hydration (internal) -----------------------------------------
         "* Wrap each row Map, then tag every instance with its cohort — the
-        "* batch slice-2 association loading fans IN-queries across.
-        strataHydrate: -> { |rows|
+        "* batch association loading fans IN-queries across — and the repo
+        "* that produced it, so association walks on a via:-routed graph
+        "* stay on that repo instead of falling back to the ambient default.
+        strataHydrate:repo: -> { |rows rp|
+            .strataEnsure
             var batch = #()
-            rows.each:{ |r| batch.add:(.new:{ var row = r }) }
+            rows.each:{ |r| batch.add:(.new:{ var row = r; var rel = Map.new; var repo = rp }) }
             batch.each:{ |m| m.strataBatch:batch }
             batch
         }
+        "* Repo-less form (pure hydration — tests, fixtures): association
+        "* loads on the result use the ambient default repo.
+        strataHydrate: -> { |rows| .strataHydrate:rows repo:nil }
     }
 
     "* Generic column access by declared name (Symbol or String) — works with
@@ -125,6 +168,32 @@
     at: -> { |c| @row.at:(self.class.strataSqlCol:c) }
     "* The raw result row (a Map keyed by SQL column names).
     row -> { @row }
+    "* This instance's primary-key value (raw, by the registry's key column).
+    strataKey -> { @row.at:(self.class.strataMeta.at:'key') }
     strataBatch: -> { |b| @batch = b; self }
     strataBatch -> { @batch }
+    "* The cohort an association load fans across: the hydration batch, or
+    "* just this instance when it never came from one.
+    strataCohort -> { @batch.defined?.if:{ @batch } else:{ #( self ) } }
+    strataRepo -> { @repo }
+
+    "* -- association cache (@rel): loaded results memoize per instance.
+    "* A key present with a nil value is a MEMOIZED nil (a belongsTo with a
+    "* NULL foreign key) — hence containsKey?, not a nil check.
+    strataRelHas?: -> { |name| @rel.defined? && (@rel.containsKey?:name) }
+    strataRelAt: -> { |name| @rel.defined?.if:{ @rel.at:name } }
+    strataRelAt:put: -> { |name v|
+        @rel.defined?.else:{ @rel = Map.new }
+        @rel.at:name put:v
+        self
+    }
+
+    "* The generated association accessor body: a lazy [Strata]Assoc node
+    "* for hasMany (forcing it batches across the cohort); for belongsTo the
+    "* batch-loaded instance itself, or nil — a single row is not a relation.
+    strataAssocFetch: -> { |name|
+        var a = self.class.strataAssocMeta:name
+        ((a.at:'kind') == 'belongsTo').if:{ ^^ [Strata]Assoc.belongsTo:name meta:a for:self }
+        [Strata]Assoc.hasMany:name meta:a for:self
+    }
 }

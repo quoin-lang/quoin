@@ -7,7 +7,7 @@
 "* `use strata:*`): the pure layers work without the extension binary or a
 "* database driver installed, and the resolution error surfaces at the moment
 "* a connection is actually wanted.
-[Strata]Repo <- { |@conn @dialect|
+[Strata]Repo <- { |@conn @dialect @queries|
     .meta <-- {
         sqlite: -> { |path|
             .strataAdbc;
@@ -22,7 +22,7 @@
             .conn:(([ADBC]Database.postgres:connString).connect) dialect:[Strata]PostgresDialect.new
         }
         "* Escape hatch: any [ADBC]Connection with an explicit dialect.
-        conn:dialect: -> { |c d| .new:{ var conn = c; var dialect = d } }
+        conn:dialect: -> { |c d| .new:{ var conn = c; var dialect = d; var queries = 0 } }
 
         "* Load the adbc extension package on demand (standard `use`
         "* resolution: ./quoin_packages, QUOIN_PATH, QUOIN_HOME).
@@ -43,11 +43,15 @@
 
     conn -> { @conn }
     dialect -> { @dialect }
+    "* SELECT round trips this repo has run — the batching invariant (round
+    "* trips scale with association edges, not rows) is pinned on it in tests.
+    queries -> { @queries }
 
     "* Run a SELECT; rows come back as the driver's row Maps. Driver errors
     "* re-raise as [Strata]Error carrying the SQL. An empty param list must
     "* not bind at all — ADBC refuses a zero-column bind batch.
     query:params: -> { |sql ps|
+        @queries = @queries + 1
         {
             (ps.count == 0).if:{ (@conn.query:sql).toList }
                 else:{ (@conn.query:sql params:ps).toList }
