@@ -670,11 +670,16 @@ fn parent_conv_pump(
 /// — §5.1: lanes, never frame multiplexing; each socket speaks the protocol
 /// unchanged, one LIFO conversation at a time). Returns the standard channel
 /// ends plus the child's pid; the pump threads own the sockets.
+/// Errors carry the boot phase that refused ([`crate::error::BootReason`]):
+/// `Spawn` for exec/socket infrastructure, `Handshake` for the version gate and
+/// pre-ready protocol — the caller lifts them into the typed `BootError`.
 pub fn spawn_worker_process(
     unit: Option<String>,
     body: ProcessBody,
     lanes: u32,
-) -> Result<(WorkerChannels, u32, ChildGrip), String> {
+) -> Result<(WorkerChannels, u32, ChildGrip), (crate::error::BootReason, String)> {
+    use crate::error::BootReason;
+    let spawn_err = |m: String| (BootReason::Spawn, m);
     let lanes = lanes.max(1);
     let sock_path = format!(
         "/tmp/quoin-worker-{}-{}.sock",
@@ -682,9 +687,10 @@ pub fn spawn_worker_process(
         SPAWNED.fetch_add(1, Ordering::Relaxed)
     );
     let _ = std::fs::remove_file(&sock_path);
-    let listener = UnixListener::bind(&sock_path).map_err(|e| format!("worker socket: {e}"))?;
+    let listener =
+        UnixListener::bind(&sock_path).map_err(|e| spawn_err(format!("worker socket: {e}")))?;
 
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| spawn_err(format!("current_exe: {e}")))?;
     let mut cmd = std::process::Command::new(exe);
     // `@none` = unit-less (a hosted block booting bare qnlib); `@block` in the
     // service slot = "a hosted-block payload follows the version gate". Both
@@ -705,7 +711,7 @@ pub fn spawn_worker_process(
     }
     let child = cmd
         .spawn()
-        .map_err(|e| format!("spawn worker process: {e}"))?;
+        .map_err(|e| spawn_err(format!("spawn worker process: {e}")))?;
     let pid = child.id();
     let grip: ChildGrip = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
     // The lifecycle sink (SUPERVISION.md slice 1): the mailbox reader below is
@@ -732,7 +738,7 @@ pub fn spawn_worker_process(
     // socket, then the mailbox.
     listener
         .set_nonblocking(true)
-        .map_err(|e| format!("worker socket: {e}"))?;
+        .map_err(|e| spawn_err(format!("worker socket: {e}")))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let accept_one = |listener: &UnixListener| -> Result<UnixStream, String> {
         loop {
@@ -770,10 +776,10 @@ pub fn spawn_worker_process(
     };
     let mut conv_socks = Vec::with_capacity(lanes as usize);
     for _ in 0..lanes {
-        conv_socks.push(accept_one(&listener)?);
+        conv_socks.push(accept_one(&listener).map_err(spawn_err)?);
     }
-    let mail_sock = accept_one(&listener)?;
-    let chan_sock = accept_one(&listener)?;
+    let mail_sock = accept_one(&listener).map_err(spawn_err)?;
+    let chan_sock = accept_one(&listener).map_err(spawn_err)?;
     let _ = std::fs::remove_file(&sock_path);
 
     // The manifest handshake — the version gate (mirrors the extension spawn:
@@ -781,11 +787,12 @@ pub fn spawn_worker_process(
     // Bounded, so a wedged child is an error rather than a hang. One gate per
     // worker: it runs on the FIRST conversation socket only (all lanes are
     // the same binary).
-    let fail = |grip: &ChildGrip, msg: String| -> String {
+    // Every failure from here to ready is the pre-ready protocol refusing.
+    let fail = |grip: &ChildGrip, msg: String| -> (BootReason, String) {
         if let Some(c) = grip.lock().expect("child grip").as_mut() {
             let _ = c.kill();
         }
-        msg
+        (BootReason::Handshake, msg)
     };
     let conv_sock = &mut conv_socks[0];
     conv_sock
@@ -864,7 +871,7 @@ pub fn spawn_worker_process(
     {
         let mut wsock = chan_sock
             .try_clone()
-            .map_err(|e| format!("chan socket clone: {e}"))?;
+            .map_err(|e| spawn_err(format!("chan socket clone: {e}")))?;
         std::thread::spawn(move || {
             while let Ok(f) = chan_out_rx.recv_blocking() {
                 if write_msg_frame(&mut wsock, &chan_frame_to_msg(f)).is_err() {
@@ -900,7 +907,7 @@ pub fn spawn_worker_process(
     {
         let mut sock = mail_sock
             .try_clone()
-            .map_err(|e| format!("socket clone: {e}"))?;
+            .map_err(|e| spawn_err(format!("socket clone: {e}")))?;
         std::thread::spawn(move || {
             while let Ok(msg) = inbox_rx.recv_blocking() {
                 match msg {

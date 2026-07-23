@@ -826,6 +826,9 @@ pub fn spawn_worker_process(
     _unit: Option<String>,
     _body: ProcessBody,
     _lanes: u32,
-) -> Result<(WorkerChannels, u32, ChildGrip), String> {
-    Err("workers are not supported on this platform".to_string())
+) -> Result<(WorkerChannels, u32, ChildGrip), (crate::error::BootReason, String)> {
+    Err((
+        crate::error::BootReason::Spawn,
+        "workers are not supported on this platform".to_string(),
+    ))
 }

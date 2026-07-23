@@ -1118,9 +1118,11 @@ pub(crate) fn host_block<'gc>(
         return Err(QuoinError::Other("Worker.host: bad receiver".into()));
     };
     let Some((template, parent_env)) = crate::runtime::worker::block_parts(block) else {
-        return Err(QuoinError::Other(
-            "Worker.host:with: expects a Block (the object to host is its answer)".into(),
-        ));
+        return Err(QuoinError::TypeError {
+            expected: "Block".to_string(),
+            got: block.type_name().to_string(),
+            msg: "Worker.host:with: expects a Block (the object to host is its answer)".into(),
+        });
     };
     // Arity first, before anything ships: the block's parameters are exactly
     // the args: list (absent = a parameterless block).
@@ -1129,11 +1131,15 @@ pub(crate) fn host_block<'gc>(
         None => Vec::new(),
     };
     if template.param_syms.len() != arg_values.len() {
-        return Err(QuoinError::Other(format!(
-            "Worker.host:with:args: the block takes {} parameter(s) but args: has {}",
-            template.param_syms.len(),
-            arg_values.len()
-        )));
+        return Err(QuoinError::ArgumentCountMismatch {
+            expected: template.param_syms.len(),
+            got: arg_values.len(),
+            msg: format!(
+                "Worker.host:with:args: the block takes {} parameter(s) but args: has {}",
+                template.param_syms.len(),
+                arg_values.len()
+            ),
+        });
     }
     let pb = snapshot_block(template, parent_env, 0)
         .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
@@ -1152,7 +1158,7 @@ pub(crate) fn host_block<'gc>(
                 crate::worker::ProcessBody::Block(payload),
                 lanes,
             )
-            .map_err(QuoinError::Other)?;
+            .map_err(|(reason, msg)| QuoinError::boot(&label_path, reason, msg))?;
             (ch, Some(pid), Some(grip))
         }
         _ => (
@@ -1253,14 +1259,16 @@ pub(crate) fn spawn_arg<'gc>(
 /// ready message names — the block's answer.
 /// Park for the worker's ready message and answer the hosted class's manifest
 /// (name + sorted selector lists). A closed lane means boot/compile/
-/// instantiation failed before ready — flattened to an ordinary error (a peer
-/// that never lived didn't die; SUPERVISION.md §2). Shared by the original
-/// host and `serviceRestart`, whose rule-9 gate compares this against the
-/// installed class.
+/// instantiation failed before ready — the typed `BootError` (#boot): a peer
+/// that never lived didn't die (SUPERVISION.md §2), so this window never
+/// raises `PeerDiedError`. Shared by the original host and `serviceRestart`,
+/// whose rule-9 gate compares this against the installed class. `peer` is the
+/// unit path or service label the error names.
 fn await_ready_manifest<'gc>(
     vm: &mut VmState<'gc>,
     ch: &crate::worker::WorkerChannels,
     what: &str,
+    peer: &str,
 ) -> Result<(String, Vec<String>, Vec<String>), QuoinError> {
     let (ready_class, instance_selectors, class_selectors) =
         match vm.await_io(IoRequest::WorkerRecv(ch.outbox_rx.clone()))? {
@@ -1271,19 +1279,27 @@ fn await_ready_manifest<'gc>(
                     IoResult::WorkerDone(Err(WorkerExit::Died { detail, .. })) => detail,
                     _ => "the worker exited before reporting ready".to_string(),
                 };
-                return Err(QuoinError::Other(format!("{what}: {why}")));
+                return Err(QuoinError::boot(
+                    peer,
+                    crate::error::BootReason::Boot,
+                    format!("{what}: {why}"),
+                ));
             }
             other => {
-                return Err(QuoinError::Other(format!(
-                    "{what}: unexpected result {other:?}"
-                )));
+                return Err(QuoinError::boot(
+                    peer,
+                    crate::error::BootReason::Handshake,
+                    format!("{what}: unexpected result {other:?}"),
+                ));
             }
         };
     match ready_class {
         Some(n) => Ok((n, instance_selectors, class_selectors)),
-        None => Err(QuoinError::Other(format!(
-            "{what}: the worker did not report a hosted class"
-        ))),
+        None => Err(QuoinError::boot(
+            peer,
+            crate::error::BootReason::Handshake,
+            format!("{what}: the worker did not report a hosted class"),
+        )),
     }
 }
 
@@ -1335,7 +1351,7 @@ fn finish_host<'gc>(
     // closed lane instead means boot/compile/instantiation failed — the done
     // lane says why. Parks, so slow boots don't block other tasks.
     let (class_name, instance_selectors, class_selectors) =
-        await_ready_manifest(vm, &ch, "Worker.host")?;
+        await_ready_manifest(vm, &ch, "Worker.host", path)?;
     // Claims: the §5.1 machinery, one per worker, registered for VM.claims
     // and the cross-peer cycle walk; boundary rows registered beside the
     // extensions' (§7 — one diagnosis surface).
@@ -1509,7 +1525,7 @@ pub(crate) fn backing_arg<'gc>(v: Value<'gc>) -> Result<&'static str, QuoinError
     match string_arg(v, "the backing")?.as_str() {
         "thread" => Ok("thread"),
         "process" => Ok("process"),
-        other => Err(QuoinError::Other(format!(
+        other => Err(QuoinError::ValueError(format!(
             "Worker.host: unknown backing '{other}' (thread|process)"
         ))),
     }
@@ -1518,7 +1534,7 @@ pub(crate) fn backing_arg<'gc>(v: Value<'gc>) -> Result<&'static str, QuoinError
 pub(crate) fn lanes_arg<'gc>(v: Value<'gc>) -> Result<u32, QuoinError> {
     match v.as_i64() {
         Some(n) if (1..=1024).contains(&n) => Ok(n as u32),
-        _ => Err(QuoinError::Other(
+        _ => Err(QuoinError::ValueError(
             "Worker.host: lanes must be an Integer between 1 and 1024".into(),
         )),
     }
@@ -1528,13 +1544,17 @@ pub(crate) fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, Quoin
     match v {
         Value::Object(obj) => match &obj.borrow().payload {
             crate::value::ObjectPayload::String(s) => Ok(s.to_string()),
-            _ => Err(QuoinError::Other(format!(
-                "Worker.host: {what} must be a String"
-            ))),
+            _ => Err(QuoinError::TypeError {
+                expected: "String".to_string(),
+                got: v.type_name().to_string(),
+                msg: format!("Worker.host: {what} must be a String"),
+            }),
         },
-        _ => Err(QuoinError::Other(format!(
-            "Worker.host: {what} must be a String"
-        ))),
+        _ => Err(QuoinError::TypeError {
+            expected: "String".to_string(),
+            got: v.type_name().to_string(),
+            msg: format!("Worker.host: {what} must be a String"),
+        }),
     }
 }
 
@@ -1755,7 +1775,7 @@ fn restart_attempt<'gc>(
                 crate::worker::ProcessBody::Block(payload),
                 recipe.lanes,
             )
-            .map_err(QuoinError::Other)?;
+            .map_err(|(reason, msg)| QuoinError::boot(&recipe.label, reason, msg))?;
             (ch, Some(pid), Some(grip))
         }
         _ => (
@@ -1797,7 +1817,7 @@ fn restart_attempt<'gc>(
     // selector — a differing manifest means the recipe isn't deterministic
     // (or the code changed underfoot); refuse to rebind. Dropping `ch`
     // orphans the new worker, whose lanes closing shut it down.
-    let (name, inst, cls) = await_ready_manifest(vm, &ch, "serviceRestart")?;
+    let (name, inst, cls) = await_ready_manifest(vm, &ch, "serviceRestart", &recipe.label)?;
     if name != recipe.class_name
         || inst != recipe.instance_selectors
         || cls != recipe.class_selectors

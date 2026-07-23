@@ -520,12 +520,12 @@ impl<'gc> VmState<'gc> {
                 remote_stack,
             } => {
                 if remote_stack.is_empty() {
-                    self.make_error(mc, "Error", message, None)
+                    self.make_error(mc, "ExtensionError", message, None)
                 } else {
                     // The opaque cross-process blob rides on the error object for
                     // programmatic access (`ex.remoteStack`); the printer shows it fenced.
                     let blob = self.new_string(mc, remote_stack.clone());
-                    self.build_error_object(mc, "Error", message, &[("remoteStack", blob)])
+                    self.build_error_object(mc, "ExtensionError", message, &[("remoteStack", blob)])
                 }
             }
             QuoinError::PeerDied {
@@ -538,6 +538,20 @@ impl<'gc> VmState<'gc> {
                 self.build_error_object(
                     mc,
                     "PeerDiedError",
+                    message,
+                    &[("reason", reason_val), ("peer", peer_val)],
+                )
+            }
+            QuoinError::BootError {
+                peer,
+                reason,
+                message,
+            } => {
+                let reason_val = self.new_symbol(mc, reason.symbol().to_string());
+                let peer_val = self.new_string(mc, peer.clone());
+                self.build_error_object(
+                    mc,
+                    "BootError",
                     message,
                     &[("reason", reason_val), ("peer", peer_val)],
                 )

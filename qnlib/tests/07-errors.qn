@@ -160,6 +160,37 @@
         .is:{ caught.length } equalTo:3;
     };
 
+    "* A worker or extension that fails BEFORE its ready handshake raises the typed
+    "* BootError carrying which phase refused (#spawn/#boot/#handshake/#config) and
+    "* the peer's name — never a bare String (issue #136), and never a PeerDiedError:
+    "* a peer that never lived didn't die.
+    .test:
+    bootErrorOnAPeerThatNeverLived -> {
+        var caught = nil;
+        { Worker.host:'/no/such/unit-136.qn' with:{ #{} } }.catch:{ |e| caught = e };
+        .isTrue:{ BootError ~ caught };
+        .is:{ caught.reason } equalTo:#boot;
+        .is:{ caught.peer } equalTo:'/no/such/unit-136.qn';
+        .does:{ Worker.host:'/no/such/unit-136.qn' with:{ #{} } } throw:BootError;
+        .does:{ Worker.host:'/no/such/unit-136.qn' with:{ #{} } } throw:Error;
+        "* a package dir that cannot resolve is a #config refusal
+        var cfg = nil;
+        { Extension.loadPackage:'/no/such/pkg-dir-136' }.catch:{ |e| cfg = e };
+        .isTrue:{ BootError ~ cfg };
+        .is:{ cfg.reason } equalTo:#config;
+    };
+
+    "* An error a LIVE extension reports is its own class now (was the bare Error
+    "* base): catchable as ExtensionError, still an Error subtype. And the
+    "* Worker.host: entry-point misuse raises the standard typed errors.
+    .test:
+    extensionErrorIsItsOwnClass -> {
+        .does:{ ExtensionError.throw:'reported' } throw:ExtensionError;
+        .does:{ ExtensionError.throw:'reported' } throw:Error;
+        .does:{ Worker.host:'/x.qn' with:{ |a| #{} } } throw:ArgumentError;
+        .does:{ Worker.with:{ #{} } backing:'fiber' } throw:ValueError;
+    };
+
     "* Typed `catch:` only catches when the thrown value's type matches the handler's declared
     "* exception param; a non-match re-raises (to an enclosing catch, or out). An untyped `|e|`
     "* handler is a catch-all, and a subtype matches a base-typed handler.

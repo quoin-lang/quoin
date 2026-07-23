@@ -87,6 +87,39 @@ impl PeerDeathReason {
     }
 }
 
+/// The phase a [`QuoinError::BootError`] failed in, surfaced to Quoin code as
+/// `BootError.reason` (a `#symbol`). Boot is the pre-ready window — a peer that
+/// fails here *never lived*, so it didn't die (`docs/internal/SUPERVISION.md`
+/// §2): the counterpart of [`PeerDeathReason`], which only ever describes a
+/// peer that was up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootReason {
+    /// The child process could not be started at all (exec/socket failure) —
+    /// infrastructure, before any guest code ran.
+    Spawn,
+    /// The peer's own boot work failed before ready: the unit is missing or
+    /// didn't compile, the host block raised, or its answer can't be hosted.
+    Boot,
+    /// The transport came up but the pre-ready protocol failed: version-gate
+    /// mismatch, a closed or malformed manifest exchange.
+    Handshake,
+    /// The load-time configuration refused: a package manifest that is
+    /// unreadable, invalid, or missing its required entries.
+    Config,
+}
+
+impl BootReason {
+    /// The camelCase name used for the Quoin `#symbol`.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            BootReason::Spawn => "spawn",
+            BootReason::Boot => "boot",
+            BootReason::Handshake => "handshake",
+            BootReason::Config => "config",
+        }
+    }
+}
+
 impl From<std::io::ErrorKind> for IoErrorKind {
     fn from(k: std::io::ErrorKind) -> Self {
         use std::io::ErrorKind as E;
@@ -209,6 +242,19 @@ pub enum QuoinError {
         /// extension's package/command.
         peer: String,
         reason: PeerDeathReason,
+        message: String,
+    },
+    /// A worker or extension failed BEFORE its ready handshake completed — the
+    /// pre-ready boot window, where a peer that fails "never lived, didn't
+    /// die" (`docs/internal/SUPERVISION.md` §2). The typed counterpart of
+    /// `PeerDied` for that window, mapped to the Quoin `BootError` exposing
+    /// `reason` (a symbol — which phase refused) and `peer` (the unit path,
+    /// worker label, or extension package/command). Plain data only.
+    BootError {
+        /// The peer's name: the unit path, worker label, or extension
+        /// package/command.
+        peer: String,
+        reason: BootReason,
         message: String,
     },
     /// Marker that a Quoin-level exception value has been parked in
@@ -364,6 +410,7 @@ impl fmt::Display for QuoinError {
             QuoinError::NameError(msg) => write!(f, "{}", msg),
             QuoinError::ExtensionError { message, .. } => write!(f, "{}", message),
             QuoinError::PeerDied { message, .. } => write!(f, "{}", message),
+            QuoinError::BootError { message, .. } => write!(f, "{}", message),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
             QuoinError::Cancelled => write!(f, "task cancelled"),
@@ -493,6 +540,16 @@ impl QuoinError {
         message: impl Into<String>,
     ) -> Self {
         QuoinError::PeerDied {
+            peer: peer.into(),
+            reason,
+            message: message.into(),
+        }
+    }
+
+    /// A pre-ready boot failure (`BootError`): the peer never lived. See the
+    /// variant doc for the reason taxonomy.
+    pub fn boot(peer: impl Into<String>, reason: BootReason, message: impl Into<String>) -> Self {
+        QuoinError::BootError {
             peer: peer.into(),
             reason,
             message: message.into(),

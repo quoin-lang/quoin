@@ -289,6 +289,17 @@ record/replay run containing a supervised death + restart.
 
    > **Tracked as #31** — Type the graceful mid-call peer death terminal.
 
+   **Addendum (2026-07-22, issue #136):** the pre-ready window got its own
+   type, `QuoinError::BootError { peer, reason, message }` → the `BootError`
+   bootstrap class (`reason`/`peer` accessors) — the "never lived, didn't die"
+   counterpart of `PeerDiedError`. `spawn_worker_process` now returns
+   `(BootReason, String)` errors (`#spawn` infrastructure vs `#handshake`
+   version-gate/pre-ready protocol), the `await_ready_manifest` funnel types
+   every pre-ready `WorkerExit` as `#boot`, and the extension spawn/handshake/
+   `loadPackage` sites raise `#spawn`/`#handshake`/`#config`. Extension-reported
+   errors also stopped mapping to the bare `Error` base: they are the
+   `ExtensionError` class now (still carrying `remoteStack`).
+
 1. **Death events:** reactor child-exit watch for process children (kqueue/pidfd),
    thread done-lane unification, lifecycle event records + per-service `events`
    channel, `VM.peers`, replay divergence coverage.
