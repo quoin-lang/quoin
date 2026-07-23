@@ -45,6 +45,8 @@ pub mod runner_core;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runner_pkg;
 pub mod runtime;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod signal_exit;
 pub mod stdlib;
 pub mod symbol;
 pub mod tuning;

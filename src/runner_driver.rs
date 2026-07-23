@@ -554,7 +554,16 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
     arena: &mut ReplArena,
     frontend: &mut F,
 ) -> Result<(), QuoinError> {
-    let result = drive_to_completion(arena, frontend);
+    let mut result = drive_to_completion(arena, frontend);
+    // A latched fatal signal (SIGINT/SIGTERM) wins over whatever the run produced:
+    // the main task's unwind already ran (`Cancelled`, through its `finally:`
+    // blocks), so surface the conventional 128+signo status as a quiet
+    // `Runtime.exit:`-style request. Setting the flag too stops a REPL/test session
+    // from starting anything further.
+    if let Some(code) = crate::signal_exit::pending() {
+        arena.mutate_root(|_mc, vm| vm.requested_exit = Some(code));
+        result = Err(QuoinError::ExitRequested(code));
+    }
     flush_open_write_streams(arena);
     result
 }
@@ -611,6 +620,13 @@ fn drive_to_completion<F: DriverFrontend>(
         static ANNOUNCED: Once = Once::new();
         ANNOUNCED.call_once(|| eprintln!("scheduler stress enabled (seed={seed})"));
     }
+    // Arm the graceful SIGINT/SIGTERM path (idempotent). Installed here — not in
+    // main() — so the non-driving subcommands (`qn fmt`, `qn doc`) keep the OS
+    // default instant exit.
+    crate::signal_exit::install();
+    // Set once the latched signal's main-task cancel has been sent: the cancel is
+    // one-shot, so the ensuing `finally:` unwind is not re-cancelled every iteration.
+    let mut signal_cancel_sent = false;
     // Task #0 starts current and already live; nothing to load on first resume.
     let mut current: Option<TaskId> = Some(TaskId(0));
     let mut needs_load = false;
@@ -745,6 +761,16 @@ fn drive_to_completion<F: DriverFrontend>(
                 let e = QuoinError::ExitRequested(code);
                 frontend.on_finished(arena, Some(&e))?;
                 return Err(e);
+            }
+            // A fatal signal (Ctrl-C / SIGTERM) latched: cancel the main task, once,
+            // so it unwinds through its `finally:` blocks — the `Runtime.exit:`
+            // contract — while the loop keeps pumping so that unwind can still await
+            // I/O. `drive_with_frontend` maps the run's final result to
+            // `ExitRequested(128+signo)`; a second signal hard-exits in the handler.
+            if !signal_cancel_sent && crate::signal_exit::pending().is_some() {
+                signal_cancel_sent = true;
+                let loaded = current == Some(TaskId(0));
+                arena.mutate_root(|_mc, vm| vm.request_cancel_from_driver(TaskId(0), loaded));
             }
             drain_retranslations(arena);
             // Service control requests opportunistically — once per loop
@@ -920,9 +946,23 @@ fn drive_to_completion<F: DriverFrontend>(
                             Task(Option<(TaskId, TaskWakeup)>),
                             Ctl(Option<crate::worker::ControlReq>),
                             Tick,
+                            Sig,
                         }
                         let woke = {
-                            let next_task = async { Woke::Task(futures.next().await) };
+                            let raw_task = async { Woke::Task(futures.next().await) };
+                            // Wake for a fatal signal's self-pipe byte too, so a fully
+                            // parked scheduler reacts immediately instead of after its
+                            // in-flight timer. Only until the cancel is sent: after
+                            // that the pipe stays quiet (its one byte is consumed) and
+                            // the loop top is already serving the latched flag.
+                            let sig = async {
+                                if signal_cancel_sent {
+                                    std::future::pending::<()>().await;
+                                }
+                                crate::signal_exit::wait().await;
+                                Woke::Sig
+                            };
+                            let next_task = futures_lite::future::or(raw_task, sig);
                             match (&control_rx, ps_collect.is_some()) {
                                 (Some(rx), collecting) => {
                                     // Wake for a control request too; while a
@@ -964,6 +1004,8 @@ fn drive_to_completion<F: DriverFrontend>(
                                 continue;
                             }
                             Woke::Tick => continue,
+                            // The loop top notices `pending()` and sends the cancel.
+                            Woke::Sig => continue,
                         };
                         let (tid, wakeup) = step.expect("futures is non-empty");
                         deliver(arena, tid, wakeup, &mut replay);

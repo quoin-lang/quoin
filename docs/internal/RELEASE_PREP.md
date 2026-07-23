@@ -203,6 +203,13 @@ the state on `release/v0.1-final`:
   families are now fixed.) The orphaned *child* exits on its own when the peer
   closes, so only the filesystem entry is stranded.
 
+  *Update (2026-07-22, issue #149):* a first `SIGINT`/`SIGTERM` now takes the
+  graceful path — the driver cancels the main task (its `finally:` blocks run)
+  and the process exits 130/143 through normal teardown, stranding nothing.
+  What still strands one socket: `SIGKILL`, and the second-signal hard exit
+  (`_exit`, deliberately teardown-free). The unlink-after-accept fix below
+  remains the complete answer.
+
   **Preferred fix — unlink after accept.** The *child* binds the socket and the
   host connects (`extension.rs:1238-1262`), so the standard Unix idiom applies:
   once `accept()` returns, the path has served its purpose and the child can
