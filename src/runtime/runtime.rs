@@ -38,7 +38,10 @@ pub fn build_runtime_class() -> NativeClassBuilder {
         .doc(
             "Request process exit with the given status code. Uncatchable (like \
              cancellation): the raising task unwinds through its `finally` blocks, every \
-             other task stops at the driver, and the process exits after normal teardown.",
+             other task stops at the driver, and the process exits after normal teardown.\n\n\
+             Ctrl-C (SIGINT) and SIGTERM follow the same contract: the main task unwinds \
+             through its `finally` blocks and the process exits 130/143. A second signal \
+             exits immediately, without cleanup.",
         )
         .class_method("exit", |vm, _mc, _receiver, _args| {
             vm.requested_exit = Some(0);

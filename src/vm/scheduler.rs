@@ -1272,6 +1272,38 @@ impl<'gc> VmState<'gc> {
             self.sched.cancel_current = true;
             return;
         }
+        self.nudge_cancelled(target);
+    }
+
+    /// A fatal signal (SIGINT/SIGTERM): cancel `target` from the DRIVER, between
+    /// resumes. [`request_cancel`] trusts the sticky `current_task` to mean "the
+    /// target is mid-dispatch, the live flag suffices" — but here no dispatch is
+    /// live, and a parked main task IS the sticky current when nothing else ever
+    /// ran, so the park-state nudge must still happen. `loaded` says the driver
+    /// holds `target` as its resume candidate (its context will not be reloaded
+    /// before the next resume), so the live flag is set here instead of waiting on
+    /// `load_task_context`.
+    ///
+    /// [`request_cancel`]: Self::request_cancel
+    pub fn request_cancel_from_driver(&mut self, target: TaskId, loaded: bool) {
+        let Some(t) = self.sched.tasks.get_mut(target.0).and_then(|t| t.as_mut()) else {
+            return; // already finished
+        };
+        t.cancel_requested = true;
+        if loaded {
+            self.sched.cancel_current = true;
+        } else {
+            self.nudge_cancelled(target);
+        }
+    }
+
+    /// Nudge a cancel-flagged task toward its next checkpoint promptly: abort its
+    /// in-flight I/O future, or dequeue-and-wake it if it is parked in a join or on
+    /// a channel. The caller has already set `cancel_requested`.
+    fn nudge_cancelled(&mut self, target: TaskId) {
+        let Some(t) = self.sched.tasks.get_mut(target.0).and_then(|t| t.as_mut()) else {
+            return;
+        };
         if let Some(ah) = t.abort_handle.take() {
             ah.abort(); // parked on I/O: the aborted future wakes it
         } else if t.wake.is_some() {
