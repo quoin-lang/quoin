@@ -149,6 +149,51 @@ fn a_catch_cannot_swallow_the_signal() {
     );
 }
 
+/// The signal lands with main parked somewhere other than plain I/O; each caller
+/// picks the park state. Same invariants as the sleep tests: exit 130, `finally:`
+/// ran.
+fn sigint_unwinds(tag: &str, script: &str) {
+    let mut run = spawn_qn(tag, script);
+    run.read_until_line("STARTED");
+    run.signal(libc::SIGINT);
+    let (exit, rest, err) = run.wait_for_exit();
+    assert_eq!(exit, Some(130), "stderr: {err}");
+    assert!(rest.contains("FINALLY-RAN"), "stdout rest: {rest:?}");
+}
+
+/// Main parked on a rendezvous-channel receive (the sender is 60s away): the
+/// driver-side cancel takes the parked-on-channel nudge.
+#[test]
+fn a_channel_parked_task_is_interrupted() {
+    sigint_unwinds(
+        "chan",
+        "var ch = Channel.new\n{\n    'STARTED'.print;\n    Task.spawn:{ Async.sleep:60000; \
+         ch.send:1 };\n    ch.receive\n}.finally:{\n    'FINALLY-RAN'.print\n}\n",
+    );
+}
+
+/// Main parked joining a sleeping task: the cancel dequeues it from the target's
+/// waiters and wakes it.
+#[test]
+fn a_join_parked_task_is_interrupted() {
+    sigint_unwinds(
+        "join",
+        "var t = Task.spawn:{ Async.sleep:60000 }\n{\n    'STARTED'.print;\n    \
+         t.join\n}.finally:{\n    'FINALLY-RAN'.print\n}\n",
+    );
+}
+
+/// Main parked in a timed join (`Async.timeout:do:` around a join): the cancel
+/// must also disarm the deadline timer on its way through.
+#[test]
+fn a_timed_join_parked_task_is_interrupted() {
+    sigint_unwinds(
+        "tjoin",
+        "var t = Task.spawn:{ Async.sleep:60000 }\n{\n    'STARTED'.print;\n    \
+         Async.timeout:60000 do:{ t.join }\n}.finally:{\n    'FINALLY-RAN'.print\n}\n",
+    );
+}
+
 /// A spinning main task never parks, so the cancel lands via the live flag at a
 /// batch boundary (the `loaded` path of `request_cancel_from_driver`) rather than
 /// by aborting an I/O future.
