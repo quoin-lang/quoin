@@ -785,3 +785,189 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
     assert_service_script_passes("start_args", script, &[]);
 }
+
+/// Issue #148: `serviceTerminate` — the force-stop for process-backed services.
+/// Kill, then every proxy refuses; idempotent (a second call, or one on the
+/// corpse, answers nil); the roster records a deliberate stop, not a death.
+#[test]
+fn service_terminate_kills_a_process_service() {
+    let script = r#"
+var ok = true;
+var pc = Worker.host:'@counter.qn@' with:{ Counter.new } backing:'process';
+((pc.can?:#serviceTerminate) == true).else:{ ok = false };
+((pc.add:3) == 3).else:{ ok = false };
+pc.serviceTerminate;
+"* worker-wide refusal afterwards, same as a clean stop
+var after = { pc.total; 'no-error' }.catch:{ |e|
+    (e.s.contains?:'stopped').if:{ 'stopped' } else:{ e.s }
+};
+(after == 'stopped').else:{ ok = false };
+"* idempotent on the corpse
+pc.serviceTerminate;
+"* an ordered kill is an instruction, not a failure: VM.peers says stopped
+((VM.peers.s.contains?:'stopped') == true).else:{ ok = false };
+((VM.peers.s.contains?:'died') == false).else:{ ok = false };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("terminate", script, &[("counter.qn", COUNTER_UNIT)]);
+}
+
+/// A thread cannot be killed: `serviceTerminate` refuses loudly on thread
+/// backing — and the refusal has no side effects (the service stays usable).
+#[test]
+fn service_terminate_refuses_thread_backing() {
+    let script = r#"
+var ok = true;
+var c = Worker.host:'@counter.qn@' with:{ Counter.new };
+var refused = { c.serviceTerminate; 'no-error' }.catch:{ |e|
+    (e.s.contains?:'thread-backed').if:{ 'refused' } else:{ e.s }
+};
+(refused == 'refused').else:{ ok = false };
+((c.add:2) == 2).else:{ ok = false };
+c.serviceStop;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("term-thread", script, &[("counter.qn", COUNTER_UNIT)]);
+}
+
+/// A caller parked mid-call when the kill lands gets the catchable typed
+/// death (through the ordinary death seams — the killed child's socket
+/// closes), never a hang.
+#[test]
+fn service_terminate_wakes_in_flight_callers() {
+    let script = r#"
+var ok = true;
+var pc = Worker.host:'@counter.qn@' with:{ Counter.new } backing:'process';
+var t = Task.spawn:{ { pc.slowAdd:1; 'no-error' }.catch:{ |e| 'died-catchably' } };
+Async.sleep:5;
+pc.serviceTerminate;
+((t.join) == 'died-catchably').else:{ ok = false };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    assert_service_script_passes("term-inflight", script, &[("counter.qn", COUNTER_UNIT)]);
+}
+
+/// The supervision seam: a terminate is a DELIBERATE stop — the supervisor
+/// must not respawn (stop means stop), and the in-flight caller's death
+/// observation must not close the restart gate behind the ending supervisor
+/// (that would park every later sender forever — the timeout guard below
+/// would report WEDGED).
+#[test]
+fn service_terminate_ends_a_supervised_service_for_good() {
+    let script = r#"
+var ok = true;
+var pc = Worker.host:'@counter.qn@' with:{ Counter.new } backing:'process';
+pc.serviceSupervise:(Supervise.always.backoff:10 cap:50);
+var t = Task.spawn:{ { pc.slowAdd:1; 'no-error' }.catch:{ |e| 'died-catchably' } };
+Async.sleep:5;
+pc.serviceTerminate;
+((t.join) == 'died-catchably').else:{ ok = false };
+"* give a (wrong) respawn every chance to happen, then prove the service is
+"* still down and later sends refuse PROMPTLY rather than parking forever
+Async.sleep:200;
+var after = Async.timeout:2000 do:{
+    { pc.total; 'no-error' }.catch:{ |e|
+        (e.s.contains?:'stopped').if:{ 'stopped' } else:{ e.s }
+    }
+} onCancel:{ 'WEDGED' };
+(after == 'stopped').else:{ ok = false };
+ok.if:{ 'PASS'.print } else:{ ('FAIL: ' + after.s).print };
+"#;
+    assert_service_script_passes("term-supervised", script, &[("counter.qn", COUNTER_UNIT)]);
+}
+
+/// The issue #148 repro end-to-end: SIGSTOP the worker child so it answers
+/// nothing (alive, socket open — invisible to every death seam), watch the
+/// cooperative `serviceStop` time out, then prove `serviceTerminate` still
+/// kills it promptly and the child pid actually leaves the process table
+/// (SIGKILL is not maskable by a stop).
+#[cfg(unix)]
+#[test]
+fn service_terminate_escapes_a_sigstopped_child() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let dir = std::env::temp_dir().join("qn_svc_sigstop");
+    std::fs::create_dir_all(&dir).unwrap();
+    let unit = dir.join("counter.qn");
+    std::fs::write(&unit, COUNTER_UNIT).unwrap();
+    let script = format!(
+        r#"
+var pc = Worker.host:'{}' with:{{ Counter.new }} backing:'process';
+((pc.add:1) == 1).else:{{ 'FAIL early-add'.print }};
+'READY'.print;
+Async.sleep:1200;
+var stopOutcome = Async.timeout:800 do:{{ pc.serviceStop; 'stopped' }} onCancel:{{ 'stop-timed-out' }};
+(stopOutcome == 'stop-timed-out').if:{{ 'STOP-TIMED-OUT'.print }} else:{{ ('FAIL stop: ' + stopOutcome.s).print }};
+pc.serviceTerminate;
+'TERMINATED'.print
+"#,
+        unit.display()
+    );
+    let main_path = dir.join("main.qn");
+    std::fs::write(&main_path, script).unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(&main_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn qn");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
+    let read_line_expect = |r: &mut BufReader<std::process::ChildStdout>, want: &str| {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = r.read_line(&mut line).expect("read qn stdout");
+            assert!(n > 0, "qn ended before printing {want:?}");
+            if line.trim_end() == want {
+                return;
+            }
+            assert!(
+                !line.contains("FAIL"),
+                "script reported failure before {want:?}: {line}"
+            );
+        }
+    };
+    read_line_expect(&mut stdout, "READY");
+    // Find the worker child (the qn script's only subprocess) and stop it cold.
+    let pgrep = std::process::Command::new("pgrep")
+        .args(["-P", &child.id().to_string()])
+        .output()
+        .expect("run pgrep");
+    let worker_pid: i32 = String::from_utf8_lossy(&pgrep.stdout)
+        .split_whitespace()
+        .next()
+        .expect("the service spawned one worker child")
+        .parse()
+        .expect("pgrep prints pids");
+    assert_eq!(unsafe { libc::kill(worker_pid, libc::SIGSTOP) }, 0);
+
+    read_line_expect(&mut stdout, "STOP-TIMED-OUT");
+    read_line_expect(&mut stdout, "TERMINATED");
+    // The script finished; the run must exit cleanly and promptly.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("try_wait") {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "qn wedged after TERMINATED");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "qn exited {status:?}");
+    // And the SIGSTOPed worker is genuinely gone — SIGKILL cuts through a stop.
+    let gone_by = Instant::now() + Duration::from_secs(5);
+    loop {
+        let alive = unsafe { libc::kill(worker_pid, 0) } == 0;
+        if !alive {
+            break;
+        }
+        assert!(
+            Instant::now() < gone_by,
+            "worker pid {worker_pid} still alive after serviceTerminate"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
