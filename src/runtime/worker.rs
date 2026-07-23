@@ -244,7 +244,7 @@ fn start_block_worker<'gc>(
             .map_err(|e| QuoinError::Other(format!("Worker.start: {e}")))?;
         let (ch, pid, grip) =
             crate::worker::spawn_worker_process(None, crate::worker::ProcessBody::Job(payload), 1)
-                .map_err(QuoinError::Other)?;
+                .map_err(|(reason, msg)| QuoinError::boot("<block>", reason, msg))?;
         (ch, Some(pid), Some(grip))
     } else {
         (spawn_worker_block(pb), None, None)
@@ -1039,7 +1039,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                         crate::worker::ProcessBody::Plain,
                         1,
                     )
-                    .map_err(QuoinError::Other)?;
+                    .map_err(|(reason, msg)| QuoinError::boot(&reg, reason, msg))?;
                     wrap_handle(
                         vm,
                         mc,

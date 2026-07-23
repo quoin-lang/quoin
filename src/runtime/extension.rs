@@ -1639,6 +1639,7 @@ fn read_reply_frame_timed<'gc>(
     vm: &mut VmState<'gc>,
     id: StreamId,
     timeout_ms: u64,
+    peer: &str,
 ) -> Result<Vec<u8>, QuoinError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     let mut buf: Vec<u8> = Vec::new();
@@ -1656,7 +1657,9 @@ fn read_reply_frame_timed<'gc>(
             ms: remaining.as_millis() as u64,
             buf: Vec::new(),
         })? {
-            IoResult::Read(chunk) if chunk.is_empty() => Err(QuoinError::Other(
+            IoResult::Read(chunk) if chunk.is_empty() => Err(QuoinError::boot(
+                peer,
+                crate::error::BootReason::Handshake,
                 "Extension handshake: connection closed before manifest".to_string(),
             )),
             IoResult::Read(chunk) => {
@@ -1664,9 +1667,11 @@ fn read_reply_frame_timed<'gc>(
                 Ok(())
             }
             IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
-            other => Err(QuoinError::Other(format!(
-                "Extension handshake: unexpected read result {other:?}"
-            ))),
+            other => Err(QuoinError::boot(
+                peer,
+                crate::error::BootReason::Handshake,
+                format!("Extension handshake: unexpected read result {other:?}"),
+            )),
         }
     };
     while buf.len() < 4 {
@@ -1695,6 +1700,7 @@ fn read_reply_frame_timed<'gc>(
 fn fetch_manifest<'gc>(
     vm: &mut VmState<'gc>,
     id: StreamId,
+    peer: &str,
 ) -> Result<(Vec<ClassDecl>, u32), QuoinError> {
     write_msg(
         vm,
@@ -1703,7 +1709,7 @@ fn fetch_manifest<'gc>(
             version: PROTOCOL_VERSION,
         },
     )?;
-    let frame = read_reply_frame_timed(vm, id, crate::tuning::ext_handshake_timeout_ms())?;
+    let frame = read_reply_frame_timed(vm, id, crate::tuning::ext_handshake_timeout_ms(), peer)?;
     match quoin_ext_proto::decode_frame(&frame)
         .map_err(|e| QuoinError::Other(format!("Extension manifest: malformed frame: {e}")))?
     {
@@ -1713,16 +1719,22 @@ fn fetch_manifest<'gc>(
             lanes,
         } => {
             if version != PROTOCOL_VERSION {
-                return Err(QuoinError::Other(format!(
-                    "Extension manifest: the extension SDK speaks protocol version {version}, \
-                     this host speaks {PROTOCOL_VERSION} — update the older side"
-                )));
+                return Err(QuoinError::boot(
+                    peer,
+                    crate::error::BootReason::Handshake,
+                    format!(
+                        "Extension manifest: the extension SDK speaks protocol version \
+                         {version}, this host speaks {PROTOCOL_VERSION} — update the older side"
+                    ),
+                ));
             }
             Ok((classes, lanes.clamp(1, 1024)))
         }
-        other => Err(QuoinError::Other(format!(
-            "Extension manifest: expected ManifestReturn, got {other:?}"
-        ))),
+        other => Err(QuoinError::boot(
+            peer,
+            crate::error::BootReason::Handshake,
+            format!("Extension manifest: expected ManifestReturn, got {other:?}"),
+        )),
     }
 }
 
@@ -1792,9 +1804,13 @@ fn spawn_ext_process<'gc>(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| QuoinError::Other(format!("Extension: failed to start '{command}': {e}")))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        QuoinError::boot(
+            command,
+            crate::error::BootReason::Spawn,
+            format!("Extension: failed to start '{command}': {e}"),
+        )
+    })?;
 
     // The child binds the socket asynchronously after exec, so retry the connect briefly until it's
     // listening (each attempt parks the fiber).
@@ -1817,7 +1833,7 @@ fn spawn_ext_process<'gc>(
     // point), so no GC value may be held across it. A generic extension returns an empty manifest.
     // On any handshake failure (including the timeout) the child isn't owned by an `Extension` value
     // yet, so kill it here rather than orphan it.
-    let (manifest, lanes) = match fetch_manifest(vm, id) {
+    let (manifest, lanes) = match fetch_manifest(vm, id, command) {
         Ok(m) => m,
         Err(e) => {
             let _ = child.kill();
@@ -1978,21 +1994,23 @@ struct PackageSpec {
 /// Read and parse `<dir>/quoin.toml` into a [`PackageSpec`] (v1: `[package].name` + the
 /// `[extension]` launch spec). The namespace defaults to PascalCase of the directory name (§4).
 fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
+    // The peer a config refusal names, before the manifest can say better.
+    let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("ext");
+    let config = |msg: String| QuoinError::boot(dir_name, crate::error::BootReason::Config, msg);
     let manifest_path = dir.join("quoin.toml");
     let text = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        QuoinError::Other(format!(
+        config(format!(
             "Extension loadPackage: cannot read {}: {e}",
             manifest_path.display()
         ))
     })?;
     let value: toml::Value = text.parse().map_err(|e| {
-        QuoinError::Other(format!(
+        config(format!(
             "Extension loadPackage: invalid {}: {e}",
             manifest_path.display()
         ))
     })?;
 
-    let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("ext");
     let name = value
         .get("package")
         .and_then(|p| p.get("name"))
@@ -2001,7 +2019,7 @@ fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
         .to_string();
 
     let ext = value.get("extension").ok_or_else(|| {
-        QuoinError::Other(format!(
+        config(format!(
             "Extension loadPackage: {} has no [extension] table",
             manifest_path.display()
         ))
@@ -2010,7 +2028,7 @@ fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
         .get("command")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            QuoinError::Other(format!(
+            config(format!(
                 "Extension loadPackage: {} [extension] is missing 'command'",
                 manifest_path.display()
             ))
@@ -2047,7 +2065,7 @@ fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
                     None => Ok(None),
                     Some(v) => match v.as_integer() {
                         Some(n) if n >= min => Ok(Some(n as u64)),
-                        _ => Err(QuoinError::Other(format!(
+                        _ => Err(config(format!(
                             "Extension loadPackage: [extension] {key} must be an integer >= {min}"
                         ))),
                     },
@@ -2071,7 +2089,7 @@ fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
             if restart_mode.is_none()
                 && let Some(k) = tuning_key
             {
-                return Err(QuoinError::Other(format!(
+                return Err(config(format!(
                     "Extension loadPackage: [extension] {k} without `restart = \"always\"` \
                      does nothing — add the opt-in or drop the key"
                 )));
@@ -2079,7 +2097,7 @@ fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
             None
         }
         Some(other) => {
-            return Err(QuoinError::Other(format!(
+            return Err(config(format!(
                 "Extension loadPackage: [extension] restart = \"{other}\" is not a mode \
                  (always|never)"
             )));
@@ -2139,9 +2157,11 @@ fn load_package<'gc>(
     dir: &str,
 ) -> Result<Value<'gc>, QuoinError> {
     let dir_path = std::fs::canonicalize(dir).map_err(|e| {
-        QuoinError::Other(format!(
-            "Extension loadPackage: cannot resolve package dir '{dir}': {e}"
-        ))
+        QuoinError::boot(
+            dir,
+            crate::error::BootReason::Config,
+            format!("Extension loadPackage: cannot resolve package dir '{dir}': {e}"),
+        )
     })?;
     let key = dir_path.to_string_lossy().to_string();
 

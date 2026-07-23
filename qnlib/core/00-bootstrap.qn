@@ -298,6 +298,36 @@ Error <- PeerDiedError <- { |@reason @peer|
     peer -> { @peer }
 }
 
+"* Raised when a worker or extension fails BEFORE its ready handshake — the
+"* boot window. A peer that fails here never lived, so it didn't die: the
+"* startup counterpart of `PeerDiedError` (which only ever describes a peer
+"* that was up). Lets a caller tell an invalid unit or host block apart from
+"* infrastructure trouble by `reason` alone. See docs/internal/SUPERVISION.md.
+Error <- BootError <- { |@reason @peer|
+    "* Which phase refused, as a symbol: #boot (the unit is missing or didn't
+    "* compile, the host block raised, or its answer can't be hosted), #spawn
+    "* (the child process could not start at all), #handshake (the transport
+    "* came up but the version gate or manifest exchange failed), or #config
+    "* (a package manifest is unreadable, invalid, or incomplete).
+    "*
+    "* ```
+    "* { Worker.host:'/no/such/unit.qn' with:{ #{} } }
+    "*     .catch:{ |e:BootError| e.reason }    "* -> boot
+    "* ```
+    reason -> { @reason }
+
+    "* The peer that failed to come up: the unit path, the worker's label, or
+    "* the extension's package/command.
+    peer -> { @peer }
+}
+
+"* Raised when a live out-of-process extension REPORTS an error from a call
+"* (e.g. a SQL error from the `adbc` driver) — the extension stays alive and
+"* usable. Distinct from the extension crashing (an `IoError` of kind #closed)
+"* and from failing to come up (a `BootError`). The inherited `remoteStack`
+"* carries the extension-side stack when one crossed.
+Error <- ExtensionError <- {}
+
 "* Quoin-side numeric conveniences; the arithmetic itself is native.
 Double <-- {
     .meta <-- {

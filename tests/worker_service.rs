@@ -971,3 +971,23 @@ pc.serviceTerminate;
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Issue #136: a process-backed host whose unit is missing raises the typed
+/// `BootError` — `#boot`, `peer` = the unit path — never a bare String, and
+/// never a `PeerDiedError` (a peer that never lived didn't die).
+#[test]
+fn a_boot_failure_is_a_typed_boot_error() {
+    let script = r#"
+var ok = true;
+var caught = nil;
+{ Worker.host:'/no/such/unit-136.qn' with:{ #{} } backing:'process' }
+    .catch:{ |e:BootError| caught = e };
+(caught == nil).if:{ ok = false } else:{
+    ((caught.reason) == #boot).else:{ ok = false };
+    ((caught.peer) == '/no/such/unit-136.qn').else:{ ok = false };
+    ((caught.class.name) == 'BootError').else:{ ok = false };
+};
+ok.if:{ 'PASS'.print } else:{ ('FAIL: ' + caught.s).print };
+"#;
+    assert_service_script_passes("boot-error", script, &[]);
+}

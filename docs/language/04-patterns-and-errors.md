@@ -95,6 +95,14 @@ index or a type mismatch becomes a catchable `TypeError`/`IndexError`, and sendi
 an unknown selector becomes a `MessageNotUnderstood` — each with a `message` you
 can read.
 
+Peer lifecycle failures are typed too: a worker or extension that fails **before**
+its ready handshake raises `BootError` (`reason` says which phase refused —
+`#spawn`, `#boot`, `#handshake`, or `#config` — and `peer` names the unit, label,
+or command), one that dies **after** it was up raises `PeerDiedError`, and an
+error a live extension *reports* is an `ExtensionError` (the peer stays usable).
+So distinguishing a bad unit from infrastructure trouble is a typed catch plus a
+`reason` check — no message parsing.
+
 ### Placeholder statements
 
 Three statement-only markers hold a place for code that isn't there yet — the
