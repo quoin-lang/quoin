@@ -28,8 +28,47 @@
     };
 
     .test:
+    captures -> {
+        var n = 3;
+        var list = #( 1 2 );
+        .is:{ { |x| x + n }.captures } equalTo:#{ 'n': 3 };
+        .is:{ { |x| (x + n) * list.count }.captures } equalTo:#{ 'n': 3 'list': #( 1 2 ) };
+        "* params and locals the block binds itself are not captures
+        .is:{ { |x| var y = x; y * 2 }.captures } equalTo:#{};
+        "* a write-captured binding is still a free variable with a value
+        var m = 1;
+        .is:{ { m = m + 1 }.captures } equalTo:#{ 'm': 1 };
+        "* nested literals: inner frees resolve, outer params shadow
+        var a = 1;
+        .is:{ { |x| { |y| x + y + a }.value:2 }.captures } equalTo:#{ 'a': 1 };
+        "* the live binding, not a copy: mutation is visible
+        var box = #( 0 );
+        var watcher = { box.first };
+        box.at:0 put:9;
+        .is:{ (watcher.captures.at:'box').first } equalTo:9;
+    };
+
+    .test:
     value -> {
         .is:{ {1; 2; 3}.value } equalTo:3;
+    };
+
+    .test:
+    shadowingCapturesAreFreshPerCall -> {
+        "* `var x = x` reads the capture BEFORE defining the shadow — a free
+        "* read, so this literal must never be judged closed and cached: each
+        "* call materializes a fresh closure over the CURRENT frame.
+        "* (Regression: with another var in the block, the constant-closure
+        "* promotion pinned the first call's environment into every later one.)
+        var mk = { |x|
+            {
+                var x = x
+                var y = 0
+                x + y
+            }
+        };
+        .is:{ (mk.value:1).value } equalTo:1;
+        .is:{ (mk.value:2).value } equalTo:2;
     };
 
     .test:

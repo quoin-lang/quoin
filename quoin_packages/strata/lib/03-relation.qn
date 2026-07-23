@@ -1,0 +1,158 @@
+"* The lazy plan node — the [NumPy]Expr analog (DESIGN.md 4). Combinators
+"* answer a NEW relation (immutable, so relations share and compose); force
+"* points lower the plan to one parameterized SELECT, run it through the
+"* repo, hydrate, and memoize. The force rule is NumPy's: a selector forces
+"* iff its result leaves the lazy world.
+[Strata]Relation <- { |@model @wheres @params @orders @limitN @skipN @isDistinct @withs @repo @cache|
+    .meta <-- {
+        "* The root node for a model. Ensures the model's accessors exist
+        "* (registry-flagged, one-time) so hydrated rows answer their columns.
+        on: -> { |m|
+            m.strataEnsure;
+            .new:{
+                var model = m
+                var wheres = #()
+                var params = #()
+                var orders = #()
+                var isDistinct = false
+                var withs = #()
+            }
+        }
+    }
+
+    model -> { @model }
+
+    "* A fresh node with this one's plan (lists copied) and no cache. Always
+    "* a PLAIN relation, even derived from an [Strata]Assoc node — the assoc's
+    "* plan is already the per-owner query, so a refinement queries for that
+    "* owner alone and never touches the shared batch machinery.
+    derived -> {
+        var m = @model
+        var w = @wheres.collect:{ |x| x }
+        var p = @params.collect:{ |x| x }
+        var o = @orders.collect:{ |x| x }
+        var l = @limitN
+        var s = @skipN
+        var d = @isDistinct
+        var vw = @withs.collect:{ |x| x }
+        var rp = @repo
+        [Strata]Relation.new:{
+            var model = m
+            var wheres = w
+            var params = p
+            var orders = o
+            var limitN = l
+            var skipN = s
+            var isDistinct = d
+            var withs = vw
+            var repo = rp
+        }
+    }
+
+    "* Internal: mutate THIS node during derivation, before it escapes.
+    strataAddWhere:params: -> { |sql ps|
+        @wheres.add:sql
+        ps.each:{ |v| @params.add:v }
+        self
+    }
+    strataOrder: -> { |frag| @orders.add:frag; self }
+    strataLimit: -> { |n| @limitN = n; self }
+    strataSkip: -> { |n| @skipN = n; self }
+    strataDistinct -> { @isDistinct = true; self }
+    strataRepo: -> { |r| @repo = r; self }
+    strataWith: -> { |w| @withs.add:w; self }
+
+    "* -- combinators: lazy, zero database traffic ------------------------
+    "* A block predicate compiles to SQL at BUILD time (02-predicate.qn).
+    where: -> { |b:Block|
+        var cw = [Strata]Sql.compile:b for:@model;
+        .derived.strataAddWhere:(cw.first) params:(cw.second)
+    }
+    "* A Map is equality per pair, ANDed; nil means IS NULL.
+    where: --> { |m:Map|
+        var r = .derived
+        var model = @model
+        m.each:{ |pair|
+            var col = '"' + (model.strataSqlCol:pair.key) + '"'
+            pair.value.defined?
+                .if:{ r.strataAddWhere:('(' + col + ' = ?)') params:#( (pair.value) ) }
+                 else:{ r.strataAddWhere:('(' + col + ' IS NULL)') params:#() }
+        }
+        r
+    }
+    "* A raw SQL fragment (driver-neutral '?' placeholders).
+    where: --> { |sql:String| .where:sql params:#() }
+    where:params: -> { |sql ps| .derived.strataAddWhere:('(' + sql + ')') params:ps }
+
+    orderBy: -> { |c| .derived.strataOrder:('"' + (@model.strataSqlCol:c) + '"') }
+    orderByDesc: -> { |c| .derived.strataOrder:('"' + (@model.strataSqlCol:c) + '" DESC') }
+    limit: -> { |n| .derived.strataLimit:n }
+    skip: -> { |n| .derived.strataSkip:n }
+    distinct -> { .derived.strataDistinct }
+    "* Route this relation to an explicit repo instead of the ambient default.
+    via: -> { |r| .derived.strataRepo:r }
+    "* Preload associations when this relation forces (DESIGN.md 6): a
+    "* Symbol names one association, a String may be a dotted path
+    "* ('posts.comments') batch-loaded level by level across the union of
+    "* the previous one. Lazy — nothing loads until the force.
+    with: -> { |spec| .derived.strataWith:#{ 'path': spec.s 'scope': nil } }
+    "* Scoped preload: the block compiles like a where: predicate against
+    "* the (last, hasMany) level's model — what the association then answers
+    "* on these instances is the scoped subset.
+    with:scope: -> { |spec b| .derived.strataWith:#{ 'path': spec.s 'scope': b } }
+
+    "* -- lowering ---------------------------------------------------------
+    "* The full SELECT as #( sql params ), without executing. Not a force
+    "* point — handy for tests and for seeing what a plan will run.
+    toSql -> { .strataSelect:'*' }
+
+    strataSelect: -> { |what|
+        var sql = 'SELECT '
+        @isDistinct.if:{ sql = sql + 'DISTINCT ' }
+        sql = sql + what + ' FROM "' + @model.strataTable + '"'
+        (@wheres.count > 0).if:{ sql = sql + ' WHERE ' + (@wheres.join:' AND ') }
+        (@orders.count > 0).if:{ sql = sql + ' ORDER BY ' + (@orders.join:', ') }
+        @limitN.defined?.if:{ sql = sql + ' LIMIT ' + @limitN.s }
+        @skipN.defined?.if:{ sql = sql + ' OFFSET ' + @skipN.s }
+        #( sql (@params.collect:{ |x| x }) )
+    }
+
+    "* The repo this node forces against: its own routing, or the default.
+    strataRepoFor -> { @repo.defined?.if:{ @repo } else:{ [Strata]Repo.default } }
+
+    strataRun: -> { |lowered|
+        var repo = .strataRepoFor
+        repo.query:(repo.dialect.placeholders:(lowered.first)) params:(lowered.second)
+    }
+
+    "* -- force points ------------------------------------------------------
+    "* Materialize (memoized): one SELECT, hydrated into model instances
+    "* (tagged with the forcing repo), then any with: preloads — each one
+    "* IN-query per association level, never per row.
+    toList -> {
+        @cache.defined?.if:{ ^^ @cache }
+        var repo = .strataRepoFor
+        var lowered = .toSql
+        var rows = repo.query:(repo.dialect.placeholders:(lowered.first)) params:(lowered.second)
+        @cache = @model.strataHydrate:rows repo:repo
+        @withs.each:{ |w| [Strata]Assoc.preload:w cohort:@cache }
+        @cache
+    }
+    each: -> { |b| .toList.each:b }
+    first -> {
+        @cache.defined?.if:{ ^^ @cache.first }
+        (.limit:1).toList.first
+    }
+    count -> {
+        var rows = .strataRun:(.strataSelect:'COUNT(*) AS strata_n')
+        rows.first.at:'strata_n'
+    }
+    exists? -> { .first.defined? }
+    "* One column's values, in order.
+    pluck: -> { |c|
+        var col = @model.strataSqlCol:c
+        var rows = .strataRun:(.strataSelect:('"' + col + '"'))
+        rows.collect:{ |r| r.at:col }
+    }
+    s -> { .toList.s }
+}

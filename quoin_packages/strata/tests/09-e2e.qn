@@ -1,0 +1,251 @@
+"* End to end against a real SQLite database, as its OWN suites: skip: marks a
+"* whole suite skipped, and the pure units before this one must run even where
+"* the extension isn't installed. Gates on the same two optional install-time
+"* dependencies as qnlib/tests/43-adbc.qn (extension binary + SQLite driver).
+"*
+"* The graph suite pins the design invariant — round trips scale with the
+"* association EDGES traversed, never row count — on Repo#queries deltas.
+use strata:*
+
+[Strata]Model <- User <- {
+    .table:'users';
+    .col:#id type:Integer;
+    .col:#name;
+    .hasMany:#posts of:#Post via:#authorId
+}
+
+[Strata]Model <- Post <- {
+    .table:'posts';
+    .col:#id;
+    .col:#authorId;
+    .col:#title;
+    .col:#likes type:Integer;
+    .belongsTo:#author of:#User via:#authorId;
+    .hasMany:#comments of:#Comment via:#postId
+}
+
+[Strata]Model <- Comment <- {
+    .table:'comments';
+    .col:#id;
+    .col:#postId;
+    .col:#body;
+    .belongsTo:#post of:#Post via:#postId
+}
+
+var strataReady = {
+    Extension.loadPackage: 'quoin_packages/adbc';
+    (([ADBC]Database.sqliteMemory.connect).query: 'select 1').toList;
+    true
+}.catch:{ false }
+
+"* A fresh in-memory repo with the widgets table and three rows.
+var freshRepo = {
+    var repo = [Strata]Repo.sqliteMemory
+    repo.execute:'create table widgets (id integer, name text, kind text, weight_kg real)'
+    repo.execute:'insert into widgets values (?, ?, ?, ?)' params:#( 1 'Anvil' 'tool' 40.0 )
+    repo.execute:'insert into widgets values (?, ?, ?, ?)' params:#( 2 'Axle' 'part' 3.5 )
+    repo.execute:'insert into widgets values (?, ?, ?, ?)' params:#( 3 'Bolt' nil 0.1 )
+    repo
+}
+
+(TestSuite.new:{ var name = 'StrataE2e' }).add:{
+    strataReady.if:{
+        .test:
+        forcesHydratesAndMemoizes -> {
+            [Strata]Repo.default:freshRepo.value;
+            var rel = (Widget.where:{ |w| w.weightKg > 1.0 }).orderBy:#name;
+            var rows = rel.toList;
+            .is:{ rows.count } equalTo:2;
+            .is:{ rows.first.class.name } equalTo:'Widget';
+            "* generated accessors over @row, and the generic at:
+            .is:{ rows.first.name } equalTo:'Anvil';
+            .is:{ rows.second.name } equalTo:'Axle';
+            .is:{ rows.first.at:#weightKg } equalTo:40.0;
+            "* memoized: a second force reuses the cache (same instances)
+            .isTrue:{ rel.toList.first == rows.first };
+            "* hydration tagged the cohort for slice-2 batching
+            .is:{ rows.first.strataBatch.count } equalTo:2;
+        };
+
+        .test:
+        forcePointsQueryTheRepo -> {
+            [Strata]Repo.default:freshRepo.value;
+            var caught = 'A%';
+            .is:{ (Widget.where:{ |w| w.name ~ caught }).count } equalTo:2;
+            .is:{ Widget.all.count } equalTo:3;
+            .is:{ (Widget.orderBy:#weightKg).first.name } equalTo:'Bolt';
+            .isTrue:{ (Widget.where:#{ 'kind': 'tool' }).exists? };
+            .isFalse:{ (Widget.where:#{ 'kind': 'gear' }).exists? };
+            .is:{ (Widget.orderBy:#name).pluck:#name } equalTo:#( 'Anvil' 'Axle' 'Bolt' );
+            .is:{ (Widget.where:#{ 'kind': nil }).pluck:#name } equalTo:#( 'Bolt' );
+        };
+
+        .test:
+        viaRoutesAroundTheDefault -> {
+            [Strata]State.at:'defaultRepo' put:nil;
+            var repo = freshRepo.value;
+            .is:{ ((Widget.where:'kind = ?' params:#( 'part' )).via:repo).pluck:#name } equalTo:#( 'Axle' );
+            "* the default stays unset — routing never leaked into module state
+            .does:{ Widget.all.toList } throw:#/no default repo/;
+        };
+
+        .test:
+        transactionCommitsAndRollsBack -> {
+            var repo = freshRepo.value;
+            [Strata]Repo.default:repo;
+            repo.transaction:{ |r|
+                r.execute:'insert into widgets values (?, ?, ?, ?)' params:#( 4 'Cam' 'part' 1.0 )
+            };
+            .is:{ Widget.all.count } equalTo:4;
+
+            "* a throw inside the block rolls the insert back and re-raises
+            var seen = nil;
+            {
+                repo.transaction:{ |r|
+                    r.execute:'insert into widgets values (?, ?, ?, ?)' params:#( 5 'Dowel' 'part' 1.0 )
+                    [Strata]Error.throw:'abort this'
+                }
+            }.catch:{ |e| seen = e };
+            .does:{ #/abort this/ } match:(seen.message);
+            .is:{ Widget.all.count } equalTo:4;
+        };
+
+        .test:
+        forceTimeErrorsCarryTheSql -> {
+            [Strata]Repo.default:freshRepo.value;
+            var failed = nil;
+            { (Widget.where:'no_such_column = ?' params:#( 1 )).toList }.catch:{ |e| failed = e };
+            .isTrue:{ [Strata]Error ~ failed };
+            .does:{ #/no_such_column/ } match:(failed.sql);
+        };
+    }
+    else:{
+        .skip: 'adbc extension binary or SQLite driver not installed (build crates/adbc + install the ADBC SQLite driver to run the e2e tier)';
+    };
+}
+
+"* A fresh graph: three users (Cy has no posts), four posts (one orphaned —
+"* NULL author), three comments (post 2 has none). Batched children come
+"* back in key order, so content assertions are deterministic.
+var graphRepo = {
+    var repo = [Strata]Repo.sqliteMemory
+    repo.execute:'create table users (id integer, name text)'
+    repo.execute:'create table posts (id integer, author_id integer, title text, likes integer)'
+    repo.execute:'create table comments (id integer, post_id integer, body text)'
+    repo.execute:'insert into users values (1, ?), (2, ?), (3, ?)' params:#( 'Ann' 'Bo' 'Cy' )
+    repo.execute:'insert into posts values (1, 1, ?, 5), (2, 1, ?, 0), (3, 2, ?, 3), (4, null, ?, 0)'
+    params:#( 'A1' 'A2' 'B1' 'orphan' )
+    repo
+        .execute:'insert into comments values (1, 1, ?), (2, 1, ?), (3, 3, ?)'
+         params:#( 'c1' 'c2' 'c3' )
+    repo
+}
+
+(TestSuite.new:{ var name = 'StrataGraphE2e' }).add:{
+    strataReady.if:{
+        .test:
+        nestedTraversalBatchesPerEdge -> {
+            var repo = graphRepo.value;
+            [Strata]Repo.default:repo;
+            var users = (User.orderBy:#id).toList;
+            var q0 = repo.queries;
+            var titles = #();
+            users.each:{ |u| u.posts.each:{ |p| titles.add:(p.title) } };
+            "* one IN-query for every user's posts — never one per user
+            .is:{ repo.queries - q0 } equalTo:1;
+            .is:{ titles } equalTo:#( 'A1' 'A2' 'B1' );
+            "* the loaded posts form a union batch, so the next level is
+            "* again ONE query across every post of every user
+            var bodies = #();
+            users.each:{ |u| u.posts.each:{ |p| p.comments.each:{ |c| bodies.add:(c.body) } } };
+            .is:{ repo.queries - q0 } equalTo:2;
+            .is:{ bodies } equalTo:#( 'c1' 'c2' 'c3' );
+            "* childless owners memoized as empty — re-asking costs nothing
+            .is:{ (users.at:2).posts.toList } equalTo:#();
+            .is:{ repo.queries - q0 } equalTo:2;
+        };
+
+        .test:
+        belongsToBatchesAndMemoizesNil -> {
+            var repo = graphRepo.value;
+            [Strata]Repo.default:repo;
+            var posts = (Post.orderBy:#id).toList;
+            var q0 = repo.queries;
+            var names = posts.collect:{ |p|
+                var a = p.author
+                a.defined?.if:{ a.name } else:{ '-' }
+            };
+            .is:{ names } equalTo:#( 'Ann' 'Ann' 'Bo' '-' );
+            .is:{ repo.queries - q0 } equalTo:1;
+            "* the NULL fk memoized as nil — no re-query on a second ask
+            .is:{ (posts.at:3).author } equalTo:nil;
+            .is:{ repo.queries - q0 } equalTo:1;
+        };
+
+        .test:
+        withPreloadsAtTheParentForce -> {
+            var repo = graphRepo.value;
+            [Strata]Repo.default:repo;
+            var q0 = repo.queries;
+            var users = ((User.orderBy:#id).with:#posts).toList;
+            .is:{ repo.queries - q0 } equalTo:2;
+            var titles = #();
+            users.each:{ |u| u.posts.each:{ |p| titles.add:(p.title) } };
+            "* traversal after the preload is free
+            .is:{ repo.queries - q0 } equalTo:2;
+            .is:{ titles } equalTo:#( 'A1' 'A2' 'B1' );
+        };
+
+        .test:
+        nestedAndScopedPreloads -> {
+            var repo = graphRepo.value;
+            [Strata]Repo.default:repo;
+            var q0 = repo.queries;
+            var users = ((User.orderBy:#id).with:'posts.comments').toList;
+            "* one query per LEVEL: users, all their posts, all their comments
+            .is:{ repo.queries - q0 } equalTo:3;
+            var bodies = #();
+            users.each:{ |u| u.posts.each:{ |p| p.comments.each:{ |c| bodies.add:(c.body) } } };
+            .is:{ repo.queries - q0 } equalTo:3;
+            .is:{ bodies } equalTo:#( 'c1' 'c2' 'c3' );
+
+            "* scoped: what posts answers on THESE instances is the subset
+            var popular = ((User.orderBy:#id).with:#posts scope:{ |p| p.likes > 2 }).toList;
+            var pt = #();
+            popular.each:{ |u| u.posts.each:{ |p| pt.add:(p.title) } };
+            .is:{ pt } equalTo:#( 'A1' 'B1' );
+        };
+
+        .test:
+        viaHydratedGraphsStayOnTheirRepo -> {
+            [Strata]State.at:'defaultRepo' put:nil;
+            var repo = graphRepo.value;
+            var users = ((User.orderBy:#id).via:repo).toList;
+            var titles = #();
+            users.each:{ |u| u.posts.each:{ |p| titles.add:(p.title) } };
+            .is:{ titles } equalTo:#( 'A1' 'A2' 'B1' );
+            "* the association walk rode the hydrating repo — the ambient
+            "* default was never needed and stays unset
+            .does:{ User.all.toList } throw:#/no default repo/;
+        };
+
+        .test:
+        refinementQueriesItsOwnerAlone -> {
+            var repo = graphRepo.value;
+            [Strata]Repo.default:repo;
+            var users = (User.orderBy:#id).toList;
+            var q0 = repo.queries;
+            var hot = (users.first.posts.where:{ |p| p.likes > 2 }).toList;
+            .is:{ hot.collect:{ |p| p.title } } equalTo:#( 'A1' );
+            .is:{ repo.queries - q0 } equalTo:1;
+            "* the refined force never touched the shared assoc cache: the
+            "* unrefined ask still batch-loads (one more query), full list
+            var q1 = repo.queries;
+            .is:{ users.first.posts.toList.count } equalTo:2;
+            .is:{ repo.queries - q1 } equalTo:1;
+        };
+    }
+    else:{
+        .skip: 'adbc extension binary or SQLite driver not installed (build crates/adbc + install the ADBC SQLite driver to run the e2e tier)';
+    };
+}

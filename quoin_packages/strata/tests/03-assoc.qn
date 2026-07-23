@@ -1,0 +1,82 @@
+"* Associations, the pure tier (lib/06-assoc.qn): declaration DSL + registry,
+"* generated accessors, and the shape of the [Strata]Assoc node — a relation
+"* on the TARGET whose plan is already the per-owner query, so combinators
+"* derive plain per-owner relations. strataHydrate: is pure, so all of this
+"* runs without a database; the batching itself is proven with query counts
+"* in 09-e2e.qn.
+use strata:*
+
+[Strata]Model <- Author <- {
+    .col:#id type:Integer;
+    .col:#name;
+    .hasMany:#books of:#Book via:#authorId
+}
+
+[Strata]Model <- Book <- {
+    .col:#id;
+    .col:#authorId;
+    .col:#title;
+    .belongsTo:#author of:#Author via:#authorId
+}
+
+(TestSuite.new:{ var name = 'StrataAssoc' }).add:{
+    .test:
+    declarationsRecord -> {
+        var a = Author.strataAssocMeta:#books;
+        .is:{ a.at:'kind' } equalTo:'hasMany';
+        .is:{ a.at:'target' } equalTo:'Book';
+        .is:{ a.at:'via' } equalTo:'authorId';
+        .is:{ (Book.strataAssocMeta:'author').at:'kind' } equalTo:'belongsTo';
+        .does:{ Author.strataAssocMeta:#nope } throw:#/unknown association nope/;
+        .does:{ Author.strataAssocMeta:#nope } throw:#/declared: books/;
+    };
+
+    .test:
+    accessorsGenerate -> {
+        Author.strataEnsure;
+        Book.strataEnsure;
+        .isTrue:{ Author.new.can?:#books };
+        .isTrue:{ Book.new.can?:#author };
+    };
+
+    .test:
+    nodeIsThePerOwnerPlan -> {
+        var as = Author.strataHydrate:#( (#{ 'id': 1 'name': 'Ann' }) (#{ 'id': 2 'name': 'Bo' }) );
+        var node = as.first.books;
+        .isTrue:{ [Strata]Assoc ~ node };
+        .is:{ node.toSql.first } equalTo:'SELECT * FROM "books" WHERE ("author_id" = ?)';
+        .is:{ node.toSql.second } equalTo:#( 1 );
+        "* each owner gets its own plan, from its own key
+        .is:{ (as.second.books).toSql.second } equalTo:#( 2 );
+    };
+
+    .test:
+    refinementDerivesAPlainPerOwnerRelation -> {
+        var as = Author.strataHydrate:#( (#{ 'id': 7 'name': 'Zed' }) );
+        var node = as.first.books;
+        "* any combinator leaves the assoc world — no shared batch machinery
+        .isFalse:{ [Strata]Assoc ~ (node.limit:1) };
+        var refined = (node.where:#{ 'title': 'X' }).orderBy:#title;
+        .is:{ refined.toSql.first } equalTo:'SELECT * FROM "books" WHERE ("author_id" = ?) AND ("title" = ?) ORDER BY "title"';
+        .is:{ refined.toSql.second } equalTo:#( 7 'X' );
+    };
+
+    .test:
+    mintingIsPerModel -> {
+        "* regression: a `var x = x` self-shadow in a multi-var constructor
+        "* block of a package unit pins the FIRST call's capture — minting
+        "* relations for two models in one session must not cross wires.
+        .is:{ Author.all.model.name } equalTo:'Author';
+        .is:{ Book.all.model.name } equalTo:'Book';
+    };
+
+    .test:
+    forcingWithoutARepoRefuses -> {
+        [Strata]State.at:'defaultRepo' put:nil;
+        var as = Author.strataHydrate:#( (#{ 'id': 1 'name': 'Ann' }) );
+        .does:{ as.first.books.toList } throw:#/no default repo/;
+        "* belongsTo forces at the accessor itself
+        var bs = Book.strataHydrate:#( (#{ 'id': 1 'author_id': 1 'title': 'T' }) );
+        .does:{ bs.first.author } throw:#/no default repo/;
+    };
+}

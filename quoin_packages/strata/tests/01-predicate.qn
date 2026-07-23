@@ -1,0 +1,86 @@
+"* The predicate compiler (lib/02-predicate.qn): a where: block becomes SQL at
+"* BUILD time — captures bind as parameters, row-free subtrees evaluate
+"* host-side, and everything unsupported refuses loudly before any database is
+"* involved. Widget comes from 00-model.qn. Pure: no repo, no extension.
+use strata:*
+
+(TestSuite.new:{ var name = 'StrataPredicate' }).add:{
+    .test:
+    capturesBindAsParameters -> {
+        var minW = 2.5;
+        var lowered = (Widget.where:{ |w| w.weightKg > minW && (w.name ~ 'A%') }).toSql;
+        .is:{ lowered.first } equalTo:'SELECT * FROM "widgets" WHERE (("weight_kg" > ?) AND ("name" LIKE ?))';
+        .is:{ lowered.second } equalTo:#( 2.5 'A%' );
+
+        "* a captured subtree evaluates host-side (minW * 2 is one parameter)
+        .is:{ (Widget.where:{ |w| w.weightKg > (minW * 2) }).toSql.second } equalTo:#( 5.0 );
+    };
+
+    .test:
+    operatorLowering -> {
+        "* arithmetic on the row side stays in SQL; literals bind as params
+        var scaled = (Widget.where:{ |w| (w.weightKg * 2) > 5 }).toSql;
+        .is:{ scaled.first } equalTo:'SELECT * FROM "widgets" WHERE (("weight_kg" * ?) > ?)';
+        .is:{ scaled.second } equalTo:#( 2 5 );
+        var modulo = (Widget.where:{ |w| (w.id % 2) == 1 }).toSql;
+        .is:{ modulo.first } equalTo:'SELECT * FROM "widgets" WHERE (("id" % ?) = ?)';
+        .is:{ modulo.second } equalTo:#( 2 1 );
+
+        var lo = 1;
+        var hi = 9;
+        var band = (Widget.where:{ |w| (w.id >= lo) && (w.id < hi) }).toSql;
+        .is:{ band.first } equalTo:'SELECT * FROM "widgets" WHERE (("id" >= ?) AND ("id" < ?))';
+        .is:{ band.second } equalTo:#( 1 9 );
+
+        var either = (Widget.where:{ |w| (w.kind == 'tool') || (w.kind == 'part') }).toSql;
+        .is:{ either.first } equalTo:'SELECT * FROM "widgets" WHERE (("kind" = ?) OR ("kind" = ?))';
+        .is:{ either.second } equalTo:#( 'tool' 'part' );
+
+        .is:{ (Widget.where:{ |w| w.id != 3 }).toSql.first } equalTo:'SELECT * FROM "widgets" WHERE ("id" <> ?)';
+    };
+
+    .test:
+    nilTestsAndMembership -> {
+        .is:{ (Widget.where:{ |w| w.kind == nil }).toSql.first } equalTo:'SELECT * FROM "widgets" WHERE ("kind" IS NULL)';
+        .is:{ (Widget.where:{ |w| w.kind != nil }).toSql.first } equalTo:'SELECT * FROM "widgets" WHERE ("kind" IS NOT NULL)';
+        .is:{ (Widget.where:{ |w| w.name.defined? }).toSql.first } equalTo:'SELECT * FROM "widgets" WHERE ("name" IS NOT NULL)';
+        var ids = #( 1 2 3 );
+        var inSql = (Widget.where:{ |w| w.id.in:ids }).toSql;
+        .is:{ inSql.first } equalTo:'SELECT * FROM "widgets" WHERE ("id" IN (?, ?, ?))';
+        .is:{ inSql.second } equalTo:#( 1 2 3 );
+        var lo = 1;
+        var hi = 9;
+        .is:{ (Widget.where:{ |w| w.id.between:lo and:hi }).toSql.second } equalTo:#( 1 9 );
+        .is:{ (Widget.where:{ |w| !(w.kind == 'x') }).toSql.first } equalTo:'SELECT * FROM "widgets" WHERE (NOT ("kind" = ?))';
+    };
+
+    .test:
+    inListEdges -> {
+        "* an empty list can never match — lowered to a constant-false, no params
+        var none = #();
+        var empty = (Widget.where:{ |w| w.id.in:none }).toSql;
+        .is:{ empty.first } equalTo:'SELECT * FROM "widgets" WHERE (1 = 0)';
+        .is:{ empty.second } equalTo:#();
+
+        "* a literal list is a row-free subtree like any other
+        var lit = (Widget.where:{ |w| w.id.in:#( 1 2 ) }).toSql;
+        .is:{ lit.first } equalTo:'SELECT * FROM "widgets" WHERE ("id" IN (?, ?))';
+        .is:{ lit.second } equalTo:#( 1 2 );
+    };
+
+    .test:
+    buildTimeRefusals -> {
+        .does:{ Widget.where:{ |w| w.nope == 1 } } throw:#/unknown column nope/;
+        .does:{ Widget.where:{ |w x| w.id == x } } throw:#/exactly one row parameter/;
+        .does:{ Widget.where:{ |w| w.id == @min } } throw:#/instance state/;
+        "* ...and an ivar buried inside a host subtree is still caught
+        .does:{ Widget.where:{ |w| w.id == (@min + 1) } } throw:#/instance state/;
+        .does:{ Widget.where:{ |w| w.id == (.min) } } throw:#/reference self/;
+        .does:{ Widget.where:{ |w| w } } throw:#/not a value/;
+        .does:{ Widget.where:{ |w| w.name.reverse == 'x' } } throw:#/not supported/;
+        .does:{ Widget.where:{ |w| w.id == missingCapture } } throw:#/cannot evaluate/;
+        .does:{ Widget.where:{ |w| w.id.in:w } } throw:#/must not mention the row parameter/;
+        .does:{ Widget.where:{ |w| w.id.in:3 } } throw:#/expects a List/;
+        .does:{ Widget.where:{ |w| var x = 1; w.id == x } } throw:#/single expression/;
+    };
+}
