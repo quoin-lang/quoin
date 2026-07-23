@@ -111,6 +111,12 @@ pub struct NativeServiceState {
     /// True for process backing: block arguments take the handle path (no
     /// shipping — templates are in-process references; ACTOR_OBJECTS.md §3a).
     process: bool,
+    /// The child-process handle (process backing only; `None` for threads) —
+    /// what `serviceTerminate` kills. Worker-wide per incarnation: sub-proxies
+    /// clone the `Arc`; a restart rebinds the root to the fresh child's grip.
+    /// The mailbox reader thread owns a clone and reaps on EOF, so a late kill
+    /// finds `None` inside and is a clean no-op.
+    grip: Option<crate::worker::ChildGrip>,
     /// The conversation each task currently has open on this worker: a send
     /// from a task that is servicing a host-op rides its own conversation as
     /// a NESTED call (§5.1 rule 3) instead of deadlocking behind itself.
@@ -262,6 +268,7 @@ struct CallCtx {
     object_id: u64,
     class_name: String,
     process: bool,
+    grip: Option<crate::worker::ChildGrip>,
     convs: Rc<RefCell<HashMap<usize, ActiveConv>>>,
     block_handles: Rc<RefCell<Vec<u64>>>,
     boundary: Rc<RefCell<BoundaryStats>>,
@@ -284,6 +291,7 @@ fn snapshot(s: &NativeServiceState) -> CallCtx {
         object_id: s.object_id,
         class_name: s.class_name.clone(),
         process: s.process,
+        grip: s.grip.clone(),
         convs: s.convs.clone(),
         block_handles: s.block_handles.clone(),
         boundary: s.boundary.clone(),
@@ -391,6 +399,7 @@ pub(crate) fn installed_service_class<'gc>(
         class_selectors,
         &[
             ("serviceStop", service_stop),
+            ("serviceTerminate", service_terminate),
             ("serviceEvents", service_events),
             ("serviceRestart", service_restart),
             ("serviceSupervise:", service_supervise),
@@ -748,7 +757,11 @@ fn note_service_dead(vm: &mut VmState<'_>, ctx: &CallCtx, reason: PeerDeathReaso
     // through the supervisor's cycle instead of failing in the gap. (Idle
     // deaths detected on the reader thread close it when the supervisor
     // wakes — a microsecond-scale gap, recorded in the doc.)
-    if ctx.policy.borrow().is_some() {
+    // NOT when a deliberate stop is in flight (`serviceStop`/`serviceTerminate`
+    // set the flag first): the corpse this death observes was ordered, the
+    // supervisor is about to see the STOPPED terminal and end — a gate closed
+    // here would never reopen, parking every later sender forever.
+    if ctx.policy.borrow().is_some() && !ctx.stopped.get() {
         let mut g = ctx.restart.borrow_mut();
         if matches!(g.phase, GatePhase::Open) {
             g.phase = GatePhase::Restarting;
@@ -1066,6 +1079,7 @@ fn sub_proxy<'gc>(
             object_id: resource,
             class_name,
             process: ctx.process,
+            grip: ctx.grip.clone(),
             convs: ctx.convs.clone(),
             block_handles: ctx.block_handles.clone(),
             boundary: ctx.boundary.clone(),
@@ -1125,7 +1139,7 @@ pub(crate) fn host_block<'gc>(
         .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
     let label_path = path.clone().unwrap_or_else(|| "{block}".to_string());
     let process = backing == "process";
-    let (ch, pid) = match backing {
+    let (ch, pid, grip) = match backing {
         // Process backing: the block crosses as SOURCE + captures (the same
         // portability gate as thread backing — snapshot_block above — plus
         // the source-text requirement) and the child compiles it against its
@@ -1133,16 +1147,17 @@ pub(crate) fn host_block<'gc>(
         "process" => {
             let payload = crate::worker::portable_block_to_wire(&pb)
                 .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
-            let (ch, pid, _grip) = crate::worker::spawn_worker_process(
+            let (ch, pid, grip) = crate::worker::spawn_worker_process(
                 path.clone(),
                 crate::worker::ProcessBody::Block(payload),
                 lanes,
             )
             .map_err(QuoinError::Other)?;
-            (ch, Some(pid))
+            (ch, Some(pid), Some(grip))
         }
         _ => (
             crate::worker::spawn_worker_hosted_block(path.clone(), pb.clone(), lanes),
+            None,
             None,
         ),
     };
@@ -1184,6 +1199,7 @@ pub(crate) fn host_block<'gc>(
         mc,
         ch,
         pid,
+        grip,
         backing,
         lanes,
         &label_path,
@@ -1277,6 +1293,7 @@ fn finish_host<'gc>(
     mc: &gc_arena::Mutation<'gc>,
     ch: crate::worker::WorkerChannels,
     pid: Option<u32>,
+    grip: Option<crate::worker::ChildGrip>,
     backing: &'static str,
     lanes: u32,
     path: &str,
@@ -1380,6 +1397,7 @@ fn finish_host<'gc>(
             object_id: 1,
             class_name: class_name.clone(),
             process: backing == "process",
+            grip,
             convs: Rc::new(RefCell::new(HashMap::new())),
             block_handles: Rc::new(RefCell::new(Vec::new())),
             boundary,
@@ -1406,6 +1424,7 @@ fn finish_host<'gc>(
         &class_selectors,
         &[
             ("serviceStop", service_stop),
+            ("serviceTerminate", service_terminate),
             ("serviceEvents", service_events),
             ("serviceRestart", service_restart),
             ("serviceSupervise:", service_supervise),
@@ -1727,17 +1746,17 @@ fn restart_attempt<'gc>(
 ) -> Result<(), QuoinError> {
     let next = cur + 1;
     let process = recipe.backing == "process";
-    let (ch, pid) = match recipe.backing {
+    let (ch, pid, grip) = match recipe.backing {
         "process" => {
             let payload = crate::worker::portable_block_to_wire(&recipe.pb)
                 .map_err(|e| QuoinError::Other(format!("serviceRestart: {e}")))?;
-            let (ch, pid, _grip) = crate::worker::spawn_worker_process(
+            let (ch, pid, grip) = crate::worker::spawn_worker_process(
                 recipe.path.clone(),
                 crate::worker::ProcessBody::Block(payload),
                 recipe.lanes,
             )
             .map_err(QuoinError::Other)?;
-            (ch, Some(pid))
+            (ch, Some(pid), Some(grip))
         }
         _ => (
             crate::worker::spawn_worker_hosted_block(
@@ -1745,6 +1764,7 @@ fn restart_attempt<'gc>(
                 recipe.pb.clone(),
                 recipe.lanes,
             ),
+            None,
             None,
         ),
     };
@@ -1821,6 +1841,7 @@ fn restart_attempt<'gc>(
             s.dispatch_tx = ch.dispatch_tx;
             s.done_rx = ch.done_rx;
             s.claims = claims;
+            s.grip = grip;
             s.stopped = Rc::new(Cell::new(false));
             s.reap = Rc::new(RefCell::new(Vec::new()));
             s.convs = Rc::new(RefCell::new(HashMap::new()));
@@ -2111,6 +2132,66 @@ pub(crate) fn service_events<'gc>(
 /// drain (refuse new calls, wait for every in-flight conversation), then one
 /// stop op per lane, then join. Worker-wide — every proxy of the service
 /// refuses calls afterwards.
+/// `serviceTerminate` — the force-stop for a PROCESS-backed service: SIGKILL
+/// the child, worker-wide, without waiting for anything. The complement of the
+/// cooperative `serviceStop` (drain + OP_STOP + join), which a wedged child can
+/// park forever (issue #148: a SIGSTOPed worker answers nothing, and its socket
+/// staying open means no death seam ever fires).
+///
+/// An explicit kill is an instruction, not a failure (SUPERVISION.md §2): the
+/// STOPPED terminal is emitted BEFORE the kill — the `Worker#terminate`
+/// ordering — so a supervisor sees a deliberate stop and does not respawn, and
+/// the reader thread's later died observation loses first-terminal-wins.
+/// In-flight callers wake through the ordinary death seams (the killed child's
+/// socket closes) with the catchable typed death. Idempotent: a second call —
+/// or one after `serviceStop`, or on a corpse — finds the terminal already
+/// emitted and the grip reaped, and answers nil.
+///
+/// A terminate racing a restart parks on the rule-5 gate like any sender and
+/// then kills the FRESH incarnation: terminate wins over restart. A stale
+/// sub-proxy raises `#staleIncarnation` like any of its sends would.
+///
+/// Thread backing refuses: a thread shares the process's heap and locks and
+/// cannot be killed without corrupting it — `serviceStop` is the cooperative
+/// path there.
+pub(crate) fn service_terminate<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    _args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    await_restart_window(vm, receiver, Symbol::intern("serviceTerminate"))?;
+    let ctx = receiver
+        .with_native_state::<NativeServiceState, _, _>(snapshot)
+        .map_err(QuoinError::Other)?;
+    if !ctx.process {
+        return Err(QuoinError::Other(format!(
+            "serviceTerminate: only a process-backed service can be killed (`{}` is \
+             thread-backed) — serviceStop is the cooperative path",
+            ctx.class_name
+        )));
+    }
+    // The stop flag first (new top-level sends refuse from here on), then the
+    // STOPPED terminal, then the kill — each subsequent seam observes the
+    // deliberate stop the previous one recorded.
+    ctx.stopped.set(true);
+    if let Some(sink) = vm.io.lives.borrow().get(ctx.life_idx) {
+        sink.emit_stopped("terminated");
+    }
+    // The worker is gone: release the block handles its stored HostBlocks
+    // addressed (the same cleanup as the stop/death paths).
+    for id in ctx.block_handles.borrow_mut().drain(..) {
+        vm.hosted_release(id);
+    }
+    ctx.claims.borrow_mut().gone = Some("stopped");
+    if let Some(grip) = &ctx.grip
+        && let Some(c) = grip.lock().expect("child grip").as_mut()
+    {
+        let _ = c.kill();
+    }
+    Ok(vm.new_nil(mc))
+}
+
 pub(crate) fn service_stop<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
