@@ -11,8 +11,8 @@ use crate::runtime::{
     array, async_rt, big_decimal, big_integer, block, boolean, bytes, channel, civil, class,
     codecs, crypto, csv_fmt, date_time, dns, double, duration, extension, fiber as fiber_class,
     http, ids, instant, integer, io, json, lang_ast, list, map, math, method, msgpack, nil, object,
-    os, process, random_access, regex, runtime, set, sockets, span, streams, string, symbol, task,
-    term, time_zone, timer, timestamp, toml_fmt, vm_stats, yaml,
+    os, process, random, random_access, regex, runtime, set, sockets, span, streams, string,
+    symbol, task, term, time_zone, timer, timestamp, toml_fmt, vm_stats, yaml,
 };
 use crate::vm::VmState;
 use gc_arena::Mutation;
@@ -28,6 +28,7 @@ pub fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
     vm.register_native_class(mc, crypto::build_crypto_digest_class());
     vm.register_native_class(mc, crypto::build_crypto_hmac_class());
     vm.register_native_class(mc, crypto::build_crypto_random_class());
+    vm.register_native_class(mc, random::build_random_class());
     vm.register_native_class(mc, json::build_json_class());
     vm.register_native_class(mc, lang_ast::build_lang_parser_class());
     vm.register_native_class(mc, lang_ast::build_lang_node_class());
