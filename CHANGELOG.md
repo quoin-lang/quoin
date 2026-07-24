@@ -207,6 +207,17 @@ under **Changed**, with the migration.
 
 ### Fixed
 
+- **`Async.timeout:` now interrupts process-backed worker startup** (#147).
+  The spawn's accept/handshake waits ran synchronously on the driver thread,
+  so a stalled child froze EVERY task in the VM — timers included — for the
+  full 10s backstop, and no deadline could fire. The blocking waits now run
+  on a helper thread while the spawning task parks like any other I/O wait,
+  so `Async.timeout:`, cancellation, and Ctrl-C all compose with startup —
+  and other tasks keep running under a slow spawn (a supervised restart of a
+  wedged child no longer stalls the world either). On timeout the child is
+  killed and reaped at the deadline, not at the backstop; the 10s internal
+  deadline remains as the bound for un-timeout-ed spawns.
+
 - **`[HTTP]ServerResponse.new:{ … var body = 'text' }` killed the connection.**
   The class contract says a String body converts to Bytes for convenience, but
   only the `body:` setter honored it — the construction form assigned the raw

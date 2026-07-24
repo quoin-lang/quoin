@@ -673,10 +673,64 @@ fn parent_conv_pump(
 /// Errors carry the boot phase that refused ([`crate::error::BootReason`]):
 /// `Spawn` for exec/socket infrastructure, `Handshake` for the version gate and
 /// pre-ready protocol — the caller lifts them into the typed `BootError`.
-pub fn spawn_worker_process(
+/// Spawn a process-backed worker WITHOUT blocking the driver (issue #147):
+/// the blocking accept/handshake below runs on a short-lived helper thread,
+/// and the caller parks on the returned `SpawnJoin` via
+/// `IoRequest::WorkerSpawnJoin` — so `Async.timeout:` and cancellation
+/// interrupt a stalled startup instead of freezing every task for the 10s
+/// backstop. If the parked task is cancelled, the backend's guard kills the
+/// child through the early-published grip; the helper then collapses (the
+/// accept loop and handshake reads both notice child death), finds its
+/// `send` refused, and reaps.
+pub fn spawn_worker_process_bg(
     unit: Option<String>,
     body: ProcessBody,
     lanes: u32,
+) -> crate::worker::SpawnJoin {
+    let (signal_tx, signal_rx) = async_channel::bounded(1);
+    let outcome: crate::worker::SpawnSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let grip_slot: crate::worker::GripSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let join = crate::worker::SpawnJoin {
+        signal_rx,
+        outcome: outcome.clone(),
+        grip_slot: grip_slot.clone(),
+    };
+    let spawned = std::thread::Builder::new()
+        .name("qn-worker-spawn".to_string())
+        .spawn(move || {
+            let result = spawn_worker_process(unit, body, lanes, &grip_slot);
+            *outcome.lock().expect("spawn outcome slot") = Some(result);
+            if signal_tx.send_blocking(()).is_err() {
+                // The awaiting task is gone (timeout/cancel): nobody will
+                // consume the outcome. Kill and reap whatever the spawn built
+                // — when the cancel guard already killed the child, this is
+                // the reap half. Dropping the outcome drops the channels, so
+                // the pump threads of a fully-built worker exit too.
+                if let Some(Ok((_ch, _pid, grip))) =
+                    outcome.lock().expect("spawn outcome slot").take()
+                    && let Some(mut c) = grip.lock().expect("child grip").take()
+                {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        // The unrun closure just dropped `signal_tx`, so the parked recv sees
+        // the lane close and comes back for this outcome.
+        *join.outcome.lock().expect("spawn outcome slot") = Some(Err((
+            crate::error::BootReason::Spawn,
+            format!("spawn worker thread: {e}"),
+        )));
+    }
+    join
+}
+
+fn spawn_worker_process(
+    unit: Option<String>,
+    body: ProcessBody,
+    lanes: u32,
+    grip_slot: &crate::worker::GripSlot,
 ) -> Result<(WorkerChannels, u32, ChildGrip), (crate::error::BootReason, String)> {
     use crate::error::BootReason;
     let spawn_err = |m: String| (BootReason::Spawn, m);
@@ -714,6 +768,10 @@ pub fn spawn_worker_process(
         .map_err(|e| spawn_err(format!("spawn worker process: {e}")))?;
     let pid = child.id();
     let grip: ChildGrip = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+    // Publish the grip BEFORE any bounded wait: from here on, cancelling the
+    // parked spawner kills the child immediately (and thereby unwedges the
+    // accept loop / handshake reads below) instead of waiting out the 10s.
+    *grip_slot.lock().expect("grip slot") = Some(grip.clone());
     // The lifecycle sink (SUPERVISION.md slice 1): the mailbox reader below is
     // the single event source for process backing — it sees clean terminals
     // and EOF-without-terminal (death) alike.
@@ -760,6 +818,7 @@ pub fn spawn_worker_process(
                     if std::time::Instant::now() > deadline {
                         if let Some(c) = slot.as_mut() {
                             let _ = c.kill();
+                            let _ = c.wait(); // reap — no zombie per abandoned spawn
                         }
                         let _ = std::fs::remove_file(&sock_path);
                         return Err("worker process did not connect within 10s".to_string());
@@ -791,6 +850,7 @@ pub fn spawn_worker_process(
     let fail = |grip: &ChildGrip, msg: String| -> (BootReason, String) {
         if let Some(c) = grip.lock().expect("child grip").as_mut() {
             let _ = c.kill();
+            let _ = c.wait(); // reap — no zombie per abandoned spawn
         }
         (BootReason::Handshake, msg)
     };
@@ -1151,6 +1211,17 @@ fn child_conv_loop(
 /// on the first conversation socket, bridge the mailbox to the lanes, run the
 /// standard worker body, and ship the done terminal.
 pub fn worker_serve_main(sock_path: &str, unit: &str, service: Option<&str>, lanes: u32) -> i32 {
+    // Test hook (issue #147): stall before connecting, simulating a child
+    // that wedges pre-connect, so the timeout tests are deterministic.
+    // Debug builds only — a release binary ignores it.
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("QN_WORKER_SERVE_STALL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        && ms > 0
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let lanes = lanes.max(1);
     let connect = |what: &str| match UnixStream::connect(sock_path) {
         Ok(s) => Some(s),

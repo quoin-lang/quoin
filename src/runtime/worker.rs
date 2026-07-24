@@ -131,6 +131,33 @@ fn from_message<'gc>(
     }
 }
 
+/// Spawn a process-backed worker without blocking the driver (issue #147):
+/// the blocking accept/handshake runs on a helper thread while this task
+/// parks — so `Async.timeout:`, cancellation, and the signal exit interrupt
+/// a stalled startup, and every other task keeps running under it. The outer
+/// `Err` is the park's own interruption (propagate it); the inner `Result`
+/// is the spawn outcome, for the caller to label as its `BootError`.
+pub(crate) fn await_process_spawn<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    unit: Option<String>,
+    body: crate::worker::ProcessBody,
+    lanes: u32,
+) -> Result<crate::worker::SpawnOutcome, QuoinError> {
+    let join = crate::worker::spawn_worker_process_bg(unit, body, lanes);
+    let outcome = join.outcome.clone();
+    vm.await_io(IoRequest::WorkerSpawnJoin(join))?;
+    Ok(outcome
+        .lock()
+        .expect("spawn outcome slot")
+        .take()
+        .unwrap_or_else(|| {
+            Err((
+                crate::error::BootReason::Spawn,
+                "the worker spawn thread died before reporting".to_string(),
+            ))
+        }))
+}
+
 /// Receive a spawned block's N spawn-time `args:` — the first N mailbox
 /// messages — as PLAIN data. Every park happens in here, and any relay agent
 /// is ensured before returning, so [`materialize_spawn_args`] can then build
@@ -239,16 +266,39 @@ fn start_block_worker<'gc>(
     let pb = snapshot_block(template, parent_env, 0)
         .map_err(|e| QuoinError::Other(format!("Worker.start: {e}")))?;
     let process = backing == "process";
-    let (ch, pid, grip) = if process {
-        let payload = crate::worker::portable_block_to_wire(&pb)
-            .map_err(|e| QuoinError::Other(format!("Worker.start: {e}")))?;
-        let (ch, pid, grip) =
-            crate::worker::spawn_worker_process(None, crate::worker::ProcessBody::Job(payload), 1)
-                .map_err(|(reason, msg)| QuoinError::boot("<block>", reason, msg))?;
-        (ch, Some(pid), Some(grip))
-    } else {
-        (spawn_worker_block(pb), None, None)
+    // The process spawn PARKS (issue #147) — pin the arg values across it
+    // (yield safety), exactly as the hosting seam does.
+    let args_pin_owner = crate::pin_table::PinOwner {
+        kind: "spawn-args",
+        id: 0,
     };
+    let pinned_args: Vec<crate::pin_table::PinId> = arg_values
+        .iter()
+        .map(|v| vm.pins.pin(args_pin_owner, *v))
+        .collect();
+    drop(arg_values);
+    let spawned = if process {
+        match crate::worker::portable_block_to_wire(&pb) {
+            Ok(payload) => {
+                await_process_spawn(vm, None, crate::worker::ProcessBody::Job(payload), 1).map(
+                    |outcome| {
+                        outcome
+                            .map(|(ch, pid, grip)| (ch, Some(pid), Some(grip)))
+                            .map_err(|(reason, msg)| QuoinError::boot("<block>", reason, msg))
+                    },
+                )
+            }
+            Err(e) => Ok(Err(QuoinError::Other(format!("Worker.start: {e}")))),
+        }
+    } else {
+        Ok(Ok((spawn_worker_block(pb), None, None)))
+    };
+    // Unpin BEFORE any error propagates — the tickets must not leak.
+    let arg_values: Vec<Value<'gc>> = pinned_args
+        .iter()
+        .filter_map(|id| vm.pins.unpin(*id))
+        .collect();
+    let (ch, pid, grip) = spawned??;
     let chan_link = crate::runtime::channel_relay::register_chan_link(
         vm,
         ch.chan_tx.clone(),
@@ -1034,11 +1084,12 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 }
                 "process" => {
                     let reg = path.clone();
-                    let (ch, pid, grip) = crate::worker::spawn_worker_process(
+                    let (ch, pid, grip) = await_process_spawn(
+                        vm,
                         Some(path),
                         crate::worker::ProcessBody::Plain,
                         1,
-                    )
+                    )?
                     .map_err(|(reason, msg)| QuoinError::boot(&reg, reason, msg))?;
                     wrap_handle(
                         vm,
