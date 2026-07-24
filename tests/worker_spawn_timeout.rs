@@ -102,42 +102,60 @@ Async.gather:#(
 /// The cancel guard kills the child AT the timeout (through the
 /// early-published grip), and the collapsing helper thread reaps it — no
 /// live child, no zombie, well before the 10s backstop would have fired.
+/// Synchronized on the script's own verdict line (a fixed wall-clock sample
+/// races VM boot on a slow runner), then pgrep polls to empty: the kill is
+/// issued before the catch resumes, but SIGKILL delivery and the helper's
+/// reap are asynchronous.
 #[test]
 fn a_timed_out_spawn_leaves_no_child_behind() {
+    use std::io::BufRead;
     let script = r#"
 var r = { Async.timeout:700 do:{ Worker.with:{ Duration.seconds:1 } backing:'process' }; 'no-error' }
     .catch:{ |e| e.class.name };
-Async.sleep:2500;
-(r == 'TimeoutError').if:{ 'PASS'.print } else:{ ('FAIL got ' + r).print };
+r.print;
+Async.sleep:8000;
+'DONE'.print;
 "#;
     let dir = std::env::temp_dir().join("qn_spawn_to_nochild");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let main_path = dir.join("main.qn");
     std::fs::write(&main_path, script).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_qn"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_qn"))
         .arg(&main_path)
         .env("QN_WORKER_SERVE_STALL_MS", "15000")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("run qn");
-    // Let the timeout fire and the kill/reap settle, then look for children
-    // while the script's trailing sleep keeps the parent alive.
-    std::thread::sleep(Duration::from_millis(1700));
-    let pgrep = Command::new("pgrep")
-        .args(["-P", &child.id().to_string()])
-        .output()
-        .expect("run pgrep");
-    let kids = String::from_utf8_lossy(&pgrep.stdout).trim().to_string();
-    let out = child.wait_with_output().expect("qn exits");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = std::io::BufReader::new(child.stdout.take().expect("piped stdout")).lines();
+    let verdict = lines
+        .next()
+        .expect("a verdict line before EOF")
+        .expect("readable stdout");
+    if verdict.trim() != "TimeoutError" {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("expected TimeoutError, got {verdict:?}");
+    }
+    // The verdict means the timeout fired and the guard's kill was issued;
+    // poll for the kill/reap to settle while the script's sleep keeps the
+    // parent alive. Anything still visible at the deadline is a real leak.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let kids = loop {
+        let pgrep = Command::new("pgrep")
+            .args(["-P", &child.id().to_string()])
+            .output()
+            .expect("run pgrep");
+        let kids = String::from_utf8_lossy(&pgrep.stdout).trim().to_string();
+        if kids.is_empty() || Instant::now() > deadline {
+            break kids;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        stdout.contains("PASS"),
-        "stdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
     assert!(
         kids.is_empty(),
         "the timed-out spawn left children behind: {kids}"

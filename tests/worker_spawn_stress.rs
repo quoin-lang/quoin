@@ -159,12 +159,21 @@ fn randomized_spawn_timeouts_hold_the_invariants() {
         );
 
         // No worker child outlives the run: sock paths carry the parent's pid,
-        // so any orphaned `worker-serve` still names it in its argv.
-        let orphans = Command::new("pgrep")
-            .args(["-f", &format!("quoin-worker-{qn_pid}-")])
-            .output()
-            .expect("run pgrep");
-        let orphans = String::from_utf8_lossy(&orphans.stdout).trim().to_string();
+        // so any orphaned `worker-serve` still names it in its argv. Poll
+        // briefly — the final worker exits on socket EOF, which is quick but
+        // asynchronous; only what survives the deadline is a real leak.
+        let orphan_deadline = Instant::now() + Duration::from_secs(3);
+        let orphans = loop {
+            let pgrep = Command::new("pgrep")
+                .args(["-f", &format!("quoin-worker-{qn_pid}-")])
+                .output()
+                .expect("run pgrep");
+            let orphans = String::from_utf8_lossy(&pgrep.stdout).trim().to_string();
+            if orphans.is_empty() || Instant::now() > orphan_deadline {
+                break orphans;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
         assert!(
             orphans.is_empty(),
             "worker children outlived the run: {orphans}\n{ctx}"
