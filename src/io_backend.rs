@@ -196,6 +196,13 @@ pub enum IoRequest {
     WorkerJoin(
         async_channel::Receiver<Result<quoin_ext_proto::DataValue, crate::worker::WorkerExit>>,
     ),
+    /// Park until an in-flight process spawn — its blocking accept/handshake
+    /// running on a helper thread — reports its outcome (issue #147). The
+    /// outcome rides `SpawnJoin`'s side slot rather than this enum (keeping
+    /// `WorkerChannels` out of `Clone + Debug` land); resolving always
+    /// answers `Slept`. The smol arm owns the cancellation guard: dropping
+    /// the future mid-spawn kills the child through the early-published grip.
+    WorkerSpawnJoin(crate::worker::SpawnJoin),
     /// Park until the child process `pid` exits — the extension exit watch
     /// (SUPERVISION.md slice 1): kqueue `EVFILT_PROC`/`NOTE_EXIT` on macOS,
     /// `pidfd` on Linux, a poll loop elsewhere. Observation only — never
@@ -420,6 +427,7 @@ impl IoRequest {
                 format!("worker receive (timeout {ms}ms)")
             }
             IoRequest::WorkerJoin(_) => "worker join".to_string(),
+            IoRequest::WorkerSpawnJoin(_) => "worker: spawn (process)".to_string(),
             IoRequest::ChildExit { .. } => "child exit watch".to_string(),
             IoRequest::Close { .. } => "io: close".to_string(),
             IoRequest::TlsWrap { .. } => "io: tls handshake".to_string(),
@@ -562,6 +570,10 @@ impl IoBackend for MockBackend {
             IoRequest::DispatchRecv(rx) => IoResult::DispatchMsg(rx.try_recv().ok().map(Box::new)),
             IoRequest::FrameRecv(rx) => IoResult::FrameMsg(rx.try_recv().ok().map(Box::new)),
             IoRequest::ChanRecv(rx) => IoResult::ChanFrame(rx.try_recv().ok().map(Box::new)),
+            IoRequest::WorkerSpawnJoin(join) => {
+                let _ = join.signal_rx.try_recv();
+                IoResult::Slept
+            }
             IoRequest::WorkerJoin(rx) => IoResult::WorkerDone(rx.try_recv().unwrap_or_else(|_| {
                 Err(crate::worker::WorkerExit::Died {
                     reason: crate::error::PeerDeathReason::Exited,

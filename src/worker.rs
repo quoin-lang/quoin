@@ -745,17 +745,48 @@ fn scan_nest(
 /// the pump reader's reap; `None` once reaped.
 pub type ChildGrip = std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>;
 
+/// What a process spawn reports: the parent-side channels, the child's pid,
+/// and its grip — or the boot refusal for the caller to label as a `BootError`.
+pub type SpawnOutcome =
+    Result<(WorkerChannels, u32, ChildGrip), (crate::error::BootReason, String)>;
+/// The outcome hand-off slot, filled by the spawn thread just before it signals.
+pub type SpawnSlot = std::sync::Arc<std::sync::Mutex<Option<SpawnOutcome>>>;
+/// The child's grip, published the moment the child process exists — before
+/// the accept/handshake waits — so cancellation can kill a half-spawned child.
+pub type GripSlot = std::sync::Arc<std::sync::Mutex<Option<ChildGrip>>>;
+
+/// The parked side of an in-flight process spawn (issue #147). The blocking
+/// accept/handshake runs on a helper thread; the spawning task parks on
+/// `signal_rx` via `IoRequest::WorkerSpawnJoin`, so `Async.timeout:` and
+/// cancellation compose with startup like any other I/O wait. The outcome
+/// rides the side slot (not the signal) to keep `WorkerChannels` out of the
+/// `Clone + Debug` I/O enums; `grip_slot` is what the backend's cancel guard
+/// kills through when the future is dropped mid-spawn.
+#[derive(Clone)]
+pub struct SpawnJoin {
+    pub signal_rx: async_channel::Receiver<()>,
+    pub outcome: SpawnSlot,
+    pub grip_slot: GripSlot,
+}
+
+impl std::fmt::Debug for SpawnJoin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SpawnJoin {{ .. }}")
+    }
+}
+
 // The spawn/boot machinery (worker threads boot a full runner; process backing rides a
 // Unix socket) is native-only, split into a `#[path]` child file. On wasm32 the four
 // spawn entry points still exist so the `Worker` class compiles, but every spawn is a
-// dead letter: the done lane is primed with an error before the channels are returned,
-// so `join`/`receive` surface a catchable "not supported" instead of hanging.
+// dead letter: the done lane (or, for the process spawn, the outcome slot) is primed
+// with an error before the handles are returned, so `join`/`receive`/the spawn park
+// surface a catchable "not supported" instead of hanging.
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "worker_spawn.rs"]
 mod worker_spawn;
 #[cfg(not(target_arch = "wasm32"))]
 pub use worker_spawn::{
-    spawn_worker, spawn_worker_block, spawn_worker_hosted_block, spawn_worker_process,
+    spawn_worker, spawn_worker_block, spawn_worker_hosted_block, spawn_worker_process_bg,
     worker_serve_main,
 };
 
@@ -822,13 +853,21 @@ pub fn spawn_worker_hosted_block(
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn spawn_worker_process(
+pub fn spawn_worker_process_bg(
     _unit: Option<String>,
     _body: ProcessBody,
     _lanes: u32,
-) -> Result<(WorkerChannels, u32, ChildGrip), (crate::error::BootReason, String)> {
-    Err((
+) -> SpawnJoin {
+    let (signal_tx, signal_rx) = async_channel::bounded(1);
+    let outcome: SpawnSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(Err((
         crate::error::BootReason::Spawn,
         "workers are not supported on this platform".to_string(),
-    ))
+    )))));
+    // `try_send` on a fresh bounded(1): the slot is guaranteed free.
+    let _ = signal_tx.try_send(());
+    SpawnJoin {
+        signal_rx,
+        outcome,
+        grip_slot: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    }
 }

@@ -633,6 +633,42 @@ impl IoBackend for SmolBackend {
             IoRequest::WorkerRecv(rx) => {
                 Box::pin(async move { IoResult::WorkerMsg(rx.recv().await.ok()) })
             }
+            IoRequest::WorkerSpawnJoin(join) => Box::pin(async move {
+                // Cancellation guard (issue #147): this future dropping before
+                // the spawn reports means the parked task was cancelled
+                // (`Async.timeout:` fired, signal exit, …). Kill the child NOW
+                // through the early-published grip — the helper thread's
+                // blocking accept/handshake collapses on child death, finds
+                // its send refused, and reaps — instead of letting user-code
+                // side effects in the child coast to the 10s backstop.
+                struct KillOnDrop {
+                    grip_slot: crate::worker::GripSlot,
+                    armed: bool,
+                }
+                impl Drop for KillOnDrop {
+                    fn drop(&mut self) {
+                        if !self.armed {
+                            return;
+                        }
+                        if let Some(grip) = self.grip_slot.lock().expect("grip slot").take()
+                            && let Some(c) = grip.lock().expect("child grip").as_mut()
+                        {
+                            let _ = c.kill();
+                        }
+                    }
+                }
+                let mut guard = KillOnDrop {
+                    grip_slot: join.grip_slot.clone(),
+                    armed: true,
+                };
+                // Ok = the outcome slot is filled and the caller owns cleanup
+                // from here; Err = the spawn thread died mid-flight — leave
+                // the guard armed so a half-made child is killed, not orphaned.
+                if join.signal_rx.recv().await.is_ok() {
+                    guard.armed = false;
+                }
+                IoResult::Slept
+            }),
             IoRequest::DispatchRecv(rx) => {
                 Box::pin(async move { IoResult::DispatchMsg(rx.recv().await.ok().map(Box::new)) })
             }

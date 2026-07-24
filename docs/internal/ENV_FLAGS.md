@@ -47,6 +47,7 @@ Two value conventions coexist (noted per flag below):
 | `QN_COMPUTE_THREADS` | integer (cores−2) | compute-offload pool size; `0` disables |
 | `QN_COMPUTE_MIN` | bytes (262144) | offload gate: smaller inputs run inline |
 | `QN_EXT_HANDSHAKE_TIMEOUT_MS` | integer ≥1 (10000) | extension spawn handshake timeout |
+| `QN_WORKER_SERVE_STALL_MS` | integer ms (off; **debug builds only**) | test hook: a `worker-serve` child sleeps this long before connecting, simulating a wedged pre-connect child for the spawn-timeout tests (issue #147) |
 | `QN_NO_BANNER` | truthy (off) | suppress the REPL greeting |
 | `QN_PROMPT` | string (`qn> `) | REPL prompt override |
 

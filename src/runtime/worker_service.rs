@@ -1145,28 +1145,49 @@ pub(crate) fn host_block<'gc>(
         .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
     let label_path = path.clone().unwrap_or_else(|| "{block}".to_string());
     let process = backing == "process";
-    let (ch, pid, grip) = match backing {
+    // The process spawn PARKS (issue #147) — plain locals may not hold GC
+    // values across it (yield safety). Pin the arg values for the crossing;
+    // the tickets are plain indices, and the values come back out right after.
+    let args_pin_owner = crate::pin_table::PinOwner {
+        kind: "spawn-args",
+        id: 0,
+    };
+    let pinned_args: Vec<crate::pin_table::PinId> = arg_values
+        .iter()
+        .map(|v| vm.pins.pin(args_pin_owner, *v))
+        .collect();
+    drop(arg_values);
+    let spawned = match backing {
         // Process backing: the block crosses as SOURCE + captures (the same
         // portability gate as thread backing — snapshot_block above — plus
         // the source-text requirement) and the child compiles it against its
         // own unit after the version gate.
-        "process" => {
-            let payload = crate::worker::portable_block_to_wire(&pb)
-                .map_err(|e| QuoinError::Other(format!("Worker.host:with: {e}")))?;
-            let (ch, pid, grip) = crate::worker::spawn_worker_process(
+        "process" => match crate::worker::portable_block_to_wire(&pb) {
+            Ok(payload) => crate::runtime::worker::await_process_spawn(
+                vm,
                 path.clone(),
                 crate::worker::ProcessBody::Block(payload),
                 lanes,
             )
-            .map_err(|(reason, msg)| QuoinError::boot(&label_path, reason, msg))?;
-            (ch, Some(pid), Some(grip))
-        }
-        _ => (
+            .map(|outcome| {
+                outcome
+                    .map(|(ch, pid, grip)| (ch, Some(pid), Some(grip)))
+                    .map_err(|(reason, msg)| QuoinError::boot(&label_path, reason, msg))
+            }),
+            Err(e) => Ok(Err(QuoinError::Other(format!("Worker.host:with: {e}")))),
+        },
+        _ => Ok(Ok((
             crate::worker::spawn_worker_hosted_block(path.clone(), pb.clone(), lanes),
             None,
             None,
-        ),
+        ))),
     };
+    // Unpin BEFORE any error propagates — the tickets must not leak.
+    let arg_values: Vec<Value<'gc>> = pinned_args
+        .iter()
+        .filter_map(|id| vm.pins.unpin(*id))
+        .collect();
+    let (ch, pid, grip) = spawned??;
     // The chan link registers BEFORE the args ship (a channel arg mints its
     // relay bookkeeping against it), and the args ship BEFORE the ready wait
     // (the worker consumes them before running the block — sending after
@@ -1770,11 +1791,12 @@ fn restart_attempt<'gc>(
         "process" => {
             let payload = crate::worker::portable_block_to_wire(&recipe.pb)
                 .map_err(|e| QuoinError::Other(format!("serviceRestart: {e}")))?;
-            let (ch, pid, grip) = crate::worker::spawn_worker_process(
+            let (ch, pid, grip) = crate::runtime::worker::await_process_spawn(
+                vm,
                 recipe.path.clone(),
                 crate::worker::ProcessBody::Block(payload),
                 recipe.lanes,
-            )
+            )?
             .map_err(|(reason, msg)| QuoinError::boot(&recipe.label, reason, msg))?;
             (ch, Some(pid), Some(grip))
         }
