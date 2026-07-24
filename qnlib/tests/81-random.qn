@@ -1,0 +1,70 @@
+"* The seedable `Random` PRNG (src/runtime/random.rs): xoshiro256** seeded via
+"* SplitMix64 — the stream is a stability CONTRACT (same seed, same stream, on
+"* every platform and every Quoin version). The pinned draws below come from an
+"* independent transcription of the published reference algorithms, never from
+"* the Rust under test; the raw u64 pins live in src/runtime/random_tests.rs.
+"* If a pin fails, the contract broke — fix the code, never the pin.
+(TestSuite.new:{ var name = 'Random' }).add:{
+    .test:
+    pinnedStream -> {
+        var r = Random.seed:42;
+        .is:{ r.int:100 } equalTo:42;
+        .is:{ r.int:100 } equalTo:2;
+        .is:{ r.int:100 } equalTo:9;
+        .is:{ (Random.seed:7).int:1000 } equalTo:994;
+        .is:{ ((Random.seed:11).bytes:12).toHex } equalTo:'dfa73969c27f283981a0555c';
+    };
+
+    .test:
+    determinism -> {
+        var a = Random.seed:123;
+        var b = Random.seed:123;
+        .is:{ (1..51).collect:{ a.int:1000000 } } equalTo:((1..51).collect:{ b.int:1000000 });
+        "* Replay from a printed seed: Random.new remembers the seed it drew.
+        var r = Random.new;
+        var replay = Random.seed:r.seed;
+        .is:{ r.int:1000000 } equalTo:(replay.int:1000000);
+        .is:{ (Random.seed:42).seed } equalTo:42;
+        .is:{ (Random.seed:42).s } equalTo:'Random(seed: 42)';
+    };
+
+    .test:
+    ranges -> {
+        var r = Random.seed:1;
+        "* next answers in [0, 1) — never negative, never 1.
+        var draws = (1..201).collect:{ r.next };
+        .is:{ draws.min >= 0 } equalTo:true;
+        .is:{ draws.max < 1 } equalTo:true;
+        "* int: is end-exclusive, like ranges; int:1 has one possible answer.
+        var ints = (1..201).collect:{ r.int:6 };
+        .is:{ ints.min >= 0 } equalTo:true;
+        .is:{ ints.max <= 5 } equalTo:true;
+        .is:{ r.int:1 } equalTo:0;
+    };
+
+    .test:
+    pickAndShuffle -> {
+        .is:{ (Random.seed:5).pick:#('a' 'b' 'c') } equalTo:'c';
+        .is:{ (Random.seed:0).pick:#(7) } equalTo:7;
+        "* shuffle: answers a NEW List — same elements, argument untouched.
+        var xs = #(1 2 3 4 5);
+        var shuffled = (Random.seed:9).shuffle:xs;
+        .is:{ shuffled } equalTo:#(4 5 3 2 1);
+        .is:{ xs } equalTo:#(1 2 3 4 5);
+        .is:{ shuffled.sort } equalTo:#(1 2 3 4 5);
+    };
+
+    .test:
+    refusals -> {
+        "* int: needs a bound >= 1 — it answers in [0, n).
+        .does:{ (Random.seed:1).int:0 } throw:ValueError;
+        .does:{ (Random.seed:1).int:-5 } throw:ValueError;
+        .does:{ (Random.seed:1).pick:#() } throw:IndexError;
+        .does:{ (Random.seed:1).bytes:-1 } throw:ValueError;
+        "* Typed natives raise MessageNotUnderstood for a wrong-typed arg (the
+        "* documented design — see 07-errors.qn typedNativeArgs).
+        .does:{ Random.seed:'x' } throw:MessageNotUnderstood;
+        .does:{ (Random.seed:1).int:'x' } throw:MessageNotUnderstood;
+        .does:{ (Random.seed:1).pick:42 } throw:MessageNotUnderstood;
+    };
+}

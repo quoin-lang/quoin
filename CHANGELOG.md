@@ -10,6 +10,17 @@ under **Changed**, with the migration.
 
 ### Added
 
+- **`Random` — the seedable PRNG the docs already promised** (#146).
+  `Random.seed:` answers a deterministic generator: the same seed answers the
+  same stream on every platform and every Quoin version (xoshiro256** seeded
+  via SplitMix64 — the algorithm is part of the contract, so simulations and
+  property tests can replay). `Random.new` seeds from OS entropy but remembers
+  the seed it drew (`seed`), so a failing run can print it and be replayed
+  exactly. Draws: `next` (Double in [0, 1)), `int:` (unbiased, end-exclusive
+  like ranges), `pick:`, `shuffle:`, `bytes:`. State is per instance — there
+  is no hidden global generator. For secrets, `[Crypto]Random` remains the
+  deliberately-unseedable answer.
+
 - **`PeerDiedError` — peer deaths are typed** (SUPERVISION.md slice 0). When the
   isolate hosting a receiver *dies* — its process exits, its connection closes
   under a call, a thread worker's body panics — the raised error is now the new

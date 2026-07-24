@@ -71,9 +71,25 @@ live on the number types themselves. Statistics are part of the collection
 protocol, not a separate toolkit: any Iterate-able of numbers has `mean`,
 `median`, `mode`, `variance`, `stddev`, `percentile:`.
 
+**Random** is the seedable pseudo-random generator — for simulations,
+property tests, and anything that must *replay*: the same seed answers the
+same stream on every platform and every Quoin version (xoshiro256\*\* seeded
+via SplitMix64; the algorithm is part of the contract). `Random.seed:` gives
+the deterministic stream; `Random.new` seeds from OS entropy but remembers
+the seed it drew (`seed`), so a failing run can print it and be replayed
+exactly. `next` answers a Double in [0, 1), `int:` an unbiased Integer in
+[0, n) — end-exclusive, like ranges — and `pick:`, `shuffle:`, and `bytes:`
+cover the common draws. State is per instance; there is no hidden global
+generator. And it is *not for secrets*: `[Crypto]Random` (below) answers OS
+CSPRNG bytes and is deliberately not seedable.
+
 ```quoin
 2.asBigInteger.pow:100    "* -> 1267650600228229401496703205376
 #(1 2 3 4).mean           "* -> 2.5
+var r = Random.seed:2026
+r.int:100                     "* -> 9
+r.int:100                     "* -> 12
+(Random.seed:2026).int:100    "* -> 9
 ```
 
 ### Time
