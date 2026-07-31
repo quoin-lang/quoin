@@ -67,6 +67,12 @@
         .is:{ d.second } equalTo:45;
         .is:{ d.nanosecond } equalTo:123000000;
         .is:{ d.weekday } equalTo:'Sunday';
+        .is:{ d.dayOfYear } equalTo:70;
+        .is:{ d.daysInMonth } equalTo:31;
+        .isTrue:{ d.leapYear? };
+        .is:{ d.weekOfYear } equalTo:10;
+        .is:{ d.isoWeekYear } equalTo:2024;
+        .is:{ d.quarter } equalTo:1;
         .is:{ d.timeZone.name } equalTo:'America/New_York';
     };
 

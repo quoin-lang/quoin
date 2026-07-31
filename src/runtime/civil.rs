@@ -230,7 +230,39 @@ pub fn build_date_class() -> NativeClassBuilder {
         .sdk_instance_method("leapYear?", |host, r, _a| {
             Ok(host.new_bool(date_of(r, "leapYear?")?.in_leap_year()))
         })
-        .doc("Whether this date's year is a leap year.");
+        .doc("Whether this date's year is a leap year.")
+        .sdk_instance_method("weekOfYear", |host, r, _a| {
+            Ok(host.new_int(date_of(r, "weekOfYear")?.iso_week_date().week() as i64))
+        })
+        .doc(
+            "The ISO 8601 week number (1–53): weeks run Monday–Sunday, and week 1 is the \
+             one containing the year's first Thursday. Days near the year boundary can \
+             belong to the last week of the previous ISO year (or week 1 of the next) — \
+             `isoWeekYear` says which year the week counts in.\n\n\
+             ```\n\
+             (Date.parse:'2026-07-11').weekOfYear          \"* -> 28\n\
+             (Date.year:2027 month:1 day:1).weekOfYear     \"* -> 53\n\
+             ```",
+        )
+        .sdk_instance_method("isoWeekYear", |host, r, _a| {
+            Ok(host.new_int(date_of(r, "isoWeekYear")?.iso_week_date().year() as i64))
+        })
+        .doc(
+            "The year `weekOfYear` counts in — usually `year`, but a date in a week that \
+             straddles the boundary belongs to the neighbouring ISO year.\n\n\
+             ```\n\
+             (Date.year:2027 month:1 day:1).isoWeekYear     \"* -> 2026\n\
+             ```",
+        )
+        .sdk_instance_method("quarter", |host, r, _a| {
+            Ok(host.new_int(((date_of(r, "quarter")?.month() as i64) + 2) / 3))
+        })
+        .doc(
+            "The calendar quarter, 1–4 (Q1 is January–March).\n\n\
+             ```\n\
+             (Date.parse:'2026-07-11').quarter     \"* -> 3\n\
+             ```",
+        );
     // Calendar arithmetic, diffs, comparison.
     let b = b
         .sdk_typed_instance_method("+:", &["Span"], |host, receiver, args| {

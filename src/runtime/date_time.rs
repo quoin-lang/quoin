@@ -224,6 +224,45 @@ pub fn build_date_time_class() -> NativeClassBuilder {
              (DateTime.parse:'2024-01-01T12:00:00+00:00[UTC]').weekday     \"* -> 'Monday'\n\
              ```",
         )
+        .sdk_instance_method("dayOfYear", |host, r, _a| {
+            Ok(host.new_int(zoned_of(r, "dayOfYear")?.day_of_year() as i64))
+        })
+        .doc("The 1-based ordinal day within the year (1–366), in this DateTime's own zone.")
+        .sdk_instance_method("daysInMonth", |host, r, _a| {
+            Ok(host.new_int(zoned_of(r, "daysInMonth")?.days_in_month() as i64))
+        })
+        .doc("How many days this DateTime's month has.")
+        .sdk_instance_method("leapYear?", |host, r, _a| {
+            Ok(host.new_bool(zoned_of(r, "leapYear?")?.in_leap_year()))
+        })
+        .doc("Whether this DateTime's year is a leap year.")
+        .sdk_instance_method("weekOfYear", |host, r, _a| {
+            Ok(host.new_int(zoned_of(r, "weekOfYear")?.iso_week_date().week() as i64))
+        })
+        .doc(
+            "The ISO 8601 week number (1–53), as on Date: Monday-based weeks, week 1 holds \
+             the year's first Thursday, and `isoWeekYear` names the year the week counts \
+             in.\n\n\
+             ```\n\
+             (DateTime.parse:'2024-01-01T12:00:00+00:00[UTC]').weekOfYear     \"* -> 1\n\
+             ```",
+        )
+        .sdk_instance_method("isoWeekYear", |host, r, _a| {
+            Ok(host.new_int(zoned_of(r, "isoWeekYear")?.iso_week_date().year() as i64))
+        })
+        .doc(
+            "The year `weekOfYear` counts in — usually `year`, but a date in a week that \
+             straddles the boundary belongs to the neighbouring ISO year.",
+        )
+        .sdk_instance_method("quarter", |host, r, _a| {
+            Ok(host.new_int(((zoned_of(r, "quarter")?.month() as i64) + 2) / 3))
+        })
+        .doc(
+            "The calendar quarter, 1–4 (Q1 is January–March).\n\n\
+             ```\n\
+             (DateTime.parse:'2024-01-01T12:00:00+00:00[UTC]').quarter     \"* -> 1\n\
+             ```",
+        )
         .sdk_instance_method("timeZone", |host, r, _a| {
             Ok(make_time_zone(
                 host,

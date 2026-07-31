@@ -24,6 +24,23 @@
     };
 
     .test:
+    weekAndQuarterAccessors -> {
+        var d = Date.parse:'2026-07-11';
+        .is:{ d.weekOfYear } equalTo:28;
+        .is:{ d.isoWeekYear } equalTo:2026;
+        .is:{ d.quarter } equalTo:3;
+        "* ISO weeks straddle year boundaries in both directions.
+        .is:{ (Date.year:2027 month:1 day:1).weekOfYear } equalTo:53;
+        .is:{ (Date.year:2027 month:1 day:1).isoWeekYear } equalTo:2026;
+        .is:{ (Date.year:2025 month:12 day:29).weekOfYear } equalTo:1;
+        .is:{ (Date.year:2025 month:12 day:29).isoWeekYear } equalTo:2026;
+        "* Quarters split at month boundaries.
+        .is:{ (Date.year:2026 month:3 day:31).quarter } equalTo:1;
+        .is:{ (Date.year:2026 month:4 day:1).quarter } equalTo:2;
+        .is:{ (Date.year:2026 month:12 day:31).quarter } equalTo:4;
+    };
+
+    .test:
     dateArithmetic -> {
         "* Month arithmetic clamps to the end of a shorter month.
         .is:{ (Date.year:2024 month:1 day:31) + (Span.months:1) }
