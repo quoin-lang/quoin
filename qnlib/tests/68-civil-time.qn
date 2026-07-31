@@ -56,6 +56,45 @@
     };
 
     .test:
+    dateRanges -> {
+        var r = (Date.parse:'2026-07-11')..(Date.parse:'2026-07-14');
+        .is:{ r.list.s } equalTo:'#(2026-07-11 2026-07-12 2026-07-13)'; "* end-exclusive
+        .is:{ r.count } equalTo:3;
+        .isTrue:{ r ~ (Date.parse:'2026-07-13') };
+        .isFalse:{ r ~ (Date.parse:'2026-07-14') };
+        "* counts down when start > end, like NumberRange
+        .is:{ ((Date.parse:'2026-07-14')..(Date.parse:'2026-07-11')).list.s }
+            equalTo:'#(2026-07-14 2026-07-13 2026-07-12)';
+        "* empty when the bounds meet
+        .is:{ ((Date.parse:'2026-07-11')..(Date.parse:'2026-07-11')).count } equalTo:0;
+        "* month and year boundaries are just calendar days
+        .is:{ ((Date.parse:'2026-12-30')..(Date.parse:'2027-01-02')).list.s }
+            equalTo:'#(2026-12-30 2026-12-31 2027-01-01)';
+        "* step: answers a fresh range iterating by the given Span; the
+        "* receiver keeps its own step
+        .is:{ (r.step:(Span.days:2)).count } equalTo:2;
+        .is:{ r.count } equalTo:3;
+        .is:{ (((Date.parse:'2026-07-11')..(Date.parse:'2026-08-01')).step:(Span.weeks:1)).list.s }
+            equalTo:'#(2026-07-11 2026-07-18 2026-07-25)';
+        "* month steps clamp at short months, like Date arithmetic
+        .is:{ (((Date.parse:'2026-01-31')..(Date.parse:'2026-05-01')).step:(Span.months:1)).list.s }
+            equalTo:'#(2026-01-31 2026-02-28 2026-03-28 2026-04-28)';
+        "* a descending range steps by a negative span
+        .is:{ (((Date.parse:'2026-08-01')..(Date.parse:'2026-07-11')).step:(Span.weeks:-1)).list.s }
+            equalTo:'#(2026-08-01 2026-07-25 2026-07-18)';
+        "* a step that cannot move start toward end refuses up front
+        .does:{ ((Date.parse:'2026-07-11')..(Date.parse:'2026-08-01')).step:(Span.weeks:-1) }
+            throw:ValueError;
+        .does:{ ((Date.parse:'2026-07-11')..(Date.parse:'2026-08-01')).step:(Span.hours:12) }
+            throw:ValueError;
+        "* init: takes the step directly, for the shorthand-free form
+        .is:{ (DateRange.new:{ var start = Date.parse:'2026-07-11';
+                               var end = Date.parse:'2026-08-01';
+                               var step = Span.weeks:2 }).count }
+            equalTo:2;
+    };
+
+    .test:
     dateArithmetic -> {
         "* Month arithmetic clamps to the end of a shorter month.
         .is:{ (Date.year:2024 month:1 day:31) + (Span.months:1) }

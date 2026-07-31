@@ -1,0 +1,187 @@
+"* A numeric interval from start toward end - end-EXCLUSIVE - iterating in
+"* steps of 1 (counting down when start > end).
+"*
+"* Created with the `..` operator on Integer or Double. Mixes in Iterate, so
+"* every collection combinator works on it; the match operator `~` (as used
+"* by Case when:do: arms) tests containment in the same end-exclusive
+"* interval.
+"*
+"* ```
+"* (1..5).list    "* -> #(1 2 3 4)
+"* (3..0).list    "* -> #(3 2 1)
+"* ```
+NumberRange <- { | @start @end @n |
+    .mix:Iterate
+
+    "* Bind the bounds and choose the step: +1 upward, -1 when start > end.
+    "* Ranges are normally created with `start..end` rather than new:.
+    init: -> { |start end|
+        @start = start
+        @end = end
+
+        @n = (@start > @end).if:{ -1 } else:{ 1 }
+    }
+
+    "* The readable form of the range.
+    "*
+    "* ```
+    "* (1..5).s    "* -> NumberRange(1..5)
+    "* ```
+    s --> { 'NumberRange(' + @start + '..' + @end + ')' }
+
+    "* Containment test for the match operator: true when n lies inside the
+    "* end-exclusive interval (this is what a range condition in a Case
+    "* when:do: arm checks).
+    "*
+    "* ```
+    "* (1..5) ~ 3    "* -> true
+    "* (1..5) ~ 5    "* -> false
+    "* ```
+    #'~:' --> { |n|
+        (@start > @end).if:{ (n <= @start) && (n > @end) } else:{ (n >= @start) && (n < @end) }
+    }
+
+    "* Call the block with each number from start toward end (end excluded),
+    "* stepping by 1 in the range's direction.
+    "*
+    "* ```
+    "* var t = 0; (1..5).each:{ |i| t = t + i }; t    "* -> 10
+    "* ```
+    each: -> { |b|
+        var i = @start
+        { (@n > 0).if:{ i < @end } else:{ i > @end } }.whileDo:{
+            b.valueWithSelfOrArg:i
+            i = i + @n
+        }
+    };
+
+    .sealed!
+}
+
+"* Integers gain the `..` range constructor.
+Integer <-- {
+    "* A NumberRange from self (inclusive) to e (exclusive); counts down when
+    "* self > e.
+    "*
+    "* ```
+    "* (2..5).list    "* -> #(2 3 4)
+    "* ```
+    #'..:' -> { |e| NumberRange.new:{ var start=self; var end=e } }
+}
+
+"* Doubles gain the `..` range constructor.
+Double <-- {
+    "* A NumberRange from self (inclusive) to e (exclusive), stepping by 1.0.
+    "*
+    "* ```
+    "* (0.5..3.0).list    "* -> #(0.5 1.5 2.5)
+    "* ```
+    #'..:' -> { |e| NumberRange.new:{ var start=self; var end=e } }
+}
+
+"* A calendar interval from start toward end - end-EXCLUSIVE - iterating in
+"* steps of one day (counting down when start > end) unless re-stepped
+"* with step: (a Span, so month steps clamp like Date arithmetic does).
+"*
+"* Created with the `..` operator on Date. Mixes in Iterate, so every
+"* collection combinator works on it; the match operator `~` (as used by
+"* Case when:do: arms) tests containment in the same end-exclusive
+"* interval.
+"*
+"* ```
+"* ((Date.parse:'2026-07-11')..(Date.parse:'2026-07-14')).list
+"* "* -> #(2026-07-11 2026-07-12 2026-07-13)
+"* ```
+DateRange <- { | @start @end @step |
+    .mix:Iterate
+
+    "* Bind the bounds and the step: one day in the range's direction unless
+    "* the creating block supplies a `step` Span, which must move start
+    "* toward end - a step that fails to (the wrong sign, or a sub-day span,
+    "* which cannot move a Date at all) could never terminate and throws a
+    "* ValueError instead. Ranges are normally created with `start..end`
+    "* (then re-stepped with step:) rather than new:.
+    init: -> { |start end step|
+        @start = start
+        @end = end
+
+        @step = step
+        (@step == nil).if:{
+            @step = (@start > @end).if:{ Span.days:-1 } else:{ Span.days:1 }
+        }
+        ((@start == @end).not).if:{
+            var next = @start + @step
+            ((@start > @end).if:{ next < @start } else:{ next > @start }).not.if:{
+                ValueError.throw:('DateRange: step ' + @step.s + ' does not move '
+                    + @start.s + ' toward ' + @end.s)
+            }
+        }
+    }
+
+    "* A fresh range over the same bounds, iterating by the given Span:
+    "* Span.weeks:1 for weekly, Span.months:1 for monthly (with Date
+    "* arithmetic's end-of-month clamping). The span must move start toward
+    "* end - a descending range wants a negative span. Containment (~) is
+    "* interval membership and ignores the step.
+    "*
+    "* ```
+    "* (((Date.parse:'2026-07-11')..(Date.parse:'2026-08-01')).step:(Span.weeks:1)).list
+    "* "* -> #(2026-07-11 2026-07-18 2026-07-25)
+    "* ```
+    step: -> { |s| DateRange.new:{ var start = @start; var end = @end; var step = s } }
+
+    "* The readable form of the range (a re-stepped range shows its step).
+    "*
+    "* ```
+    "* ((Date.parse:'2026-07-11')..(Date.parse:'2026-07-14')).s
+    "* "* -> DateRange(2026-07-11..2026-07-14)
+    "* ```
+    s --> {
+        var suffix = ')'
+        (((@step == (Span.days:1)) || (@step == (Span.days:-1))).not).if:{
+            suffix = ' step:' + @step.s + ')'
+        }
+        'DateRange(' + @start.s + '..' + @end.s + suffix
+    }
+
+    "* Containment test for the match operator: true when d lies inside the
+    "* end-exclusive interval (this is what a range condition in a Case
+    "* when:do: arm checks).
+    "*
+    "* ```
+    "* ((Date.parse:'2026-07-11')..(Date.parse:'2026-07-14')) ~ (Date.parse:'2026-07-13')    "* -> true
+    "* ((Date.parse:'2026-07-11')..(Date.parse:'2026-07-14')) ~ (Date.parse:'2026-07-14')    "* -> false
+    "* ```
+    #'~:' --> { |d|
+        (@start > @end).if:{ (d <= @start) && (d > @end) } else:{ (d >= @start) && (d < @end) }
+    }
+
+    "* Call the block with each date from start toward end (end excluded),
+    "* stepping by the range's step: one day in the range's direction unless
+    "* re-stepped with step:.
+    "*
+    "* ```
+    "* ((Date.parse:'2026-07-11')..(Date.parse:'2026-07-14')).collect:{ .weekday }
+    "* "* -> #(Saturday Sunday Monday)
+    "* ```
+    each: -> { |b|
+        var i = @start
+        { (@start > @end).if:{ i > @end } else:{ i < @end } }.whileDo:{
+            b.valueWithSelfOrArg:i
+            i = i + @step
+        }
+    };
+
+    .sealed!
+}
+
+"* Dates gain the `..` range constructor.
+Date <-- {
+    "* A DateRange from self (inclusive) to e (exclusive), stepping one day;
+    "* counts down when self > e.
+    "*
+    "* ```
+    "* ((Date.parse:'2026-07-11')..(Date.parse:'2026-07-13')).count    "* -> 2
+    "* ```
+    #'..:' -> { |e| DateRange.new:{ var start=self; var end=e } }
+}
