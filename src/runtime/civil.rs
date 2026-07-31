@@ -15,6 +15,7 @@ use crate::value::{AnyCollect, NativeClassBuilder, Value};
 
 use gc_arena::collect::Trace;
 use jiff::civil::{Date, DateDifference, Time, TimeDifference};
+use jiff::fmt::strtime;
 use jiff::{SignedDuration, Timestamp, Unit, Zoned};
 use std::any::Any;
 
@@ -177,6 +178,21 @@ pub fn build_date_class() -> NativeClassBuilder {
              ValueError.\n\n\
              ```\n\
              (Date.parse:'2026-07-11').day     \"* -> 11\n\
+             ```",
+        )
+        .sdk_typed_class_method("parse:format:", &["String", "String"], |host, _r, args| {
+            let s = arg!(args, String, 0);
+            let f = arg!(args, String, 1);
+            Date::strptime(f.as_str(), s.as_str())
+                .map(|d| make_date(host, d))
+                .map_err(|e| QuoinError::ValueError(format!("Date parse:format: {e}")))
+        })
+        .doc(
+            "The date a string denotes under an explicit strftime-style format (the \
+             specifiers `format:` renders); not parseable, or missing a date component → \
+             ValueError.\n\n\
+             ```\n\
+             (Date.parse:'07/11/2026' format:'%m/%d/%Y').s     \"* -> 2026-07-11\n\
              ```",
         )
         .sdk_class_method("today", |host, _r, _a| {
@@ -359,6 +375,22 @@ pub fn build_date_class() -> NativeClassBuilder {
          (Date.year:2026 month:7 day:11).s     \"* -> 2026-07-11\n\
          ```",
     )
+    .sdk_typed_instance_method("format:", &["String"], |host, receiver, args| {
+        let f = arg!(args, String, 0);
+        strtime::format(f.as_str(), date_of(receiver, "format:")?)
+            .map(|s| host.new_string(s))
+            .map_err(|e| QuoinError::ValueError(format!("Date format: {e}")))
+    })
+    .doc(
+        "The date rendered by a strftime-style format string: `%Y`/`%m`/`%d` the \
+         components, `%A`/`%B` the English weekday/month names, `%j` the day of year — \
+         plus the rest of the strftime family. An unknown specifier, or one needing a \
+         component a Date lacks (an hour, a zone), throws a ValueError. \
+         `Date.parse:format:` is the inverse.\n\n\
+         ```\n\
+         (Date.parse:'2026-07-11').format:'%A, %B %-d'     \"* -> Saturday, July 11\n\
+         ```",
+    )
 }
 
 pub fn build_time_class() -> NativeClassBuilder {
@@ -417,6 +449,20 @@ pub fn build_time_class() -> NativeClassBuilder {
              denotes; not parseable → ValueError.\n\n\
              ```\n\
              (Time.parse:'09:40:30').second     \"* -> 30\n\
+             ```",
+        )
+        .sdk_typed_class_method("parse:format:", &["String", "String"], |host, _r, args| {
+            let s = arg!(args, String, 0);
+            let f = arg!(args, String, 1);
+            Time::strptime(f.as_str(), s.as_str())
+                .map(|t| make_time(host, t))
+                .map_err(|e| QuoinError::ValueError(format!("Time parse:format: {e}")))
+        })
+        .doc(
+            "The clock reading a string denotes under an explicit strftime-style format \
+             (the specifiers `format:` renders); not parseable → ValueError.\n\n\
+             ```\n\
+             (Time.parse:'2:30 PM' format:'%-I:%M %p').s     \"* -> 14:30:00\n\
              ```",
         )
         .sdk_class_method("midnight", |host, _r, _a| {
@@ -499,6 +545,21 @@ pub fn build_time_class() -> NativeClassBuilder {
         "The ISO 8601 time string (subseconds only when present).\n\n\
          ```\n\
          (Time.hour:9 minute:40).s     \"* -> 09:40:00\n\
+         ```",
+    )
+    .sdk_typed_instance_method("format:", &["String"], |host, receiver, args| {
+        let f = arg!(args, String, 0);
+        strtime::format(f.as_str(), time_of(receiver, "format:")?)
+            .map(|s| host.new_string(s))
+            .map_err(|e| QuoinError::ValueError(format!("Time format: {e}")))
+    })
+    .doc(
+        "The clock reading rendered by a strftime-style format string (`%H`/`%M`/`%S`, \
+         `%I` + `%p` for 12-hour, and friends). A specifier needing a component a Time \
+         lacks (a date, a zone) throws a ValueError. `Time.parse:format:` is the \
+         inverse.\n\n\
+         ```\n\
+         (Time.hour:14 minute:30).format:'%-I:%M %p'     \"* -> 2:30 PM\n\
          ```",
     )
 }

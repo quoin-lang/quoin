@@ -8,6 +8,7 @@ use crate::runtime::time_zone::tz_of;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 
 use gc_arena::collect::Trace;
+use jiff::fmt::strtime;
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use std::any::Any;
@@ -110,6 +111,23 @@ pub fn build_timestamp_class() -> NativeClassBuilder {
              inverse of `s`.\n\n\
              ```\n\
              (Timestamp.parse:'2024-01-01T00:00:00Z').s     \"* -> 2024-01-01T00:00:00Z\n\
+             ```",
+        )
+        .sdk_typed_class_method("parse:format:", &["String", "String"], |host, _r, args| {
+            let s = arg!(args, String, 0);
+            let f = arg!(args, String, 1);
+            Timestamp::strptime(f.as_str(), s.as_str())
+                .map(|ts| make_timestamp(host, ts))
+                .map_err(|e| QuoinError::ValueError(format!("Timestamp parse:format: {e}")))
+        })
+        .doc(
+            "The instant a string denotes under an explicit strftime-style format. An \
+             absolute instant needs an offset, so the format must include `%z` (or a \
+             zone via `%Q`); without one — or with a missing date/time component — it \
+             throws a ValueError.\n\n\
+             ```\n\
+             (Timestamp.parse:'2024-01-01 00:00 +0000' format:'%F %H:%M %z').s\n\
+             \"* -> 2024-01-01T00:00:00Z\n\
              ```",
         )
         // From a Unix epoch count.
@@ -232,6 +250,22 @@ pub fn build_timestamp_class() -> NativeClassBuilder {
          `Timestamp.parse:`.\n\n\
          ```\n\
          (Timestamp.fromUnixSeconds:1704067200).s     \"* -> 2024-01-01T00:00:00Z\n\
+         ```",
+    )
+    .sdk_typed_instance_method("format:", &["String"], |host, receiver, args| {
+        let f = arg!(args, String, 0);
+        strtime::format(f.as_str(), ts_of(receiver, "format:")?)
+            .map(|s| host.new_string(s))
+            .map_err(|e| QuoinError::ValueError(format!("Timestamp format: {e}")))
+    })
+    .doc(
+        "The instant rendered by a strftime-style format string, read in UTC (a \
+         Timestamp has no zone of its own — for a local rendering go through \
+         `inZone:` and `DateTime#format:`). `Timestamp.parse:format:` is the \
+         inverse.\n\n\
+         ```\n\
+         (Timestamp.parse:'2024-01-01T00:00:00Z').format:'%Y-%m-%d %H:%M'\n\
+         \"* -> 2024-01-01 00:00\n\
          ```",
     )
     // The zoned DateTime for this instant in a given zone / in UTC.

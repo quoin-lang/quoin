@@ -9,6 +9,7 @@ use crate::value::{AnyCollect, NativeClassBuilder, Value};
 
 use gc_arena::collect::Trace;
 use jiff::civil::Weekday;
+use jiff::fmt::strtime;
 use jiff::tz::TimeZone;
 use jiff::{Span, Timestamp, Unit, Zoned, ZonedDifference};
 use std::any::Any;
@@ -184,6 +185,23 @@ pub fn build_date_time_class() -> NativeClassBuilder {
              ```\n\
              (DateTime.parse:'2024-01-01T12:00:00-05:00[America/New_York]').year     \"* -> 2024\n\
              ```",
+        )
+        .sdk_typed_class_method("parse:format:", &["String", "String"], |host, _r, args| {
+            let s = arg!(args, String, 0);
+            let f = arg!(args, String, 1);
+            Zoned::strptime(f.as_str(), s.as_str())
+                .map(|z| make_date_time(host, z))
+                .map_err(|e| QuoinError::ValueError(format!("DateTime parse:format: {e}")))
+        })
+        .doc(
+            "The zoned datetime a string denotes under an explicit strftime-style format \
+             (the specifiers `format:` renders). The input must pin the zone — an IANA \
+             name via `%Q`, or at least a UTC offset via `%z` — else, like a string \
+             missing a date or time component, it throws a ValueError.\n\n\
+             ```\n\
+             (DateTime.parse:'2024-01-01 07:00 America/New_York' format:'%F %H:%M %Q').hour\n\
+             \"* -> 7\n\
+             ```",
         );
     // Components.
     let b = b
@@ -291,6 +309,24 @@ pub fn build_date_time_class() -> NativeClassBuilder {
              ```\n\
              (DateTime.parse:'2024-01-01T12:00:00-05:00[America/New_York]').s\n\
              \"* -> 2024-01-01T12:00:00-05:00[America/New_York]\n\
+             ```",
+        )
+        .sdk_typed_instance_method("format:", &["String"], |host, r, args| {
+            let f = arg!(args, String, 0);
+            strtime::format(f.as_str(), &zoned_of(r, "format:")?)
+                .map(|s| host.new_string(s))
+                .map_err(|e| QuoinError::ValueError(format!("DateTime format: {e}")))
+        })
+        .doc(
+            "The datetime rendered by a strftime-style format string — `%Y`/`%m`/`%d` and \
+             `%H`/`%M`/`%S` the components, `%A`/`%B` the English weekday/month names, \
+             `%Z`/`%z`/`%Q` the zone as abbreviation/offset/IANA name, plus the rest of \
+             the strftime family — read in this DateTime's own zone. An unknown specifier \
+             throws a ValueError. `DateTime.parse:format:` is the inverse.\n\n\
+             ```\n\
+             (DateTime.parse:'2024-01-01T12:00:00-05:00[America/New_York]')\n\
+                 .format:'%A %B %-d, %Y at %-I:%M %p %Z'\n\
+             \"* -> Monday January 1, 2024 at 12:00 PM EST\n\
              ```",
         );
     // Absolute arithmetic (Duration) and difference.

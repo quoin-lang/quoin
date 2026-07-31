@@ -41,6 +41,21 @@
     };
 
     .test:
+    strftimeFormatting -> {
+        var d = Date.parse:'2026-07-11';
+        .is:{ d.format:'%A, %B %-d' } equalTo:'Saturday, July 11';
+        .is:{ d.format:'%Y-%j' } equalTo:'2026-192';
+        .is:{ Date.parse:'07/11/2026' format:'%m/%d/%Y' } equalTo:d;
+        .is:{ (Time.hour:14 minute:30).format:'%-I:%M %p' } equalTo:'2:30 PM';
+        .is:{ (Time.parse:'2:30 PM' format:'%-I:%M %p').s } equalTo:'14:30:00';
+        "* A specifier needing a component the type lacks refuses.
+        .does:{ d.format:'%H' } throw:ValueError;
+        .does:{ (Time.hour:9 minute:0).format:'%Y' } throw:ValueError;
+        "* So does an impossible parsed value.
+        .does:{ Date.parse:'13/40/2026' format:'%m/%d/%Y' } throw:ValueError;
+    };
+
+    .test:
     dateArithmetic -> {
         "* Month arithmetic clamps to the end of a shorter month.
         .is:{ (Date.year:2024 month:1 day:31) + (Span.months:1) }
