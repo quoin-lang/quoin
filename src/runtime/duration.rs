@@ -204,6 +204,26 @@ pub fn build_duration_class() -> NativeClassBuilder {
              ((Duration.seconds:10) * 6).s     \"* -> 1m\n\
              ```",
         )
+        .sdk_typed_instance_method("*:", &["Double"], |host, receiver, args| {
+            let factor = arg!(args, Double, 0);
+            let secs = duration_of(receiver, "*:")?.as_secs_f64() * factor;
+            SignedDuration::try_from_secs_f64(secs)
+                .map(|d| make_duration(host, d))
+                .map_err(|_| {
+                    QuoinError::ArithmeticError(
+                        "Duration *: non-finite factor or overflow".to_string(),
+                    )
+                })
+        })
+        .doc(
+            "The Duration scaled by a fractional Double factor — computed in fractional \
+             seconds (as `asSeconds`) and rounded to the nearest nanosecond. A NaN or \
+             infinite factor, or an overflowing result, throws an ArithmeticError.\n\n\
+             ```\n\
+             ((Duration.minutes:90) * 1.5).s     \"* -> 2h 15m\n\
+             ((Duration.seconds:10) * 0.5).s     \"* -> 5s\n\
+             ```",
+        )
         // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
         .sdk_typed_instance_method("<:", &["Duration"], |host, receiver, args| {
             Ok(host.new_bool(duration_of(receiver, "<:")? < duration_of(args[0], "<:")?))
