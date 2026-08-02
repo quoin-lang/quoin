@@ -45,6 +45,17 @@
         .is:{ ((Timestamp.parse:'2024-01-01T00:00:00Z').inZone:(TimeZone.of:'America/New_York')).hour }
             equalTo:19;
     };
+
+    .test:
+    strftimeFormatting -> {
+        "* format: reads in UTC (a Timestamp has no zone of its own).
+        .is:{ (Timestamp.parse:'2024-01-01T00:00:00Z').format:'%Y-%m-%d %H:%M' }
+            equalTo:'2024-01-01 00:00';
+        .is:{ (Timestamp.parse:'2024-01-01 00:00 +0000' format:'%F %H:%M %z').s }
+            equalTo:'2024-01-01T00:00:00Z';
+        "* an absolute instant cannot be parsed without an offset
+        .does:{ Timestamp.parse:'2024-01-01 00:00' format:'%F %H:%M' } throw:ValueError;
+    };
 }
 
 (TestSuite.new:{ var name = 'DateTime' }).add:{
@@ -67,6 +78,18 @@
         .is:{ d.second } equalTo:45;
         .is:{ d.nanosecond } equalTo:123000000;
         .is:{ d.weekday } equalTo:'Sunday';
+        .is:{ d.format:'%A %B %-d, %Y at %-I:%M %p %Z' }
+            equalTo:'Sunday March 10, 2024 at 12:30 PM EDT';
+        .is:{ (DateTime.parse:'2024-01-01 07:00 America/New_York' format:'%F %H:%M %Q').s }
+            equalTo:'2024-01-01T07:00:00-05:00[America/New_York]';
+        "* parsing a zoned datetime needs the zone pinned by %Q or %z
+        .does:{ DateTime.parse:'2024-01-01 07:00' format:'%F %H:%M' } throw:ValueError;
+        .is:{ d.dayOfYear } equalTo:70;
+        .is:{ d.daysInMonth } equalTo:31;
+        .isTrue:{ d.leapYear? };
+        .is:{ d.weekOfYear } equalTo:10;
+        .is:{ d.isoWeekYear } equalTo:2024;
+        .is:{ d.quarter } equalTo:1;
         .is:{ d.timeZone.name } equalTo:'America/New_York';
     };
 

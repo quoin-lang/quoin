@@ -33,6 +33,17 @@
     };
 
     .test:
+    doubleScaling -> {
+        .is:{ ((Duration.minutes:90) * 1.5).s } equalTo:'2h 15m';
+        .is:{ ((Duration.seconds:10) * 0.5).asSeconds } closeTo:5.0;
+        .is:{ ((Duration.seconds:10) * (0.0 - 0.5)).s } equalTo:'5s ago';  "* signed
+        "* a non-finite factor or an overflowing result throws, like Integer overflow
+        .does:{ (Duration.hours:1) * Double.nan } throw:ArithmeticError;
+        .does:{ (Duration.hours:1) * Double.inf } throw:ArithmeticError;
+        .does:{ (Duration.hours:1000000) * 1000000000000000.0 } throw:ArithmeticError;
+    };
+
+    .test:
     comparison -> {
         .isTrue:{ (Duration.seconds:30) < (Duration.minutes:1) };
         .isTrue:{ (Duration.minutes:1) > (Duration.seconds:30) };

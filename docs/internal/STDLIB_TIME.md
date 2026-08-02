@@ -112,7 +112,15 @@ Tests: `qnlib/tests/68-civil-time.qn` (clamping, leap years, wrap-around, fieldw
 the DST-gap resolution). Deferred from this phase: strftime-style formatting, week-of-year /
 quarter accessors, `Date` range iteration (`d1..d2`) — recorded in QUOIN_TODO.
 
-> **Tracked as #114** — Round out stdlib Time: formatting, accessors, ranges, scaling. (Also covers the `Duration#iso8601` and `Duration *:` Double-scalar notes under Decisions below.)
+> **Tracked as #114 — shipped.** strftime-style `format:`/`parse:format:` on all four datetime
+> types (jiff `fmt::strtime`; Timestamp reads UTC, DateTime parses only with the zone pinned by
+> `%Q`/`%z`); `weekOfYear`/`isoWeekYear`/`quarter` on Date + DateTime (plus DateTime gaining
+> Date's `dayOfYear`/`daysInMonth`/`leapYear?`); `d1..d2` → `DateRange` in `core/range.qn`
+> (renamed from `03-number_range.qn`), mirroring NumberRange (end-exclusive, one day per step,
+> counts down) and re-steppable by any Span (`step:` answers a fresh range; a step that cannot
+> move start toward end — wrong sign, or sub-day, which cannot move a Date — throws a
+> ValueError eagerly); `Duration *:` Double scaling. `Duration#iso8601` had already shipped
+> with the serialization work.
 
 ---
 
@@ -127,8 +135,10 @@ a `Duration`.
 - Unit constructors use **full words** (`milliseconds:`, not `millis:`) — Quoin favors readable
   selectors.
 - `Duration.s` uses jiff's **friendly** format (`1h 30m`); an `.iso8601` (`PT1H30M`) can come later.
+  *Since shipped* (with the serialization defaults).
 - `Duration *:` takes an **Integer** scalar for v1 (Double scaling deferred — avoids a rounding
-  question).
+  question). *Since shipped* (#114); the rounding answer: scale in fractional f64 seconds, round
+  to the nearest nanosecond, throw ArithmeticError on a non-finite factor or overflow.
 - `Instant`/`now` are clock-based and so tested **loosely** (e.g. elapsed ≥ a slept duration within
   a tolerance) to avoid flaky tests; `Duration` arithmetic/conversions are pure and tested exactly.
 

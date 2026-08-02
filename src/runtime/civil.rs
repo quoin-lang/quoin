@@ -15,6 +15,7 @@ use crate::value::{AnyCollect, NativeClassBuilder, Value};
 
 use gc_arena::collect::Trace;
 use jiff::civil::{Date, DateDifference, Time, TimeDifference};
+use jiff::fmt::strtime;
 use jiff::{SignedDuration, Timestamp, Unit, Zoned};
 use std::any::Any;
 
@@ -179,6 +180,21 @@ pub fn build_date_class() -> NativeClassBuilder {
              (Date.parse:'2026-07-11').day     \"* -> 11\n\
              ```",
         )
+        .sdk_typed_class_method("parse:format:", &["String", "String"], |host, _r, args| {
+            let s = arg!(args, String, 0);
+            let f = arg!(args, String, 1);
+            Date::strptime(f.as_str(), s.as_str())
+                .map(|d| make_date(host, d))
+                .map_err(|e| QuoinError::ValueError(format!("Date parse:format: {e}")))
+        })
+        .doc(
+            "The date a string denotes under an explicit strftime-style format (the \
+             specifiers `format:` renders); not parseable, or missing a date component → \
+             ValueError.\n\n\
+             ```\n\
+             (Date.parse:'07/11/2026' format:'%m/%d/%Y').s     \"* -> 2026-07-11\n\
+             ```",
+        )
         .sdk_class_method("today", |host, _r, _a| {
             Ok(make_date(host, Zoned::now().date()))
         })
@@ -230,7 +246,39 @@ pub fn build_date_class() -> NativeClassBuilder {
         .sdk_instance_method("leapYear?", |host, r, _a| {
             Ok(host.new_bool(date_of(r, "leapYear?")?.in_leap_year()))
         })
-        .doc("Whether this date's year is a leap year.");
+        .doc("Whether this date's year is a leap year.")
+        .sdk_instance_method("weekOfYear", |host, r, _a| {
+            Ok(host.new_int(date_of(r, "weekOfYear")?.iso_week_date().week() as i64))
+        })
+        .doc(
+            "The ISO 8601 week number (1–53): weeks run Monday–Sunday, and week 1 is the \
+             one containing the year's first Thursday. Days near the year boundary can \
+             belong to the last week of the previous ISO year (or week 1 of the next) — \
+             `isoWeekYear` says which year the week counts in.\n\n\
+             ```\n\
+             (Date.parse:'2026-07-11').weekOfYear          \"* -> 28\n\
+             (Date.year:2027 month:1 day:1).weekOfYear     \"* -> 53\n\
+             ```",
+        )
+        .sdk_instance_method("isoWeekYear", |host, r, _a| {
+            Ok(host.new_int(date_of(r, "isoWeekYear")?.iso_week_date().year() as i64))
+        })
+        .doc(
+            "The year `weekOfYear` counts in — usually `year`, but a date in a week that \
+             straddles the boundary belongs to the neighbouring ISO year.\n\n\
+             ```\n\
+             (Date.year:2027 month:1 day:1).isoWeekYear     \"* -> 2026\n\
+             ```",
+        )
+        .sdk_instance_method("quarter", |host, r, _a| {
+            Ok(host.new_int(((date_of(r, "quarter")?.month() as i64) + 2) / 3))
+        })
+        .doc(
+            "The calendar quarter, 1–4 (Q1 is January–March).\n\n\
+             ```\n\
+             (Date.parse:'2026-07-11').quarter     \"* -> 3\n\
+             ```",
+        );
     // Calendar arithmetic, diffs, comparison.
     let b = b
         .sdk_typed_instance_method("+:", &["Span"], |host, receiver, args| {
@@ -327,6 +375,22 @@ pub fn build_date_class() -> NativeClassBuilder {
          (Date.year:2026 month:7 day:11).s     \"* -> 2026-07-11\n\
          ```",
     )
+    .sdk_typed_instance_method("format:", &["String"], |host, receiver, args| {
+        let f = arg!(args, String, 0);
+        strtime::format(f.as_str(), date_of(receiver, "format:")?)
+            .map(|s| host.new_string(s))
+            .map_err(|e| QuoinError::ValueError(format!("Date format: {e}")))
+    })
+    .doc(
+        "The date rendered by a strftime-style format string: `%Y`/`%m`/`%d` the \
+         components, `%A`/`%B` the English weekday/month names, `%j` the day of year — \
+         plus the rest of the strftime family. An unknown specifier, or one needing a \
+         component a Date lacks (an hour, a zone), throws a ValueError. \
+         `Date.parse:format:` is the inverse.\n\n\
+         ```\n\
+         (Date.parse:'2026-07-11').format:'%A, %B %-d'     \"* -> Saturday, July 11\n\
+         ```",
+    )
 }
 
 pub fn build_time_class() -> NativeClassBuilder {
@@ -385,6 +449,20 @@ pub fn build_time_class() -> NativeClassBuilder {
              denotes; not parseable → ValueError.\n\n\
              ```\n\
              (Time.parse:'09:40:30').second     \"* -> 30\n\
+             ```",
+        )
+        .sdk_typed_class_method("parse:format:", &["String", "String"], |host, _r, args| {
+            let s = arg!(args, String, 0);
+            let f = arg!(args, String, 1);
+            Time::strptime(f.as_str(), s.as_str())
+                .map(|t| make_time(host, t))
+                .map_err(|e| QuoinError::ValueError(format!("Time parse:format: {e}")))
+        })
+        .doc(
+            "The clock reading a string denotes under an explicit strftime-style format \
+             (the specifiers `format:` renders); not parseable → ValueError.\n\n\
+             ```\n\
+             (Time.parse:'2:30 PM' format:'%-I:%M %p').s     \"* -> 14:30:00\n\
              ```",
         )
         .sdk_class_method("midnight", |host, _r, _a| {
@@ -467,6 +545,21 @@ pub fn build_time_class() -> NativeClassBuilder {
         "The ISO 8601 time string (subseconds only when present).\n\n\
          ```\n\
          (Time.hour:9 minute:40).s     \"* -> 09:40:00\n\
+         ```",
+    )
+    .sdk_typed_instance_method("format:", &["String"], |host, receiver, args| {
+        let f = arg!(args, String, 0);
+        strtime::format(f.as_str(), time_of(receiver, "format:")?)
+            .map(|s| host.new_string(s))
+            .map_err(|e| QuoinError::ValueError(format!("Time format: {e}")))
+    })
+    .doc(
+        "The clock reading rendered by a strftime-style format string (`%H`/`%M`/`%S`, \
+         `%I` + `%p` for 12-hour, and friends). A specifier needing a component a Time \
+         lacks (a date, a zone) throws a ValueError. `Time.parse:format:` is the \
+         inverse.\n\n\
+         ```\n\
+         (Time.hour:14 minute:30).format:'%-I:%M %p'     \"* -> 2:30 PM\n\
          ```",
     )
 }

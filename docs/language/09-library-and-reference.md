@@ -116,6 +116,15 @@ Span (`'2y 2mo 3d'`) on `Date` and `DateTime`, where subtraction answers an
 absolute `Duration`. Civil and zone-aware meet through `date.atTime:zone:` /
 `date.inZone:` (→ DateTime) and `DateTime#date` / `#time` (→ civil).
 
+Beyond each type's canonical `s`, the datetime types render and parse through
+strftime-style `format:` / `parse:format:` — a specifier the receiver can't
+honor (an hour on a `Date`, a zone-less `DateTime` parse) throws a
+`ValueError` naming the missing piece. `Date` and `DateTime` place themselves
+in the calendar with `weekOfYear` / `isoWeekYear` / `quarter`, and `d1..d2`
+on `Date`s makes an end-exclusive `DateRange` — one day per step unless
+re-stepped by any `Span` (`.step:(Span.weeks:1)`) — carrying the full
+`Iterate` surface.
+
 ```quoin
 (Duration.minutes:2) + (Duration.seconds:30)    "* -> 2m 30s
 (Timestamp.parse:'2026-07-09T12:00:00Z').inZone:(TimeZone.of:'Asia/Tokyo')
@@ -123,6 +132,9 @@ absolute `Duration`. Civil and zone-aware meet through `date.atTime:zone:` /
 (Date.year:2024 month:1 day:31) + (Span.months:1)      "* -> 2024-02-29
 (Date.parse:'2024-01-15').until:(Date.parse:'2026-03-18')    "* -> 2y 2mo 3d
 ((Time.hour:23 minute:30) + (Duration.hours:1)).s      "* -> '00:30:00'
+(Date.parse:'2026-07-11').format:'%A, %B %-d'          "* -> 'Saturday, July 11'
+((Date.parse:'2026-07-11')..(Date.parse:'2026-07-14')).list
+"* -> #(2026-07-11 2026-07-12 2026-07-13)
 ```
 
 ### Data formats
@@ -511,11 +523,10 @@ MyFile <- [IO]File;     "* aliasing is just an ordinary definition — not a `us
 
 | Unit | Provides |
 |---|---|
-| `prelude.qn` | The prelude entry — `use core/*` (sorted == numeric), then seals Integer/Double so their arithmetic can be optimized. |
+| `prelude.qn` | The prelude entry — `use core/*` (UTF-8-sorted, numbered files first), then seals Integer/Double so their arithmetic can be optimized. |
 | `core/00-bootstrap.qn` | `true`/`false`/`nil` behavior, `Object`, `Mixin`, the `Error` hierarchy, `Block` loops (`whileDo:`, `whileDefinedDo:`), numeric helpers, the `ANSI` class. |
 | `core/01-case.qn` | `Case` and `Object#case:` pattern matching (built on the `~` match operator). |
 | `core/02-iterate.qn` | The `Iterate` mixin and every combinator, plus `Generator`, the external `Iterator`, and `Set` algebra (`union:`/`intersection:`/…). |
-| `core/03-number_range.qn` | `NumberRange` (`a..b`, end-exclusive): `each:`, `~` containment. |
 | `core/04-string.qn` | Splitting and padding conveniences over the native String primitives. |
 | `core/05-async.qn` | `Async` helpers (`joinAll:`) over the native `Async`/`Task` scheduler primitives. |
 | `core/06-io.qn` | `[IO]Stdout`/`[IO]Stderr` constants, `[IO]Stdin` delegators, the one-shot `[IO]File.read:`/`write:to:`/`append:to:`, and the `Iterate`-able `[IO]Folder`. |
@@ -525,6 +536,7 @@ MyFile <- [IO]File;     "* aliasing is just an ordinary definition — not a `us
 | `core/10-parallel.qn` | The `parallelCollect:`/`parallelReduce:` combinators — a lazily-started pool of worker isolates behind the plain List API. |
 | `core/11-plan.qn` | `Plan` — the lazy join graph: compose `task:`/`thread:`/`process:` leaves with `all:`/`any:`, then `await`. |
 | `core/12-os.qn` | Conveniences over the native `[OS]` namespace (`[OS]Env.at:ifAbsent:`, iteration). |
+| `core/range.qn` | `NumberRange` (`a..b` on numbers) and `DateRange` (`d1..d2` on `Date`s, one day per step or any `Span` via `step:`), both end-exclusive: `each:`, `~` containment. |
 | `core/tcp_server.qn` | `TcpServer` — a minimal concurrent accept-loop server (`start:`/`stop`/`join`). |
 | `net/http.qn` | `[HTTP]Client` — an HTTP/1.1 client in pure Quoin over `TcpSocket`/`TlsSocket` (so HTTPS falls out for free). |
 | `net/websocket.qn` | `WebSocket` — an RFC 6455 client in pure Quoin over the same sockets (`wss://` included); masked frames, reassembled fragments, auto-pong, the close handshake. |
