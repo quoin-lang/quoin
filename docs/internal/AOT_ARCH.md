@@ -380,25 +380,60 @@ minimizes how often hot paths cross it.
 
    > **Tracked as #73** — Collector revisit: generational GC gated on native execution.
 
-7. **VM statistics surface (wanted eventually, wider than AOT).** Expose
-   the engine's own behavior as *fast* always-on counters — plain `u64`s
-   bumped on the relevant paths, near-zero cost, no sampling: GC
-   (collections, debt cycles, bytes/objects allocated, pacing), dispatch
-   (IC hits/misses, global-cache hits, megamorphic sites), compile-time
-   decisions (methods inlined, devirt ops emitted), and AOT (candidates
-   found/compiled/refused + why, fuel yields, depth-guard trips,
-   registry size). The AOT slice of this SHIPPED as `VM.stats` (a Map of
-   sections; `'aot'` = compiled/refused/skipped + per-kind counts) and
-   `VM.aotRefusals` (the per-member drill-down) — src/runtime/vm_stats.rs,
-   backed by `RefusalKind`-tagged refusals and recorded candidacy skips in
-   src/codegen/mod.rs. GC/dispatch/compile-time sections remain future
-   work and slot into the same section Map. A regression test can assert
-   "this method compiled" (tests/vm_stats.rs), and `bench/run.py` could
-   collect the counters per run.
-   AOT landed its counters early rather than retrofitting;
-   the full surface is its own small design pass.
+7. **VM statistics surface — DONE (#70).** The engine exposes its own
+   behavior as *fast* always-on counters — plain `u64`s bumped on the
+   relevant paths, no sampling and no env gate. This section used to say
+   "near-zero cost"; measured, it is **~0.94%** on dispatch-heavy
+   microbenchmarks (≈0.58% the per-send IC bumps, ≈0.36% the collector pump,
+   ≈0 the compile counters — profiling/vm-stats-counters/notes.md). That was
+   accepted deliberately over gating the dispatch section behind a flag: a
+   gated counter only answers questions from runs somebody already decided to
+   instrument, which is the opposite of the point. `VM.stats`
+   is a Map of sections (src/runtime/vm_stats.rs). Every section opens with a
+   `scope` of `'process'` or `'vm'`, because sections are read side by side
+   out of one Map and are not all measured against the same denominator.
 
-   > **Tracked as #70** — Extend VM.stats with GC, dispatch, and compile-time counter sections.
+   That split is forced, not stylistic. The compile and JIT tiers cache their
+   artifacts per process and reuse them across VM sessions
+   (src/runtime/unit_cache.rs, `codegen::registry`), so a per-VM reading of
+   them would be near-zero for every session after the first while it ran
+   fully compiled code — misleading, not merely differently scoped.
+   Everything that *can* be per-VM is.
+
+   - `'aot'` (`scope: process`) — the native translator: compiled/refused/
+     skipped + per-kind counts, backed by `RefusalKind`-tagged refusals and
+     recorded candidacy skips in src/codegen/mod.rs, with `VM.aotRefusals` as
+     the per-member drill-down. Process-wide atomics.
+   - `'compile'` (`scope: process`) — the BYTECODE compiler's decisions
+     (src/compiler/stats.rs): `methodsInlined`, `devirtOps`,
+     `controlFlowInlined`. A different tier from `'aot'`: these are
+     unconditional front-end lowerings, so they fill in under `QN_AOT=0` too.
+   - `'dispatch'` (`scope: vm`) — this VM's IC and global-cache traffic
+     (src/vm/counters.rs): hits/misses/fills, `icFlips`, `megamorphic`,
+     `cacheHits`/`cacheMisses`. `Cell<u64>` on `VmState`, since the bump
+     sites already hold `&self`. "Megamorphic" is not otherwise a state this
+     VM has — the IC is strictly monomorphic — so it is derived from a
+     saturating per-slot flip count riding in `ICSlot`'s existing padding
+     (`ic_slot_flips_ride_in_padding` pins that it stays free).
+   - `'gc'` (`scope: vm`) — collections/pumps/phase plus the live heap numbers
+     `gc_arena` already tracks per arena (`liveObjects`/`liveBytes`/`debt`)
+     and the pacing knob. On `VmState` behind an `Rc`, because the collector
+     is pumped from the driver loops holding `&mut Arena` *outside*
+     `mutate_root`, where the root is unreachable: each driver pulls the
+     handle once via the cheap shared `Arena::mutate` and passes it to
+     `pump_collector`. (A thread-local would have been less plumbing and was
+     the first cut — but one thread drives many arenas, e.g. a
+     `qn doc --check` run is hundreds of sessions, so `'gc'` would have
+     accumulated across all of them while `'dispatch'` reset per session.
+     `gc_counters_are_per_vm_not_per_thread` pins it.) `collections` is a
+     floor: `collect_debt` can open and close a cycle inside one call,
+     invisible to the phase sample. Exactness would mean driving with
+     `cycle_debt`, a pacing change deliberately not bundled into an
+     observability one.
+
+   Regression tests assert "this method compiled", every section's scope, and
+   the shape of each (tests/vm_stats.rs). `bench/run.py` could still collect
+   the counters per run — not wired up.
 
 8. **Block templates.** Blocks passed to combinators are never candidates:
    `value:` enforces nothing, so their typed params are beliefs, not the

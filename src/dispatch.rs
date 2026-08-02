@@ -562,8 +562,10 @@ impl<'gc> VmState<'gc> {
         if let Some(k) = key
             && let Some(cached) = self.dispatch_cache.entries.get(&k)
         {
+            self.counters.note_cache_hit();
             return Ok(*cached);
         }
+        self.counters.note_cache_miss();
 
         // Miss: walk, tracking whether any guarded candidate was examined. Save and
         // restore `dispatch_uncacheable` so nested sends fired *by* a guard (which run

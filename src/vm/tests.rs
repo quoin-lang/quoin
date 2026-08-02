@@ -2344,3 +2344,53 @@ fn block_speculation_tier_shapes() {
         ));
     });
 }
+
+/// `flips` (the megamorphic metric, `vm/counters.rs`) must ride in the padding the
+/// four existing `u8`s already leave. An `ICSlot` array is allocated per executing
+/// template and probed on every send, so growing the slot costs both memory and
+/// probe cache misses on the hottest path in the VM. Compared against the same
+/// layout minus the field rather than a magic number, so it keeps meaning
+/// something if `Callable` ever changes size.
+#[test]
+fn ic_slot_flips_ride_in_padding() {
+    #[allow(dead_code)]
+    struct WithoutFlips<'gc> {
+        epoch: u64,
+        recv_kind: u8,
+        recv_ptr: usize,
+        n_args: u8,
+        arg_kinds: [u8; IC_MAX_ARGS],
+        arg_ptrs: [usize; IC_MAX_ARGS],
+        callable: Option<Callable<'gc>>,
+    }
+    assert_eq!(
+        std::mem::size_of::<ICSlot<'_>>(),
+        std::mem::size_of::<WithoutFlips<'_>>(),
+        "adding ICSlot::flips grew the slot"
+    );
+}
+
+/// The `'gc'` counters must belong to the VM, not the thread. One thread drives
+/// many arenas in exactly the cases the unit cache calls out — a
+/// `qn doc --check` run is hundreds of sessions on one thread — and a `'gc'`
+/// section that accumulated across all of them while `'dispatch'` reset per
+/// session would put two different denominators in one Map.
+#[test]
+fn gc_counters_are_per_vm_not_per_thread() {
+    let mut first =
+        Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, VmOptions::default()));
+    let second = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, VmOptions::default()));
+    let first_counters = first.mutate(|_mc, vm| vm.gc_counters.clone());
+    let second_counters = second.mutate(|_mc, vm| vm.gc_counters.clone());
+
+    for _ in 0..5 {
+        counters::pump_collector(&mut first, &first_counters);
+    }
+
+    assert_eq!(first_counters.snapshot(first.metrics()).pumps, 5);
+    assert_eq!(
+        second_counters.snapshot(second.metrics()).pumps,
+        0,
+        "a second VM on the same thread must not inherit the first's collector counters"
+    );
+}

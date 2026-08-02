@@ -98,7 +98,9 @@ observing counts, promotions, the top observed kind-profiles, and the
 process-wide `N compiled, M refused` totals. The same aggregates — plus the
 per-kind refusal/skip breakdown and the per-member drill-down — are available
 to programs as `VM.stats` / `VM.aotRefusals` (src/runtime/vm_stats.rs), so a
-test can assert "this method compiled" without scraping stderr.
+test can assert "this method compiled" without scraping stderr. Turning the AOT
+tier off does not blank the whole surface: `VM.stats` → `'compile'` counts the
+bytecode compiler's own inlining and devirtualization, which run regardless.
 
 ### `QN_AOT_DUMP`
 **A selector name, or `1`.** Read in `src/codegen/translate.rs`. With a
@@ -176,10 +178,13 @@ Also feeds the compiled tier's fuel budget (checkpoints per
 harness lives in `profiling/batch-sweep/`.
 
 ### `QN_GC_SLEEP`
-**Float, default 4.0.** Read in `src/vm.rs` (`gc_pacing`). gc-arena pacing
+**Float, default 4.0.** Read in `src/vm/mod.rs` (`gc_pacing`). gc-arena pacing
 `sleep_factor` — how much allocation headroom the collector grants between
 collection work (PR 37). Higher = fewer collections, more memory; the default
-was chosen by measurement. Ignored under `QN_GC_STRESS` (see above).
+was chosen by measurement. Ignored under `QN_GC_STRESS` (see above). The
+resulting behaviour is readable from a program: `VM.stats` → `'gc'` reports
+collections, collector pumps, live objects/bytes, allocation debt, and the
+`sleepFactor` in force.
 
 ### `QN_BATCH_STATS`
 **Truthy.** Read in `src/tuning.rs` (`batch_stats`). Makes `run_vm_loop`

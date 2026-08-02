@@ -1,9 +1,13 @@
 //! `VM` — runtime self-introspection: the AOT coverage counters the codegen
 //! module keeps process-wide, plus the compute-offload pool's counters:
 //!
-//! - `VM.stats` -> a Map of sections (only `'aot'` today, shaped so `'gc'` /
-//!   `'dispatch'` can join later without breaking callers):
-//!   `#{ 'aot': #{ 'compiled': n 'refused': n 'skipped': n 'reasons': #{ kind: count } } }`
+//! - `VM.stats` -> a Map of sections:
+//!   `#{ 'aot': #{ 'scope': 'process' 'compiled': n 'refused': n … } … }`
+//!   Every section opens with a `scope` key, because they are read side by side
+//!   out of one Map and they are NOT all measured against the same denominator:
+//!   `'aot'`, `'compile'`, `'compute'` and `'workers'` are `'process'`;
+//!   `'dispatch'`, `'gc'` and `'pins'` are `'vm'`. That split is forced, not
+//!   stylistic — see the `PROCESS` constant below.
 //! - `VM.aotRefusals` -> the drill-down: a List of
 //!   `#{ 'selector': s 'kind': k 'reason': why }`, one per distinct refusal/skip.
 //!
@@ -58,6 +62,28 @@ fn fmt_bytes(b: u64) -> String {
     }
 }
 
+/// Scope markers for the `scope` key every section carries. Sections are read
+/// side by side out of one Map, so which denominator a number is measured
+/// against has to be answerable from the data, not just the prose.
+///
+/// `PROCESS` is not a convention — it is forced. The compile and JIT tiers cache
+/// their artifacts per process and reuse them across VM sessions
+/// (`src/runtime/unit_cache.rs`, `codegen::registry`), so a per-VM reading would
+/// be near-zero for every session after the first while it ran fully compiled
+/// code. Likewise the offload pool and worker registry are genuinely one per
+/// process.
+const PROCESS: &str = "process";
+/// This VM's own runtime state: its dispatch caches, its arena, its pin table.
+const VM: &str = "vm";
+
+fn scope<'gc>(
+    vm: &VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    which: &str,
+) -> (String, Value<'gc>) {
+    ("scope".to_string(), vm.new_string(mc, which.to_string()))
+}
+
 /// The `'aot'` section of `VM.stats`.
 fn aot_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
     let (compiled, _refused_events) = codegen::compile_totals();
@@ -81,6 +107,7 @@ fn aot_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'g
     }
 
     let aot = vec![
+        scope(vm, mc, PROCESS),
         (
             "enabled".to_string(),
             vm.new_bool(mc, crate::tuning::aot_enabled()),
@@ -119,12 +146,104 @@ fn aot_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'g
     vm.new_map(mc, aot)
 }
 
+/// The `'compile'` section: what the BYTECODE compiler decided, a different tier
+/// from `'aot'`'s native translator — these are unconditional front-end lowerings,
+/// so they fill in under `QN_AOT=0` too (`src/compiler/stats.rs`).
+fn compile_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
+    let (inlined, devirt_ops, control_flow) = crate::compiler::stats::totals();
+    let m = vec![
+        scope(vm, mc, PROCESS),
+        ("methodsInlined".to_string(), vm.new_int(mc, inlined as i64)),
+        ("devirtOps".to_string(), vm.new_int(mc, devirt_ops as i64)),
+        (
+            "controlFlowInlined".to_string(),
+            vm.new_int(mc, control_flow as i64),
+        ),
+    ];
+    vm.new_map(mc, m)
+}
+
+/// The `'dispatch'` section: this VM's method-dispatch counters
+/// (`src/vm/counters.rs`). `cacheEntries` and `epoch` are read live off the
+/// dispatch cache rather than counted — the size of the memo table and the
+/// invalidation generation it is on.
+fn dispatch_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
+    let c = &vm.counters;
+    let m = vec![
+        scope(vm, mc, VM),
+        ("icHits".to_string(), vm.new_int(mc, c.ic_hits.get() as i64)),
+        (
+            "icMisses".to_string(),
+            vm.new_int(mc, c.ic_misses.get() as i64),
+        ),
+        (
+            "icFills".to_string(),
+            vm.new_int(mc, c.ic_fills.get() as i64),
+        ),
+        (
+            "icFlips".to_string(),
+            vm.new_int(mc, c.ic_flips.get() as i64),
+        ),
+        (
+            "megamorphic".to_string(),
+            vm.new_int(mc, c.megamorphic.get() as i64),
+        ),
+        (
+            "cacheHits".to_string(),
+            vm.new_int(mc, c.cache_hits.get() as i64),
+        ),
+        (
+            "cacheMisses".to_string(),
+            vm.new_int(mc, c.cache_misses.get() as i64),
+        ),
+        (
+            "cacheEntries".to_string(),
+            vm.new_int(mc, vm.dispatch_cache.entries.len() as i64),
+        ),
+        (
+            "epoch".to_string(),
+            vm.new_int(mc, vm.dispatch_epoch as i64),
+        ),
+    ];
+    vm.new_map(mc, m)
+}
+
+/// The `'gc'` section: the collector's cumulative counters (this THREAD's — see
+/// `src/vm/counters.rs` for why they can't hang off the VM) plus the live heap
+/// numbers `gc_arena` already tracks, read straight off this arena's metrics.
+/// `collections` is a floor: `collect_debt` can open and close a cycle inside one
+/// call, which the before/after phase sample can't see.
+fn gc_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
+    let s = vm.gc_counters.snapshot(mc.metrics());
+    let m = vec![
+        scope(vm, mc, VM),
+        (
+            "collections".to_string(),
+            vm.new_int(mc, s.collections as i64),
+        ),
+        ("pumps".to_string(), vm.new_int(mc, s.pumps as i64)),
+        ("phase".to_string(), vm.new_string(mc, s.phase.to_string())),
+        (
+            "liveObjects".to_string(),
+            vm.new_int(mc, s.live_objects as i64),
+        ),
+        ("liveBytes".to_string(), vm.new_int(mc, s.live_bytes as i64)),
+        ("debt".to_string(), vm.new_int(mc, s.debt as i64)),
+        (
+            "sleepFactor".to_string(),
+            vm.new_double(mc, crate::vm::gc_pacing().sleep_factor),
+        ),
+    ];
+    vm.new_map(mc, m)
+}
+
 /// The `'compute'` section: the offload pool's counters (submitted /
 /// completed jobs, plus gated ops that ran inline — below `QN_COMPUTE_MIN`
 /// or with the pool disabled).
 fn compute_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
     let (submitted, completed, inline) = crate::compute::stats();
     let m = vec![
+        scope(vm, mc, PROCESS),
         ("submitted".to_string(), vm.new_int(mc, submitted as i64)),
         ("completed".to_string(), vm.new_int(mc, completed as i64)),
         ("inline".to_string(), vm.new_int(mc, inline as i64)),
@@ -141,6 +260,7 @@ fn compute_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Valu
 fn workers_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
     let (spawned, completed, messages) = crate::worker::stats();
     let m = vec![
+        scope(vm, mc, PROCESS),
         ("spawned".to_string(), vm.new_int(mc, spawned as i64)),
         ("completed".to_string(), vm.new_int(mc, completed as i64)),
         ("messages".to_string(), vm.new_int(mc, messages as i64)),
@@ -154,7 +274,10 @@ fn workers_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Valu
 /// it: the extension handle table (wire-visible generational handles) and
 /// the installed service classes (a program-lifetime keyed registry).
 fn pins_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
-    let mut m = vec![("live".to_string(), vm.new_int(mc, vm.pins.live() as i64))];
+    let mut m = vec![
+        scope(vm, mc, VM),
+        ("live".to_string(), vm.new_int(mc, vm.pins.live() as i64)),
+    ];
     for (kind, n) in vm.pins.counts_by_kind() {
         m.push((kind.to_string(), vm.new_int(mc, n as i64)));
     }
@@ -580,6 +703,9 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
         .class_method("stats", |vm, mc, _receiver, _args| {
             let sections = vec![
                 ("aot".to_string(), aot_section(vm, mc)),
+                ("compile".to_string(), compile_section(vm, mc)),
+                ("dispatch".to_string(), dispatch_section(vm, mc)),
+                ("gc".to_string(), gc_section(vm, mc)),
                 ("compute".to_string(), compute_section(vm, mc)),
                 ("workers".to_string(), workers_section(vm, mc)),
                 ("pins".to_string(), pins_section(vm, mc)),
@@ -588,14 +714,26 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
         })
         .doc(
             "The VM's counters as a Map of sections: 'aot' (compiled / refused / skipped \
-             plus per-reason counts), 'compute' (offload-pool jobs), 'workers' (isolates \
-             spawned / completed, messages copied), 'pins' (live GC pins per owner kind, \
-             plus the extension handle table and installed service classes -- every \
-             Value-retaining registry on one dashboard). `compiled` counts translation \
-             events; `refused` / `skipped` count \
-             distinct members from a bounded log -- counters, not ledgers.\n\n\
+             plus per-reason counts), 'compile' (bytecode-compiler decisions -- methods \
+             inlined, devirtualized ops, fused control flow), 'dispatch' (inline-cache \
+             hits / misses / flips, megamorphic sites, global method-cache hits), 'gc' \
+             (collections, live objects / bytes, allocation debt, pacing), 'compute' \
+             (offload-pool jobs), 'workers' (isolates spawned / completed, messages \
+             copied), 'pins' (live GC pins per owner kind, plus the extension handle \
+             table and installed service classes -- every Value-retaining registry on \
+             one dashboard).\n\n\
+             Every section opens with a 'scope' saying what its numbers are measured \
+             against, since they are not all the same: 'process' for 'aot' / 'compile' / \
+             'compute' / 'workers' -- the compile and JIT tiers cache their work per \
+             process and reuse it across VMs, so a per-VM reading would be near zero for \
+             every VM after the first -- and 'vm' for 'dispatch' / 'gc' / 'pins', which \
+             are one VM's own runtime state.\n\n\
+             `compiled` counts translation events; `refused` / `skipped` count distinct \
+             members from a bounded log, and gc `collections` misses a cycle that opens \
+             and closes inside one collector call -- counters, not ledgers.\n\n\
              ```\n\
-             VM.stats.keys    \"* -> #(aot compute workers pins)\n\
+             VM.stats.keys                     \"* -> #(aot compile dispatch gc compute workers pins)\n\
+             (VM.stats.at:'gc').at:'scope'     \"* -> 'vm'\n\
              ```",
         )
         // `VM.aotRefusals` -> one Map per distinct refusal/skip, for finding

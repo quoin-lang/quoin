@@ -603,6 +603,9 @@ fn drive_to_completion<F: DriverFrontend>(
     // socket spawned on one line, or a file/connection opened on it, must still be reachable on the
     // next. (A single file/`-e` run drives once, so this is equivalent to a fresh backend there.)
     let backend = arena.mutate_root(|_mc, vm| vm.io.backend.clone());
+    // Same shape, for the `'gc'` section: the counters live on the root, but the
+    // collector is pumped from out here where the root is unreachable.
+    let gc_counters = arena.mutate(|_mc, vm| vm.gc_counters.clone());
     let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
     let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
     // The wake log (`replay.rs`): record/replay hooks over the three decision streams —
@@ -1139,7 +1142,7 @@ fn drive_to_completion<F: DriverFrontend>(
             }
             step_count += 1;
             if crate::tuning::gc_stress() || step_count % 10 == 0 {
-                arena.collect_debt();
+                crate::vm::counters::pump_collector(arena, &gc_counters);
                 // Reap fds whose handle was closed or collected — both enqueue on
                 // `socket_reap`; close them now, outside the arena borrow.
                 let reaped: Vec<StreamId> =
