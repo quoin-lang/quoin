@@ -34,6 +34,7 @@ use scope::Scope;
 mod class_info;
 mod devirt;
 mod inlining;
+pub mod stats;
 
 /// Compile-time context for the class body currently being compiled (Slice 2b). Pushed
 /// on a stack while compiling a class def / extension; used to type self-sends by their

@@ -117,6 +117,9 @@ pub fn run_source(
         vm
     });
     arena.metrics().set_pacing(crate::vm::gc_pacing());
+    // The `'gc'` section's counters live on the root, but the collector is pumped
+    // from out here where the root is unreachable — take the handle once.
+    let gc_counters = arena.mutate(|_mc, vm| vm.gc_counters.clone());
 
     let batch = crate::tuning::step_batch();
     let mut batches_left = cfg.max_batches;
@@ -149,7 +152,9 @@ pub fn run_source(
             });
             drain_output(&mut arena, on_output);
             match step {
-                StepOutcome::Running => arena.collect_debt(),
+                StepOutcome::Running => {
+                    crate::vm::counters::pump_collector(&mut arena, &gc_counters)
+                }
                 StepOutcome::Done(end) => break end,
             }
         };

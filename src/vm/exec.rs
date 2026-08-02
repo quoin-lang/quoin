@@ -831,6 +831,7 @@ impl<'gc> VmState<'gc> {
         let ic = self.ic_cell_by_id(mc, tid);
         let method = match self.ic_probe(ic, ip, receiver, &args) {
             Some(c) => {
+                self.counters.note_ic_hit();
                 // D2 gap (found by D3b): a caller that TIERS UP mid-run has
                 // warm interpreted ICs, so the cold-arm fill below never
                 // runs and its site cells stay cold forever — the D2 fast
@@ -849,6 +850,7 @@ impl<'gc> VmState<'gc> {
                 Some(c)
             }
             None => {
+                self.counters.note_ic_miss();
                 let m = self.lookup_method(mc, receiver, selector, &args)?;
                 if let Some(c) = &m {
                     self.ic_fill_cell(mc, ic, bc_len, ip, receiver, selector, &args, *c);
@@ -1005,8 +1007,10 @@ impl<'gc> VmState<'gc> {
                 n_args: 0,
                 arg_kinds: [0; IC_MAX_ARGS],
                 arg_ptrs: [slot_idx, 0],
+                flips: 0,
                 callable: None,
             },
+            &self.counters,
         );
     }
 
@@ -1034,6 +1038,7 @@ impl<'gc> VmState<'gc> {
                 n_args: 0,
                 arg_kinds: [0; IC_MAX_ARGS],
                 arg_ptrs: [slot_idx, 0],
+                flips: 0,
                 callable: None,
             };
         }
@@ -1133,8 +1138,10 @@ impl<'gc> VmState<'gc> {
                     n_args: 0,
                     arg_kinds: [0; IC_MAX_ARGS],
                     arg_ptrs: [usize::from(verdict), 0],
+                    flips: 0,
                     callable: None,
                 },
+                &self.counters,
             );
         }
         verdict
@@ -1290,8 +1297,10 @@ impl<'gc> VmState<'gc> {
                 n_args: args.len() as u8,
                 arg_kinds,
                 arg_ptrs,
+                flips: 0,
                 callable: Some(callable),
             },
+            &self.counters,
         );
     }
 
@@ -1300,13 +1309,35 @@ impl<'gc> VmState<'gc> {
         cell: Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>,
         bc_len: usize,
         ip: usize,
-        new_slot: ICSlot<'gc>,
+        mut new_slot: ICSlot<'gc>,
+        counters: &crate::vm::counters::DispatchCounters,
     ) {
         let mut cache = cell.borrow_mut(mc);
         if cache.is_none() {
             *cache = Some(vec![ICSlot::empty(); bc_len].into_boxed_slice());
         }
         if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
+            // Dispatch accounting (`vm/counters.rs`), for SEND entries only: field
+            // and fused-`new` verdict entries share this writer but carry no
+            // `callable`, are never served by `ic_probe`, and would otherwise pad
+            // the fill count with something that isn't a method resolution.
+            //
+            // A flip is a *live* entry (filled, still on the current epoch)
+            // displaced by a different type shape — a site the one-slot cache
+            // cannot serve. Refilling an empty or epoch-stale slot is not a flip.
+            // The count carries forward regardless: how polymorphic a site is
+            // doesn't reset because a class table changed under it.
+            if new_slot.callable.is_some() {
+                new_slot.flips = slot.flips;
+                if slot.callable.is_some()
+                    && slot.epoch == new_slot.epoch
+                    && !slot.shape_eq(&new_slot)
+                {
+                    new_slot.flips = slot.flips.saturating_add(1);
+                    counters.note_ic_flip(new_slot.flips);
+                }
+                counters.note_ic_fill();
+            }
             *slot = new_slot;
         }
     }
@@ -1359,8 +1390,10 @@ impl<'gc> VmState<'gc> {
                 n_args: args.len() as u8,
                 arg_kinds,
                 arg_ptrs,
+                flips: 0,
                 callable: Some(callable),
             },
+            &self.counters,
         );
     }
 
@@ -1410,8 +1443,10 @@ impl<'gc> VmState<'gc> {
 
         // Inline-cache fast path: a hit skips `lookup_method`'s key-build + hash + hashmap.
         if let Some(callable) = self.ic_probe(caller_ic, site_ip, receiver, &args) {
+            self.counters.note_ic_hit();
             return self.dispatch_send_rooted(mc, callable, receiver, args, selector, recv_start);
         }
+        self.counters.note_ic_miss();
 
         // `last_send_args` is read only by the stack-trace formatter, and only for an
         // innermost send that fails *in place* (no callee frame of its own): a failed

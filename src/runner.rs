@@ -1752,6 +1752,9 @@ impl VmRunner {
         selector: &str,
         arg_ints: Vec<i64>,
     ) -> (u128, usize, usize) {
+        // The `'gc'` section's counters live on the root; the collector is pumped
+        // from out here, where the root is unreachable.
+        let gc_counters = arena.mutate(|_mc, vm| vm.gc_counters.clone());
         let _initial_frame_count = arena.mutate_root(|mc, vm| {
             let receiver = vm
                 .globals
@@ -1860,7 +1863,7 @@ impl VmRunner {
                 Ok(false) => {
                     step_count += 1;
                     if crate::tuning::gc_stress() || step_count % 10 == 0 {
-                        arena.collect_debt();
+                        crate::vm::counters::pump_collector(arena, &gc_counters);
                     }
                 }
                 Err(e) => {
@@ -1887,6 +1890,7 @@ impl VmRunner {
             vm
         });
         arena.metrics().set_pacing(crate::vm::gc_pacing());
+        let gc_counters = arena.mutate(|_mc, vm| vm.gc_counters.clone());
 
         let mut aborted = false;
         for ast in ast_iter {
@@ -1915,7 +1919,7 @@ impl VmRunner {
                     Ok(ExecutionStatus::Running) => {
                         step_count += 1;
                         if crate::tuning::gc_stress() || step_count % 10 == 0 {
-                            arena.collect_debt();
+                            crate::vm::counters::pump_collector(&mut arena, &gc_counters);
                         }
                     }
                     Ok(ExecutionStatus::Finished) => {

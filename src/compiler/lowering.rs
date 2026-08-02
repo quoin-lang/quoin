@@ -410,33 +410,39 @@ impl Compiler {
         // 0-arg, declaration-free block args into native jumps — no block allocation, no
         // dispatch, no block-invocation frame. Falls through to a normal send otherwise.
         if self.try_compile_inlined_conditional(call, bytecode)? {
+            crate::compiler::stats::note_control_flow_inlined();
             return Ok(());
         }
         if self.try_compile_inlined_while(call, bytecode)? {
+            crate::compiler::stats::note_control_flow_inlined();
             return Ok(());
         }
         // B1 (docs/internal/BLOCK_AOT_ARCH.md §3): fuse `recv.each:{ |x| … }` into a guarded
         // native index loop — closure-free per element on any native-List receiver,
         // with the real send as the cold path (the guard IS the dispatch).
         if self.try_compile_inlined_each(call, bytecode)? {
+            crate::compiler::stats::note_control_flow_inlined();
             return Ok(());
         }
         // M2 (docs/internal/MATERIALIZATION_ARCH.md): fuse `X.new:{ f=e; … }` on the plain-config
         // shape into a guarded inline instantiation — no config closure, no config frame,
         // no interpreted stores, with the real send as the cold path.
         if self.try_compile_fused_instantiation(call, bytecode)? {
+            crate::compiler::stats::note_control_flow_inlined();
             return Ok(());
         }
         // Phase 5·1/5·2: inline a self-send to a sealed class's own method with an inline-safe body
         // (`self.width` → the field load; `self.area` → `.width * .height`) — no receiver push, no
         // dispatch. Before the receiver is evaluated, since the inline replaces it entirely.
         if self.try_inline_self_send(call, is_self, bytecode)? {
+            crate::compiler::stats::note_inlined();
             return Ok(());
         }
         // Phase 5·3/5·3b/5·3c: inline an explicit-receiver `v.foo` (field accessor, or a computed
         // body with `self` rebound to `v`) to a sealed in-unit class. Before the receiver push, since
         // the inline evaluates `v` itself.
         if self.try_inline_exact_receiver(call, bytecode)? {
+            crate::compiler::stats::note_inlined();
             return Ok(());
         }
 
@@ -567,6 +573,7 @@ impl Compiler {
         // so the op is a drop-in replacement.
         if let Some(op) = self.collection_devirt_op(call, &selector, num_components) {
             bytecode.push(op);
+            crate::compiler::stats::note_devirt_op();
             return Ok(());
         }
 
@@ -637,6 +644,7 @@ impl Compiler {
         };
         if let Some(op_instr) = devirt_op {
             bytecode.push(op_instr);
+            crate::compiler::stats::note_devirt_op();
             return Ok(());
         }
 

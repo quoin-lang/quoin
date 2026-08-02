@@ -149,6 +149,14 @@ pub struct ICSlot<'gc> {
     pub arg_kinds: [u8; IC_MAX_ARGS],
     #[collect(require_static)]
     pub arg_ptrs: [usize; IC_MAX_ARGS],
+    /// How many times this site has been overwritten with a *different* live type
+    /// shape — the megamorphic metric behind `VM.stats`' `'dispatch'` section
+    /// (`vm/counters.rs`). Saturating: the only question asked of it is whether it
+    /// crossed `IC_MEGAMORPHIC_FLIPS`. Carried across overwrites (site polymorphism
+    /// is a property of the site, not of the current entry), and it rides in the
+    /// padding the four `u8`s above already leave — see `ic_slot_stays_pointer_sized`.
+    #[collect(require_static)]
+    pub flips: u8,
     pub callable: Option<Callable<'gc>>,
 }
 
@@ -174,8 +182,21 @@ impl<'gc> ICSlot<'gc> {
             n_args: 0,
             arg_kinds: [0; IC_MAX_ARGS],
             arg_ptrs: [0; IC_MAX_ARGS],
+            flips: 0,
             callable: None,
         }
+    }
+
+    /// Do two slots guard on the same receiver + argument type shape? Used only to
+    /// tell a *flip* (a live entry displaced by a different shape) from a refill of
+    /// an empty or epoch-stale slot.
+    #[inline]
+    pub fn shape_eq(&self, other: &Self) -> bool {
+        self.recv_kind == other.recv_kind
+            && self.recv_ptr == other.recv_ptr
+            && self.n_args == other.n_args
+            && self.arg_kinds == other.arg_kinds
+            && self.arg_ptrs == other.arg_ptrs
     }
 }
 
@@ -379,6 +400,7 @@ pub struct VmOptions {
 mod alloc;
 mod call;
 mod class;
+pub mod counters;
 mod error;
 mod exec;
 pub mod scheduler;
@@ -693,6 +715,17 @@ pub struct VmState<'gc> {
     pub output: OutputCapture,
     /// Memoized method resolution ([`DispatchCache`]).
     pub dispatch_cache: DispatchCache<'gc>,
+    /// Always-on dispatch counters behind `VM.stats`' `'dispatch'` section
+    /// ([`counters::DispatchCounters`]). Plain `Cell<u64>` bumps on paths that were
+    /// already branching; nothing reads them but `vm_stats.rs`.
+    #[collect(require_static)]
+    pub counters: counters::DispatchCounters,
+    /// This VM's collector counters (`VM.stats`' `'gc'` section). Behind an `Rc`
+    /// because the driver loop pumps the collector from outside `mutate_root`,
+    /// where this root is unreachable — it pulls a handle once at startup
+    /// (`counters::pump_collector`).
+    #[collect(require_static)]
+    pub gc_counters: std::rc::Rc<counters::GcCounters>,
     /// Shared inline-cache arrays keyed by block-literal template id: every closure
     /// materialized from the same literal gets the same cell, so its call sites stay
     /// warm across re-materialization. Rooted here for the VM's lifetime and ids are
@@ -923,6 +956,8 @@ impl<'gc> VmState<'gc> {
                 entries: FxHashMap::default(),
                 uncacheable: false,
             },
+            counters: counters::DispatchCounters::default(),
+            gc_counters: std::rc::Rc::new(counters::GcCounters::default()),
             // Epoch starts at 1 so the epoch-0 empty slots never spuriously match.
             dispatch_epoch: 1,
             worker_link: None,

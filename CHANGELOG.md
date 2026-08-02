@@ -10,6 +10,31 @@ under **Changed**, with the migration.
 
 ### Added
 
+- **`VM.stats` grew GC, dispatch, and compile-time sections** (#70). The counter
+  surface AOT_ARCH.md has wanted since the AOT slice shipped is now complete:
+  four always-on sections rather than one. `'gc'` reports collections, collector
+  pumps, the current phase, live objects/bytes, allocation debt, and the pacing
+  factor. `'dispatch'` reports inline-cache hits, misses, and fills, plus
+  `icFlips` and `megamorphic` — a count of *call sites* that flip type shape so
+  often the monomorphic IC can never serve them, which is the first time the VM
+  has been able to name them at all. `'compile'` reports what the bytecode
+  compiler decided: methods inlined, ops devirtualized, control flow fused; it
+  is a separate tier from `'aot'`, so it fills in under `QN_AOT=0` too. All of
+  it is plain `u64` bumps with no env gate and no sampling, so a perf question
+  can be answered from any run — including one nobody thought to profile. That
+  costs a measured ~0.94% on dispatch-heavy microbenchmarks, accepted knowingly:
+  a counter you have to switch on can only answer questions you already knew to
+  ask. `VM.stats.keys` is now `#(aot compile dispatch gc compute workers pins)`.
+
+  Every section — including the four that already existed — now opens with a
+  `scope` of `'process'` or `'vm'`. Sections are read side by side out of one
+  Map and are not all measured against the same denominator: `'dispatch'`,
+  `'gc'` and `'pins'` are one VM's own state, while `'aot'`, `'compile'`,
+  `'compute'` and `'workers'` are process-wide because the compile and JIT
+  tiers cache their artifacts across VM sessions — a per-VM reading of those
+  would be near-zero for every session after the first. Existing keys are
+  untouched, so `.at:'compiled'` and friends are unaffected.
+
 - **`Random` — the seedable PRNG the docs already promised** (#146).
   `Random.seed:` answers a deterministic generator: the same seed answers the
   same stream on every platform and every Quoin version (xoshiro256** seeded
