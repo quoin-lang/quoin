@@ -1,3 +1,12 @@
+
+fn catch_unwind_silent<F: FnOnce() -> R + std::panic::UnwindSafe, R>(f: F) -> std::thread::Result<R> {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(f);
+    std::panic::set_hook(prev);
+    result
+}
+
 use crate::ast::NodeValue::*;
 use crate::ast::*;
 use crate::source_info::{ParseError, SourceInfo};
@@ -112,7 +121,7 @@ pub fn try_parse_quoin_string_named(code: &str, filename: &str) -> Result<Node, 
             // process even through `Runtime.eval:` (BUGS.md Findings 4/7).
             // Convert ANY builder panic into a structured, catchable
             // ParseError here — the targeted sites carry good messages.
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            catch_unwind_silent(std::panic::AssertUnwindSafe(|| {
                 parse_program(program_pair, filename, code)
             }))
             .map_err(|payload| {
