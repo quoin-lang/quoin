@@ -1,0 +1,160 @@
+"* The association node (DESIGN.md 6). `u.posts` answers one of these: a
+"* [Strata]Relation on the TARGET model whose plan is already the per-owner
+"* query (WHERE fk = ownerKey). Every combinator goes through derived, which
+"* mints a PLAIN relation from that plan — so a refinement (`u.posts.where:`)
+"* queries for its owner alone. Only the unrefined node overrides toList:
+"* the first force loads the association for the owner's WHOLE hydration
+"* cohort in one IN-query and partitions into every sibling's @rel cache.
+"* The children hydrate as ONE union batch across all owners, so the next
+"* association level batches again: round trips scale with the association
+"* EDGES traversed, never with row count. Batched children come back in
+"* key order (deterministic; refine with orderBy: for anything else).
+"*
+"* belongsTo has no node — the accessor itself is the force point (its
+"* result leaves the lazy world): one IN-query over the cohort's foreign
+"* keys, each owner caching its parent instance, or a memoized nil.
+[Strata]Relation <- [Strata]Assoc <- { |@owner @assocName|
+    .meta <-- {
+        "* -- accessor entry points (from Model#strataAssocFetch:) ---------
+        "* (The constructor block deliberately never shadows a capture by its
+        "* own name — `var owner = owner` in a multi-var block of a package
+        "* unit pins the FIRST invocation's binding; see DESIGN.md 11.)
+        hasMany:meta:for: -> { |name a o|
+            var target = o.class.strataResolve:a
+            target.strataEnsure
+            var fk = target.strataSqlCol:(a.at:'via')
+            var node = .new:{
+                var owner = o
+                var assocName = name
+                var model = target
+                var wheres = #()
+                var params = #()
+                var orders = #()
+                var isDistinct = false
+                var withs = #()
+            }
+            node.strataAddWhere:('("' + fk + '" = ?)') params:#( (o.strataKey) )
+            node.strataRepo:(o.strataRepo)
+            node
+        }
+        belongsTo:meta:for: -> { |name a owner|
+            (owner.strataRelHas?:name).else:{
+                .loadBelongsTo:name meta:a cohort:(owner.strataCohort)
+            }
+            owner.strataRelAt:name
+        }
+
+        "* -- cohort loaders (also the with: preload machinery) ------------
+        "* One IN-query for every owner in the cohort; results partition
+        "* into each owner's @rel (empty lists included, so childless owners
+        "* memoize and never re-query). Answers the union child batch.
+        loadHasMany:meta:cohort:scope: -> { |name a cohort scope|
+            var model = cohort.first.class
+            var target = model.strataResolve:a
+            var fk = target.strataSqlCol:(a.at:'via')
+            var keys = .strataUniq:(cohort.collect:{ |o| o.strataKey })
+            var kids = .strataFetch:target
+             where:fk
+             in:keys
+             repo:(cohort.first.strataRepo)
+             scope:scope
+            var byKey = Map.new
+            kids.each:{ |k|
+                var v = k.row.at:fk
+                (byKey.containsKey?:v).else:{ byKey.at:v put:#() }
+                (byKey.at:v).add:k
+            }
+            cohort.each:{ |o|
+                var mine = byKey.at:(o.strataKey)
+                o.strataRelAt:name put:(mine.defined?.if:{ mine } else:{ #() })
+            }
+            kids
+        }
+        "* One IN-query over the cohort's foreign keys; each owner caches
+        "* its parent (nil for a NULL fk — memoized, containsKey? semantics).
+        "* Answers the distinct parents as a union batch.
+        loadBelongsTo:meta:cohort: -> { |name a cohort|
+            var model = cohort.first.class
+            var target = model.strataResolve:a
+            var fk = model.strataSqlCol:(a.at:'via')
+            var tkey = target.strataMeta.at:'key'
+            var keys = .strataUniq:(cohort.collect:{ |o| o.row.at:fk })
+            var parents = .strataFetch:target
+             where:tkey
+             in:keys
+             repo:(cohort.first.strataRepo)
+             scope:nil
+            var byKey = Map.new
+            parents.each:{ |p| byKey.at:(p.row.at:tkey) put:p }
+            cohort.each:{ |o| o.strataRelAt:name put:(byKey.at:(o.row.at:fk)) }
+            parents
+        }
+
+        "* Run one with: spec against a hydrated cohort: walk the dotted
+        "* path, each level batch-loading across the union of the previous
+        "* one. A scope applies to the last (hasMany) level.
+        preload:cohort: -> { |w cohort|
+            var segs = (w.at:'path').split:'.'
+            var last = segs.count - 1
+            var level = cohort
+            var i = 0
+            segs.each:{ |seg|
+                (level.count > 0).if:{
+                    var model = level.first.class
+                    var a = model.strataAssocMeta:seg
+                    var scope = nil
+                    ((i == last) && ((w.at:'scope').defined?)).if:{
+                        scope = [Strata]Sql.compile:(w.at:'scope') for:(model.strataResolve:a)
+                    }
+                    level = ((a.at:'kind') == 'hasMany')
+                        .if:{ .loadHasMany:seg meta:a cohort:level scope:scope }
+                         else:{ .loadBelongsTo:seg meta:a cohort:level }
+                }
+                i = i + 1
+            }
+            self
+        }
+
+        "* SELECT * FROM target WHERE "fk" IN (…) [AND scope] ORDER BY key,
+        "* through the cohort's hydration repo (else the ambient default);
+        "* hydrated as ONE union batch so the next level batches too.
+        strataFetch:where:in:repo:scope: -> { |target fk keys rp scope|
+            (keys.count == 0).if:{ ^^ #() }
+            var marks = keys.collect:{ |k| '?' }
+            var sql = 'SELECT * FROM "' + target.strataTable + '" WHERE "' + fk + '" IN (' + (marks.join:', ') + ')'
+            var ps = keys.collect:{ |k| k }
+            scope.defined?.if:{
+                sql = sql + ' AND ' + scope.first
+                (scope.second).each:{ |p| ps.add:p }
+            }
+            sql = sql + ' ORDER BY "' + (target.strataMeta.at:'key') + '"'
+            var repo = rp.defined?.if:{ rp } else:{ [Strata]Repo.default }
+            target.strataHydrate:(repo.query:(repo.dialect.placeholders:sql) params:ps) repo:repo
+        }
+
+        "* Distinct non-nil values, first-seen order.
+        strataUniq: -> { |vals|
+            var out = #()
+            var seen = Map.new
+            vals.each:{ |v|
+                (v.defined? && !(seen.containsKey?:v)).if:{
+                    seen.at:v put:true
+                    out.add:v
+                }
+            }
+            out
+        }
+    }
+
+    "* Forcing the unrefined node: cohort-wide load, memoized per owner.
+    toList -> {
+        (@owner.strataRelHas?:@assocName).else:{
+            [Strata]Assoc
+                .loadHasMany:@assocName
+                 meta:(@owner.class.strataAssocMeta:@assocName)
+                 cohort:@owner.strataCohort
+                 scope:nil
+        }
+        @owner.strataRelAt:@assocName
+    }
+}

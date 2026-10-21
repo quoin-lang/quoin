@@ -1,0 +1,77 @@
+"* A repo = one ADBC connection + a dialect. Binding is ambient-default with
+"* per-query override (DESIGN.md 7): [Strata]Repo.default:repo once, route
+"* exceptions with relation.via:otherRepo. Module state is per-isolate, so
+"* workers set their own.
+"*
+"* The adbc extension package loads LAZILY at first construction (not at
+"* `use strata:*`): the pure layers work without the extension binary or a
+"* database driver installed, and the resolution error surfaces at the moment
+"* a connection is actually wanted.
+[Strata]Repo <- { |@conn @dialect @queries|
+    .meta <-- {
+        sqlite: -> { |path|
+            .strataAdbc;
+            .conn:(([ADBC]Database.sqlite:path).connect) dialect:[Strata]SqliteDialect.new
+        }
+        sqliteMemory -> {
+            .strataAdbc;
+            .conn:([ADBC]Database.sqliteMemory.connect) dialect:[Strata]SqliteDialect.new
+        }
+        postgres: -> { |connString|
+            .strataAdbc;
+            .conn:(([ADBC]Database.postgres:connString).connect) dialect:[Strata]PostgresDialect.new
+        }
+        "* Escape hatch: any [ADBC]Connection with an explicit dialect.
+        conn:dialect: -> { |c d| .new:{ var conn = c; var dialect = d; var queries = 0 } }
+
+        "* Load the adbc extension package on demand (standard `use`
+        "* resolution: ./quoin_packages, QUOIN_PATH, QUOIN_HOME).
+        strataAdbc -> {
+            (Class.exists?:#'[ADBC]Database').else:{ Runtime.eval:'use adbc:*' }
+        }
+
+        "* The ambient repo relations force against unless routed with via:.
+        default: -> { |r| [Strata]State.at:'defaultRepo' put:r; r }
+        default -> {
+            var r = [Strata]State.at:'defaultRepo'
+            r.defined?.else:{
+                [Strata]Error.throw:'no default repo — [Strata]Repo.default:aRepo first, or route the relation with via:'
+            }
+            r
+        }
+    }
+
+    conn -> { @conn }
+    dialect -> { @dialect }
+    "* SELECT round trips this repo has run — the batching invariant (round
+    "* trips scale with association edges, not rows) is pinned on it in tests.
+    queries -> { @queries }
+
+    "* Run a SELECT; rows come back as the driver's row Maps. Driver errors
+    "* re-raise as [Strata]Error carrying the SQL. An empty param list must
+    "* not bind at all — ADBC refuses a zero-column bind batch.
+    query:params: -> { |sql ps|
+        @queries = @queries + 1
+        {
+            (ps.count == 0).if:{ (@conn.query:sql).toList }
+                else:{ (@conn.query:sql params:ps).toList }
+        }.catch:{ |e|
+            [Strata]Error.throw:('strata: ' + e.message) sql:sql
+        }
+    }
+    execute: -> { |sql| .execute:sql params:#() }
+    execute:params: -> { |sql ps|
+        {
+            (ps.count == 0).if:{ @conn.execute:sql }
+                else:{ @conn.execute:sql params:ps }
+        }.catch:{ |e|
+            [Strata]Error.throw:('strata: ' + e.message) sql:sql
+        }
+    }
+    "* Commit-on-success / rollback-on-throw, via the ADBC sugar. The block
+    "* receives this repo.
+    transaction: -> { |b|
+        var me = self
+        @conn.transaction:{ b.value:me }
+    }
+}

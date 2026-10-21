@@ -610,6 +610,7 @@ pub fn scan_portable(template: &StaticBlock) -> Result<(Vec<Symbol>, Vec<Namespa
     let mut seen_globals = HashSet::new();
     scan_nest(
         template,
+        ScanMode::Portable,
         &HashSet::new(),
         &mut free_reads,
         &mut seen_reads,
@@ -619,16 +620,65 @@ pub fn scan_portable(template: &StaticBlock) -> Result<(Vec<Symbol>, Vec<Namespa
     Ok((free_reads, globals))
 }
 
+/// Collect a block's free variable names WITHOUT the portability refusals:
+/// every local the block reads or writes that no enclosing shipped scope
+/// binds, in first-touch order. `self`/`@field` access, `^^`, guards, and
+/// definitions are simply skipped — they are not captures, and this scan
+/// serves reflection (`Block#captures`), not shipping. Infallible: with
+/// every refusal arm disarmed, `scan_nest` has no error path left.
+pub fn scan_captures(template: &StaticBlock) -> Vec<Symbol> {
+    let mut free_reads = Vec::new();
+    let mut globals = Vec::new();
+    let mut seen_reads = HashSet::new();
+    let mut seen_globals = HashSet::new();
+    scan_nest(
+        template,
+        ScanMode::FreeReads,
+        &HashSet::new(),
+        &mut free_reads,
+        &mut seen_reads,
+        &mut globals,
+        &mut seen_globals,
+    )
+    .expect("FreeReads scan has no refusal arms");
+    free_reads
+}
+
+/// How `scan_nest` treats the shapes that cannot cross a worker boundary:
+/// `Portable` refuses them (shipping), `FreeReads` skips them (reflection).
+#[derive(Clone, Copy, PartialEq)]
+enum ScanMode {
+    Portable,
+    FreeReads,
+}
+
 fn scan_nest(
     sb: &StaticBlock,
+    mode: ScanMode,
     bound: &HashSet<Symbol>,
     free_reads: &mut Vec<Symbol>,
     seen_reads: &mut HashSet<Symbol>,
     globals: &mut Vec<NamespacedName>,
     seen_globals: &mut HashSet<NamespacedName>,
 ) -> Result<(), String> {
-    if sb.decl_block.is_some() {
+    if sb.decl_block.is_some() && mode == ScanMode::Portable {
         return Err("guarded/typed blocks are not portable".to_string());
+    }
+
+    // A guard's bytecode is part of the block for reflection purposes; the
+    // Portable path never gets here (guarded blocks refused above).
+    if let Some(decl) = &sb.decl_block
+        && mode == ScanMode::FreeReads
+    {
+        scan_nest(
+            decl,
+            mode,
+            bound,
+            free_reads,
+            seen_reads,
+            globals,
+            seen_globals,
+        )?;
     }
 
     let mut defined: HashSet<Symbol> = bound.clone();
@@ -644,7 +694,9 @@ fn scan_nest(
             Instruction::DefineClass { .. }
             | Instruction::DefineMethod(_)
             | Instruction::OverrideMethod(_)
-            | Instruction::ExecuteBlockWithSelf => {
+            | Instruction::ExecuteBlockWithSelf
+                if mode == ScanMode::Portable =>
+            {
                 return Err(
                     "defines a class or method — put definitions in a unit and use \
                      Worker.spawn: instead"
@@ -664,6 +716,9 @@ fn scan_nest(
             return Ok(());
         }
         if s == self_symbol() {
+            if mode == ScanMode::FreeReads {
+                return Ok(()); // `self` is instance state, not a capture
+            }
             return Err("references `self` (instance state is not portable)".to_string());
         }
         if seen_reads.insert(s) {
@@ -691,13 +746,19 @@ fn scan_nest(
             Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s)
                 if !defined.contains(s) && !sb.is_init_literal =>
             {
-                return Err(format!(
-                    "writes captured binding '{}' (the worker gets a snapshot; \
+                if mode == ScanMode::FreeReads {
+                    // A write-captured binding is still a free variable with
+                    // a current value; reflection reports it like a read.
+                    read(*s, &defined, free_reads, seen_reads)?;
+                } else {
+                    return Err(format!(
+                        "writes captured binding '{}' (the worker gets a snapshot; \
                          writes could never reach the original)",
-                    s.as_str()
-                ));
+                        s.as_str()
+                    ));
+                }
             }
-            Instruction::MethodReturn => {
+            Instruction::MethodReturn if mode == ScanMode::Portable => {
                 return Err(
                     "contains a non-local return (^^) — its home method cannot exist \
                      in the worker"
@@ -706,10 +767,12 @@ fn scan_nest(
             }
             Instruction::LoadField(f)
             | Instruction::StoreField(f)
-            | Instruction::StoreFieldKeep(f) => {
+            | Instruction::StoreFieldKeep(f)
+                if mode == ScanMode::Portable =>
+            {
                 return Err(format!("touches instance state (@{f}) — not portable"));
             }
-            Instruction::SendField(f, _, _) => {
+            Instruction::SendField(f, _, _) if mode == ScanMode::Portable => {
                 return Err(format!("touches instance state (@{f}) — not portable"));
             }
             Instruction::LoadGlobal(n) if seen_globals.insert(n.clone()) => {
@@ -720,6 +783,7 @@ fn scan_nest(
         if let Instruction::Push(Constant::Block(inner)) = inst {
             scan_nest(
                 inner,
+                mode,
                 &defined,
                 free_reads,
                 seen_reads,
@@ -730,6 +794,7 @@ fn scan_nest(
         if let Some((_, _, Some(Constant::Block(inner)))) = inst.send_parts() {
             scan_nest(
                 inner,
+                mode,
                 &defined,
                 free_reads,
                 seen_reads,

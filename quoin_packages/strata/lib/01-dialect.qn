@@ -1,0 +1,35 @@
+"* SQL dialects: exactly what the two ADBC drivers genuinely disagree on.
+"* Lowering always emits driver-neutral '?' placeholders and ANSI double-quoted
+"* identifiers (both drivers accept those); a dialect rewrites the placeholders
+"* at force time (PostgreSQL wants $1..$n) so the planner never thinks about
+"* parameter numbering. Insert-id return lands here in slice 3 (RETURNING vs
+"* last_insert_rowid()).
+[Strata]Dialect <- {
+    "* Driver-neutral: '?' placeholders pass through untouched.
+    placeholders: -> { |sql| sql }
+
+    name -> { 'sqlite' }
+}
+
+[Strata]Dialect <- [Strata]SqliteDialect <- {}
+
+[Strata]Dialect <- [Strata]PostgresDialect <- {
+    name -> { 'postgres' }
+
+    "* Rewrite each '?' to $1..$n, left to right. Lowering never emits SQL
+    "* string literals (every value binds as a parameter), so a '?' in the
+    "* statement is always a placeholder — including ones a raw where:params:
+    "* fragment wrote.
+    placeholders: -> { |sql|
+        var out = ''
+        var n = 0
+        (sql.split:'').each:{ |ch|
+            (ch == '?').if:{
+                n = n + 1
+                out = out + '$' + n.s
+            }
+            else:{ out = out + ch }
+        }
+        out
+    }
+}

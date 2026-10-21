@@ -40,6 +40,10 @@ jobs:
       run: cargo nextest run $WORKSPACE
     - name: Run Quoin tests
       run: cargo run --verbose -- test qnlib/tests
+    # Package tests live with their package. They resolve `use strata:*` through the
+    # CWD-anchored ./quoin_packages root, so they run from the repo root like qnlib's.
+    - name: Run Strata package tests
+      run: cargo run --verbose -- test quoin_packages/strata/tests
     # Every fenced example in the reference docs and the language book must run and match
     # its `"* -> value` annotations (docs/internal/DOCS_ARCH.md phase 3 / RELEASE_PREP Tier 2).
     # ~8 minutes when healthy (each example boots a fresh session); a single

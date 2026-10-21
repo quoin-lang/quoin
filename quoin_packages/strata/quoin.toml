@@ -1,0 +1,13 @@
+# The `strata` ORM package — a pure-Quoin [lib] source package over the `adbc`
+# extension (crates/adbc). See DESIGN.md. `use strata:*` loads the units below.
+# The ADBC extension itself is loaded lazily at first [Strata]Repo construction,
+# so the pure layers (model registry, predicate compiler, SQL lowering) work —
+# and test — without the extension binary or a database driver installed.
+
+[package]
+name = "strata"
+version = "0.1.0"
+description = "Strata — a lazy graph-ORM over ADBC: models, relations, batched graph traversal."
+
+[lib]
+root = "lib"

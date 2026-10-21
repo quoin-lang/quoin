@@ -1,0 +1,26 @@
+"* Strata — a lazy graph-ORM over the ADBC extension (DESIGN.md). This unit:
+"* the module registry and the error type.
+"*
+"* Classes have no class-side ivars, so per-model metadata lives in a module
+"* Map keyed by class name (the [Log]State pattern): the binding is constant,
+"* the Map mutates. 'models' maps class name -> #{ table key cols assocs ready },
+"* 'defaultRepo' is the ambient repo [Strata]Repo.default: installs.
+[Strata]State <- #{ 'models': #{} 'defaultRepo': nil }
+
+"* One error class for v1: everything Strata refuses at build time (predicate
+"* compilation, unknown columns, missing repo) or wraps at force time (a driver
+"* error, with the lowered SQL attached for diagnosis).
+Error <- [Strata]Error <- { |@sql|
+    .meta <-- {
+        "* Raise carrying the SQL that was being run.
+        "*
+        "* ```
+        "* { [Strata]Error.throw:'boom' sql:'select 1' }.catch:{ |e| e.sql }    "* -> 'select 1'
+        "* ```
+        throw:sql: -> { |msg s| ^(.new:{ var message = msg; var sql = s }).throw }
+    }
+
+    "* The lowered SQL statement a force-time failure was running, or nil for
+    "* build-time refusals.
+    sql -> { @sql }
+}

@@ -3159,3 +3159,75 @@ fn boundary_send_warns_on_unportable_literal() {
     // The allow pragma silences it like any checker warning.
     assert!(diags("var n = 1; Worker.with:{ n = 2 } \"* allow: portability").is_empty());
 }
+
+#[test]
+fn closed_scan_is_order_sensitive() {
+    // `template_is_closed` gates constant-closure promotion (one cached
+    // instance per VM), so a free-variable read misjudged as bound pins the
+    // FIRST materialization's environment into every later call. The scan
+    // must therefore respect order: a read counts as bound only from its
+    // define onward.
+    fn block_closed(src: &str, literal: &str) -> bool {
+        let node = crate::parser::parse_quoin_string(src);
+        let NodeValue::Program(p) = &node.value else {
+            panic!("expected a program");
+        };
+        let mut c = Compiler::new();
+        let bc = c.compile_program(p).unwrap();
+        fn find(bc: &[Instruction], lit: &str, out: &mut Vec<Arc<StaticBlock>>) {
+            let visit = |b: &Arc<StaticBlock>, out: &mut Vec<Arc<StaticBlock>>| {
+                if b.source_info
+                    .as_ref()
+                    .and_then(|s| s.source_text.as_deref())
+                    == Some(lit)
+                {
+                    out.push(b.clone());
+                }
+                find(&b.bytecode, lit, out);
+            };
+            for inst in bc {
+                if let Instruction::Push(Constant::Block(b)) = inst {
+                    visit(b, out);
+                }
+                if let Some((_, _, Some(Constant::Block(b)))) = inst.send_parts() {
+                    visit(b, out);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        find(&bc.bytecode, literal, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one block matching {literal:?}"
+        );
+        crate::instruction::template_is_closed(&found[0])
+    }
+
+    // The regression: a decl shadowing its own capture reads x BEFORE
+    // defining it — a real free read, so the template is NOT closed. (It was
+    // judged closed, and the promoted closure minted [Strata]Relation nodes
+    // with the first call's model forever after.)
+    assert!(!block_closed(
+        "var f = { |x| { var x = x; var y = 1; x } }",
+        "{ var x = x; var y = 1; x }"
+    ));
+    // Order of the decls does not matter: the x read still precedes x's define.
+    assert!(!block_closed(
+        "var f = { |x| { var y = 1; var x = x; x } }",
+        "{ var y = 1; var x = x; x }"
+    ));
+    // A tail-position self-shadow (DefineLocalKeep) is the same free read.
+    assert!(!block_closed(
+        "var f = { |x| { var x = x } }",
+        "{ var x = x }"
+    ));
+    // A plain capture is of course not closed.
+    assert!(!block_closed("var f = { |x| { x } }", "{ x }"));
+    // Reads AFTER the define are bound: still closed, promotion stays.
+    assert!(block_closed(
+        "var f = { { var t = 1; t } }",
+        "{ var t = 1; t }"
+    ));
+    assert!(block_closed("var f = { { var t = 1 } }", "{ var t = 1 }"));
+}
